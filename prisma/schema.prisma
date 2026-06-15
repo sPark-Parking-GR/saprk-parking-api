@@ -1,0 +1,415 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  USER
+  OPERATOR_STAFF
+  OPERATOR_ADMIN
+  PLATFORM_ADMIN
+}
+
+enum VehicleType {
+  CAR
+  MOTORCYCLE
+  VAN
+  TRUCK
+}
+
+enum OperatorStatus {
+  PENDING
+  VERIFIED
+  SUSPENDED
+}
+
+enum OperatorMemberRole {
+  STAFF
+  ADMIN
+}
+
+enum TariffType {
+  HOURLY
+  DAILY
+  OVERNIGHT
+  FLAT
+}
+
+enum BookingStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  CHECKED_IN
+  CHECKED_OUT
+  CANCELLED
+  EXPIRED
+  REFUND_PENDING
+  REFUNDED
+}
+
+enum SourceChannel {
+  WEB
+  MOBILE
+  API
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum RefundStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+enum CreditTransactionType {
+  CREDIT
+  DEBIT
+  REFUND
+  PROMO
+}
+
+enum PromotionType {
+  STANDARD
+  FEATURED
+  PREMIUM
+}
+
+// ─── User & Auth ──────────────────────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  role          UserRole @default(USER)
+  displayName   String?
+  avatarUrl     String?
+  emailVerified Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  vehicles            Vehicle[]
+  wallet              Wallet?
+  bookings            Booking[]
+  reviews             Review[]
+  operatorMemberships OperatorMembership[]
+
+  @@index([email])
+}
+
+model Vehicle {
+  id        String      @id @default(cuid())
+  userId    String
+  plate     String
+  type      VehicleType
+  label     String?
+  isDefault Boolean     @default(false)
+  createdAt DateTime    @default(now())
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  @@unique([userId, plate])
+  @@index([userId])
+}
+
+// ─── Wallet & Credits ─────────────────────────────────────────────────────────
+
+model Wallet {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  balanceCents Int      @default(0)
+  currency     String   @default("EUR")
+  updatedAt    DateTime @updatedAt
+
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions CreditTransaction[]
+}
+
+model CreditTransaction {
+  id          String                @id @default(cuid())
+  walletId    String
+  amountCents Int
+  type        CreditTransactionType
+  description String?
+  bookingId   String?
+  createdAt   DateTime              @default(now())
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
+}
+
+// ─── Operator ─────────────────────────────────────────────────────────────────
+
+model ParkingOperator {
+  id          String         @id @default(cuid())
+  name        String
+  legalName   String?
+  taxId       String?        @unique
+  status      OperatorStatus @default(PENDING)
+  verifiedAt  DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  facilities     Facility[]
+  memberships    OperatorMembership[]
+  promotionPlans PromotionPlan[]
+
+  @@index([status])
+}
+
+model OperatorMembership {
+  id         String             @id @default(cuid())
+  operatorId String
+  userId     String
+  role       OperatorMemberRole
+  createdAt  DateTime           @default(now())
+
+  operator ParkingOperator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([operatorId, userId])
+}
+
+// ─── Facility ─────────────────────────────────────────────────────────────────
+
+model Facility {
+  id                  String   @id @default(cuid())
+  operatorId          String
+  name                String
+  address             String
+  lat                 Decimal  @db.Decimal(10, 7)
+  lng                 Decimal  @db.Decimal(10, 7)
+  totalCapacity       Int
+  onlineQuota         Int
+  vehicleTypes        VehicleType[]
+  heightRestrictionCm Int?
+  openingHoursJson    Json
+  amenities           String[]
+  cancellationPolicy  String   @default("")
+  isActive            Boolean  @default(false)
+  isVerified          Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  operator      ParkingOperator @relation(fields: [operatorId], references: [id])
+  images        FacilityImage[]
+  rules         FacilityRule[]
+  tariffPlans   TariffPlan[]
+  bookings      Booking[]
+  reviews       Review[]
+  promotionPlan PromotionPlan?
+
+  @@index([lat, lng])
+  @@index([isActive, isVerified])
+  @@index([operatorId])
+}
+
+model FacilityImage {
+  id         String   @id @default(cuid())
+  facilityId String
+  url        String
+  altText    String?
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  facility Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+
+  @@index([facilityId])
+}
+
+model FacilityRule {
+  id         String @id @default(cuid())
+  facilityId String
+  ruleKey    String
+  ruleValue  String
+
+  facility Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+
+  @@unique([facilityId, ruleKey])
+}
+
+// ─── Tariff ───────────────────────────────────────────────────────────────────
+
+model TariffPlan {
+  id         String    @id @default(cuid())
+  facilityId String
+  name       String
+  isDefault  Boolean   @default(false)
+  isActive   Boolean   @default(true)
+  validFrom  DateTime?
+  validTo    DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  facility Facility     @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  rules    TariffRule[]
+
+  @@index([facilityId, isActive])
+}
+
+model TariffRule {
+  id                 String      @id @default(cuid())
+  planId             String
+  type               TariffType
+  vehicleTypes       VehicleType[]
+  minDurationMinutes Int?
+  maxDurationMinutes Int?
+  priceCents         Int
+  currency           String      @default("EUR")
+  sortOrder          Int         @default(0)
+
+  plan TariffPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@index([planId])
+}
+
+// ─── Booking ──────────────────────────────────────────────────────────────────
+
+model Booking {
+  id               String        @id @default(cuid())
+  facilityId       String
+  userId           String?
+  vehicleId        String?
+  guestEmail       String?
+  guestPhone       String?
+  vehiclePlate     String
+  vehicleType      VehicleType
+  startsAt         DateTime
+  endsAt           DateTime
+  quotedPriceCents Int
+  finalPriceCents  Int?
+  currency         String        @default("EUR")
+  status           BookingStatus @default(PENDING_PAYMENT)
+  accessCode       String        @unique
+  qrTokenHash      String?       @unique
+  sourceChannel    SourceChannel @default(WEB)
+  idempotencyKey   String?       @unique
+  expiresAt        DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  facility      Facility               @relation(fields: [facilityId], references: [id])
+  user          User?                  @relation(fields: [userId], references: [id])
+  vehicle       Vehicle?               @relation(fields: [vehicleId], references: [id])
+  statusHistory BookingStatusHistory[]
+  payment       Payment?
+  refund        Refund?
+
+  @@index([facilityId, startsAt, endsAt])
+  @@index([facilityId, status])
+  @@index([userId])
+  @@index([status, expiresAt])
+  @@index([accessCode])
+}
+
+model BookingStatusHistory {
+  id        String        @id @default(cuid())
+  bookingId String
+  status    BookingStatus
+  note      String?
+  changedBy String?
+  changedAt DateTime      @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+}
+
+// ─── Payment ──────────────────────────────────────────────────────────────────
+
+model Payment {
+  id                String        @id @default(cuid())
+  bookingId         String        @unique
+  amountCents       Int
+  currency          String        @default("EUR")
+  provider          String
+  providerPaymentId String?       @unique
+  status            PaymentStatus @default(PENDING)
+  idempotencyKey    String        @unique
+  metadata          Json?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+  refund  Refund?
+}
+
+model Refund {
+  id               String       @id @default(cuid())
+  bookingId        String       @unique
+  paymentId        String       @unique
+  amountCents      Int
+  currency         String       @default("EUR")
+  reason           String?
+  providerRefundId String?
+  status           RefundStatus @default(PENDING)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+  payment Payment @relation(fields: [paymentId], references: [id])
+}
+
+// ─── Promotion ────────────────────────────────────────────────────────────────
+
+model PromotionPlan {
+  id         String        @id @default(cuid())
+  facilityId String        @unique
+  operatorId String
+  type       PromotionType @default(STANDARD)
+  startsAt   DateTime?
+  endsAt     DateTime?
+  isActive   Boolean       @default(false)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  facility Facility        @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  operator ParkingOperator @relation(fields: [operatorId], references: [id])
+}
+
+// ─── Review ───────────────────────────────────────────────────────────────────
+
+model Review {
+  id         String   @id @default(cuid())
+  facilityId String
+  userId     String
+  bookingId  String?
+  rating     Int
+  body       String?
+  createdAt  DateTime @default(now())
+
+  facility Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id])
+
+  @@unique([facilityId, userId])
+  @@index([facilityId])
+}
+
+// ─── Audit ────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actorRole  String?
+  action     String
+  entityType String
+  entityId   String
+  payload    Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+}

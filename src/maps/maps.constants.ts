@@ -1,0 +1,1 @@
+export const MAP_CONTEXT_TOKEN = 'MAP_CONTEXT'
