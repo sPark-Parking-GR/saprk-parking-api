@@ -50,6 +50,43 @@ export class TariffService {
     }
   }
 
+  /**
+   * Quote totals for many facilities in a single tariff-plan query; line items are
+   * computed in memory. Mirrors computeQuote's plan selection and pricing, but skips
+   * the per-facility existence check (search already filters to active facilities).
+   * Facilities with no applicable plan are omitted (caller treats as no price).
+   */
+  async computeTotalsByFacility(
+    facilityIds: string[],
+    startsAt: Date,
+    endsAt: Date,
+    vehicleType: VehicleType,
+  ): Promise<Map<string, number>> {
+    if (facilityIds.length === 0 || endsAt <= startsAt) return new Map()
+
+    const plans = await this.prisma.tariffPlan.findMany({
+      where: {
+        facilityId: { in: facilityIds },
+        isActive: true,
+        OR: [{ validFrom: null }, { validFrom: { lte: startsAt } }],
+        AND: [{ OR: [{ validTo: null }, { validTo: { gte: startsAt } }] }],
+      },
+      include: { rules: { orderBy: { sortOrder: 'asc' } } },
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+    })
+
+    const durationMinutes = Math.ceil((endsAt.getTime() - startsAt.getTime()) / 60_000)
+    const totals = new Map<string, number>()
+    for (const plan of plans) {
+      // The global ordering matches resolveActivePlan within each facility, so the
+      // first plan seen per facility is its active plan.
+      if (totals.has(plan.facilityId)) continue
+      const lineItems = this.computeLineItems(plan.rules, vehicleType, durationMinutes, startsAt)
+      totals.set(plan.facilityId, lineItems.reduce((sum, item) => sum + item.subtotalCents, 0))
+    }
+    return totals
+  }
+
   private async resolveActivePlan(
     facilityId: string,
     atTime: Date,

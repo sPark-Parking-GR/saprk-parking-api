@@ -1,12 +1,11 @@
 import { Injectable } from '@nestjs/common'
 import { computeDistanceMeters } from '@parqin/maps'
-import { PromotionType, type Prisma } from '@prisma/client'
+import { PromotionType } from '@prisma/client'
 import { FacilityNotFoundError } from '../common/errors/domain.errors'
 import { InventoryService } from '../inventory/inventory.service'
 import { PrismaService } from '../prisma/prisma.service'
 import { TariffService } from '../tariff/tariff.service'
-import { DomainError } from '../common/errors/domain.errors'
-import type { FacilitySearchParams, FacilitySearchResult } from './facilities.types'
+import type { FacilitySearchParams, FacilitySearchResult, MapBounds } from './facilities.types'
 
 const PROMOTION_WEIGHT: Record<PromotionType, number> = {
   [PromotionType.PREMIUM]: 3,
@@ -25,70 +24,93 @@ export class FacilitiesService {
   async search(params: FacilitySearchParams): Promise<FacilitySearchResult[]> {
     const { lat, lng, radiusMeters, bounds, startsAt, endsAt, vehicleType } = params
 
-    const latRange = bounds
-      ? { gte: bounds.south, lte: bounds.north }
-      : { gte: lat - (radiusMeters / 111_320) * 1.2, lte: lat + (radiusMeters / 111_320) * 1.2 }
-    const lngRange = bounds
-      ? { gte: bounds.west, lte: bounds.east }
-      : {
-          gte: lng - (radiusMeters / (111_320 * Math.cos((lat * Math.PI) / 180))) * 1.2,
-          lte: lng + (radiusMeters / (111_320 * Math.cos((lat * Math.PI) / 180))) * 1.2,
-        }
-
-    const where: Prisma.FacilityWhereInput = {
-      isActive: true,
-      isVerified: true,
-      lat: latRange,
-      lng: lngRange,
-      ...(vehicleType ? { vehicleTypes: { has: vehicleType } } : {}),
-    }
+    // GiST-indexed spatial prefilter: the bbox (or exact radius) lookup runs on the
+    // generated `geog` point, then Prisma hydrates only the matched ids.
+    const matchedIds = await this.spatialCandidateIds(lat, lng, radiusMeters, bounds)
+    if (matchedIds.length === 0) return []
 
     const facilities = await this.prisma.facility.findMany({
-      where,
+      where: {
+        id: { in: matchedIds },
+        ...(vehicleType ? { vehicleTypes: { has: vehicleType } } : {}),
+      },
       include: {
         images: { orderBy: { sortOrder: 'asc' }, take: 1 },
         promotionPlan: true,
       },
     })
 
+    if (facilities.length === 0) return []
+
     const center = { lat, lng }
+    const candidates = facilities.map((facility) => {
+      const coords = { lat: facility.lat.toNumber(), lng: facility.lng.toNumber() }
+      return { facility, coords, distanceMeters: computeDistanceMeters(center, coords) }
+    })
 
-    const results = await Promise.all(
-      facilities.map(async (facility): Promise<FacilitySearchResult | null> => {
-        const coords = { lat: facility.lat.toNumber(), lng: facility.lng.toNumber() }
-        const distanceMeters = computeDistanceMeters(center, coords)
-        if (!bounds && distanceMeters > radiusMeters) return null
+    const ids = candidates.map((c) => c.facility.id)
 
-        const availability = await this.inventory.checkAvailability({
-          facilityId: facility.id,
-          startsAt,
-          endsAt,
-        })
+    // Two set-based queries replace the former per-facility availability + price calls.
+    const [overlapByFacility, priceByFacility] = await Promise.all([
+      this.inventory.countOverlappingByFacility(ids, startsAt, endsAt),
+      vehicleType
+        ? this.tariff.computeTotalsByFacility(ids, startsAt, endsAt, vehicleType as never)
+        : Promise.resolve(new Map<string, number>()),
+    ])
 
-        const priceCents = await this.computePriceOrNull(facility.id, startsAt, endsAt, vehicleType)
+    const results = candidates.map(({ facility, coords, distanceMeters }): FacilitySearchResult => {
+      const free = facility.onlineQuota - (overlapByFacility.get(facility.id) ?? 0)
+      const isPromoted =
+        facility.promotionPlan?.isActive === true &&
+        this.isPromotionLive(facility.promotionPlan.startsAt, facility.promotionPlan.endsAt)
 
-        const isPromoted =
-          facility.promotionPlan?.isActive === true &&
-          this.isPromotionLive(facility.promotionPlan.startsAt, facility.promotionPlan.endsAt)
+      return {
+        id: facility.id,
+        name: facility.name,
+        address: facility.address,
+        lat: coords.lat,
+        lng: coords.lng,
+        distanceMeters: Math.round(distanceMeters),
+        available: free > 0,
+        remainingSlots: Math.max(0, free),
+        priceCents: vehicleType ? (priceByFacility.get(facility.id) ?? null) : null,
+        currency: 'EUR',
+        isPromoted,
+        thumbnailUrl: facility.images[0]?.url ?? null,
+      }
+    })
 
-        return {
-          id: facility.id,
-          name: facility.name,
-          address: facility.address,
-          lat: coords.lat,
-          lng: coords.lng,
-          distanceMeters: Math.round(distanceMeters),
-          available: availability.available,
-          remainingSlots: availability.remainingSlots,
-          priceCents,
-          currency: 'EUR',
-          isPromoted,
-          thumbnailUrl: facility.images[0]?.url ?? null,
-        }
-      }),
-    )
+    return this.rank(results, facilities)
+  }
 
-    return this.rank(results.filter((r): r is FacilitySearchResult => r !== null), facilities)
+  /**
+   * Facility ids whose location matches the search area, resolved by the GiST index
+   * on the generated `geog` column. Bounds use an exact rectangle; otherwise an exact
+   * radius (replacing the former lat/lng band scan + JS distance filter).
+   */
+  private async spatialCandidateIds(
+    lat: number,
+    lng: number,
+    radiusMeters: number,
+    bounds?: MapBounds,
+  ): Promise<string[]> {
+    const rows = bounds
+      ? await this.prisma.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM "Facility"
+          WHERE "isActive" AND "isVerified"
+            AND ST_Intersects(
+              "geog",
+              ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326)::geography
+            )`
+      : await this.prisma.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM "Facility"
+          WHERE "isActive" AND "isVerified"
+            AND ST_DWithin(
+              "geog",
+              ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography,
+              ${radiusMeters}
+            )`
+    return rows.map((r) => r.id)
   }
 
   async getDetail(id: string) {
@@ -130,27 +152,6 @@ export class FacilitiesService {
       endsAt,
       vehicleType: vehicleType as never,
     })
-  }
-
-  private async computePriceOrNull(
-    facilityId: string,
-    startsAt: Date,
-    endsAt: Date,
-    vehicleType?: string,
-  ): Promise<number | null> {
-    if (!vehicleType) return null
-    try {
-      const quote = await this.tariff.computeQuote({
-        facilityId,
-        startsAt,
-        endsAt,
-        vehicleType: vehicleType as never,
-      })
-      return quote.totalCents
-    } catch (error) {
-      if (error instanceof DomainError) return null
-      throw error
-    }
   }
 
   private isPromotionLive(startsAt: Date | null, endsAt: Date | null): boolean {

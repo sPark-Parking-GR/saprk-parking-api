@@ -140,6 +140,36 @@ export class InventoryService {
     return result.count
   }
 
+  /**
+   * Overlapping active-booking counts for many facilities in a single query.
+   * Replaces per-facility counts when checking availability across a search result set.
+   */
+  async countOverlappingByFacility(
+    facilityIds: string[],
+    startsAt: Date,
+    endsAt: Date,
+  ): Promise<Map<string, number>> {
+    if (facilityIds.length === 0) return new Map()
+
+    const groups = await this.prisma.booking.groupBy({
+      by: ['facilityId'],
+      where: {
+        facilityId: { in: facilityIds },
+        status: {
+          in: [BookingStatus.CONFIRMED, BookingStatus.PENDING_PAYMENT, BookingStatus.CHECKED_IN],
+        },
+        NOT: {
+          AND: [{ status: BookingStatus.PENDING_PAYMENT }, { expiresAt: { lt: new Date() } }],
+        },
+        startsAt: { lt: endsAt },
+        endsAt: { gt: startsAt },
+      },
+      _count: { _all: true },
+    })
+
+    return new Map(groups.map((g) => [g.facilityId, g._count._all]))
+  }
+
   private async countOverlappingBookings(
     facilityId: string,
     startsAt: Date,
