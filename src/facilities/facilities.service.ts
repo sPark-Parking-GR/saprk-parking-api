@@ -23,16 +23,23 @@ export class FacilitiesService {
   ) {}
 
   async search(params: FacilitySearchParams): Promise<FacilitySearchResult[]> {
-    const { lat, lng, radiusMeters, startsAt, endsAt, vehicleType } = params
+    const { lat, lng, radiusMeters, bounds, startsAt, endsAt, vehicleType } = params
 
-    const latDelta = (radiusMeters / 111_320) * 1.2
-    const lngDelta = (radiusMeters / (111_320 * Math.cos((lat * Math.PI) / 180))) * 1.2
+    const latRange = bounds
+      ? { gte: bounds.south, lte: bounds.north }
+      : { gte: lat - (radiusMeters / 111_320) * 1.2, lte: lat + (radiusMeters / 111_320) * 1.2 }
+    const lngRange = bounds
+      ? { gte: bounds.west, lte: bounds.east }
+      : {
+          gte: lng - (radiusMeters / (111_320 * Math.cos((lat * Math.PI) / 180))) * 1.2,
+          lte: lng + (radiusMeters / (111_320 * Math.cos((lat * Math.PI) / 180))) * 1.2,
+        }
 
     const where: Prisma.FacilityWhereInput = {
       isActive: true,
       isVerified: true,
-      lat: { gte: lat - latDelta, lte: lat + latDelta },
-      lng: { gte: lng - lngDelta, lte: lng + lngDelta },
+      lat: latRange,
+      lng: lngRange,
       ...(vehicleType ? { vehicleTypes: { has: vehicleType } } : {}),
     }
 
@@ -50,7 +57,7 @@ export class FacilitiesService {
       facilities.map(async (facility): Promise<FacilitySearchResult | null> => {
         const coords = { lat: facility.lat.toNumber(), lng: facility.lng.toNumber() }
         const distanceMeters = computeDistanceMeters(center, coords)
-        if (distanceMeters > radiusMeters) return null
+        if (!bounds && distanceMeters > radiusMeters) return null
 
         const availability = await this.inventory.checkAvailability({
           facilityId: facility.id,

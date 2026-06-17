@@ -16,10 +16,15 @@ export class FacilitiesController {
   @Public()
   @Get('search')
   search(@Query(new ZodValidationPipe(searchFacilitiesSchema)) query: SearchFacilitiesDto) {
+    const bounds =
+      query.north != null && query.south != null && query.east != null && query.west != null
+        ? { north: query.north, south: query.south, east: query.east, west: query.west }
+        : undefined
     return this.facilities.search({
       lat: query.lat,
       lng: query.lng,
       radiusMeters: query.radiusMeters,
+      bounds,
       startsAt: query.startsAt,
       endsAt: query.endsAt,
       vehicleType: query.vehicleType,
