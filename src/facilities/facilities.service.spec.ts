@@ -17,6 +17,7 @@ function makeFacility(over: Record<string, unknown> = {}) {
     lat: decimal(37.98),
     lng: decimal(23.73),
     onlineQuota: 5,
+    rank: 0,
     images: [{ url: 'thumb.jpg' }],
     promotionPlan: null,
     ...over,
@@ -77,6 +78,18 @@ describe('FacilitiesService.search', () => {
     expect(f2.remainingSlots).toBe(0)
     expect(f2.available).toBe(false)
     expect(f2.priceCents).toBeNull()
+  })
+
+  it('orders by rank desc ahead of distance', async () => {
+    prisma.$queryRaw.mockResolvedValue([{ id: 'f1' }, { id: 'f2' }])
+    prisma.facility.findMany.mockResolvedValue([
+      makeFacility({ id: 'f1', rank: 0, lat: decimal(37.98), lng: decimal(23.73) }),
+      makeFacility({ id: 'f2', rank: 5, lat: decimal(37.99), lng: decimal(23.74) }),
+    ])
+
+    const res = await service.search({ lat: 37.98, lng: 23.73, radiusMeters: 5000, startsAt, endsAt })
+
+    expect(res.map((r) => r.id)).toEqual(['f2', 'f1'])
   })
 
   it('hydrates only the ids returned by the spatial prefilter', async () => {

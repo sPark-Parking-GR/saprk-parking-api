@@ -76,6 +76,7 @@ export class FacilitiesService {
         priceCents: vehicleType ? (priceByFacility.get(facility.id) ?? null) : null,
         currency: 'EUR',
         isPromoted,
+        rank: facility.rank,
         thumbnailUrl: facility.images[0]?.url ?? null,
       }
     })
@@ -170,6 +171,8 @@ export class FacilitiesService {
     )
 
     return results.sort((a, b) => {
+      if (a.rank !== b.rank) return b.rank - a.rank
+
       const wA = a.isPromoted ? (weightById.get(a.id) ?? 0) : 0
       const wB = b.isPromoted ? (weightById.get(b.id) ?? 0) : 0
       if (wA !== wB) return wB - wA

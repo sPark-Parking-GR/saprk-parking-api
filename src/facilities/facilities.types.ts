@@ -31,5 +31,7 @@ export interface FacilitySearchResult {
   priceCents: number | null
   currency: string
   isPromoted: boolean
+  // Manual ranking priority; higher sorts first, 0 = unranked.
+  rank: number
   thumbnailUrl: string | null
 }
