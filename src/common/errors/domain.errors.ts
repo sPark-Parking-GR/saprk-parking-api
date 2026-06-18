@@ -43,6 +43,12 @@ export class FacilityNotFoundError extends DomainError {
   }
 }
 
+export class InvalidTariffScheduleError extends DomainError {
+  constructor(reason: string) {
+    super(`Invalid tariff schedule: ${reason}`)
+  }
+}
+
 export class IdempotencyConflictError extends DomainError {
   constructor(key: string) {
     super(`A booking with idempotency key ${key} already exists`)

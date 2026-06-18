@@ -36,11 +36,15 @@ enum OperatorMemberRole {
   ADMIN
 }
 
-enum TariffType {
-  HOURLY
-  DAILY
-  OVERNIGHT
+enum RateUnit {
+  PER_MINUTE
+  PER_BLOCK
   FLAT
+}
+
+enum CapScope {
+  STAY
+  ROLLING
 }
 
 enum BookingStatus {
@@ -250,32 +254,95 @@ model FacilityRule {
 // ─── Tariff ───────────────────────────────────────────────────────────────────
 
 model TariffPlan {
-  id         String    @id @default(cuid())
-  facilityId String
-  name       String
-  isDefault  Boolean   @default(false)
-  isActive   Boolean   @default(true)
-  validFrom  DateTime?
-  validTo    DateTime?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id               String        @id @default(cuid())
+  facilityId       String
+  name             String
+  isDefault        Boolean       @default(false)
+  isActive         Boolean       @default(true)
+  validFrom        DateTime?
+  validTo          DateTime?
+  // IANA zone for all wall-clock window math (DST-correct). Never server-local.
+  timezone         String        @default("Europe/Athens")
+  // Free leading minutes before billing starts.
+  graceMinutes     Int           @default(0)
+  // Billing granularity: total billable minutes round up to this.
+  incrementMinutes Int           @default(60)
+  // Vehicle classes this plan prices; empty = all.
+  vehicleTypes     VehicleType[]
+  // Bumped on any edit; quotes pin (planId, version) so price can't shift mid-hold.
+  version          Int           @default(1)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
   facility Facility     @relation(fields: [facilityId], references: [id], onDelete: Cascade)
-  rules    TariffRule[]
+  tiers    RateTier[]
+  windows  RateWindow[]
+  caps     RateCap[]
 
   @@index([facilityId, isActive])
 }
 
-model TariffRule {
-  id                 String      @id @default(cuid())
-  planId             String
-  type               TariffType
-  vehicleTypes       VehicleType[]
-  minDurationMinutes Int?
-  maxDurationMinutes Int?
-  priceCents         Int
-  currency           String      @default("EUR")
-  sortOrder          Int         @default(0)
+// Partitions the 24h clock for time-of-day pricing (e.g. Day vs Night). With no
+// windows a plan gets one implicit all-day window, collapsing to duration-only.
+model RateWindow {
+  id          String @id @default(cuid())
+  planId      String
+  label       String
+  // Bitmask, bit 0 = Monday .. bit 6 = Sunday; 127 = every day.
+  dayMask     Int    @default(127)
+  // Minute-of-day, inclusive [0,1440).
+  startMinute Int
+  // Minute-of-day, exclusive; <= startMinute wraps past midnight.
+  endMinute   Int
+
+  plan  TariffPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  rates TariffRate[]
+
+  @@index([planId])
+}
+
+// Duration-progressive structure. Tiers tile the cumulative-minute axis [0,∞);
+// exactly one tier is open-ended (toMinute = null).
+model RateTier {
+  id           String   @id @default(cuid())
+  planId       String
+  // Inclusive cumulative-minute boundary.
+  fromMinute   Int
+  // Exclusive cumulative-minute boundary; null = open-ended.
+  toMinute     Int?
+  unit         RateUnit
+  // Block size for PER_BLOCK (60 = hourly, 15 = quarter-hour); null otherwise.
+  blockMinutes Int?
+
+  plan  TariffPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  rates TariffRate[]
+
+  @@index([planId])
+}
+
+// Price for a (tier, window) pair. A row per cell of the duration×clock grid.
+model TariffRate {
+  id         String @id @default(cuid())
+  tierId     String
+  windowId   String
+  priceCents Int
+  currency   String @default("EUR")
+
+  tier   RateTier   @relation(fields: [tierId], references: [id], onDelete: Cascade)
+  window RateWindow @relation(fields: [windowId], references: [id], onDelete: Cascade)
+
+  @@unique([tierId, windowId])
+  @@index([tierId])
+  @@index([windowId])
+}
+
+// Clamps the running total over a window. windowMinutes = 1440 → daily cap.
+model RateCap {
+  id            String   @id @default(cuid())
+  planId        String
+  windowMinutes Int
+  capCents      Int
+  scope         CapScope @default(ROLLING)
 
   plan TariffPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
 

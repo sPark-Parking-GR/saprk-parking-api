@@ -1,4 +1,4 @@
-import { PrismaClient, VehicleType, TariffType, OperatorStatus } from '@prisma/client'
+import { PrismaClient, VehicleType, OperatorStatus, RateUnit, CapScope } from '@prisma/client'
 
 const prisma = new PrismaClient()
 
@@ -116,66 +116,469 @@ async function main() {
       },
     })
 
-    // Tariff plan per facility
-    const plan = await prisma.tariffPlan.upsert({
-      where: { id: `seed-plan-${facility.id}` },
-      update: {},
-      create: {
-        id: `seed-plan-${facility.id}`,
-        facilityId: facility.id,
-        name: 'Standard',
-        isDefault: true,
-        isActive: true,
-      },
-    })
-
-    // Rules: hourly, daily, overnight
-    const rules = [
-      {
-        id: `seed-rule-hourly-${facility.id}`,
-        planId: plan.id,
-        type: TariffType.HOURLY,
-        vehicleTypes: [VehicleType.CAR, VehicleType.MOTORCYCLE],
-        priceCents: 200,
-        sortOrder: 1,
-      },
-      {
-        id: `seed-rule-daily-${facility.id}`,
-        planId: plan.id,
-        type: TariffType.DAILY,
-        vehicleTypes: [VehicleType.CAR],
-        minDurationMinutes: 60 * 6,
-        priceCents: 1500,
-        sortOrder: 2,
-      },
-      {
-        id: `seed-rule-overnight-${facility.id}`,
-        planId: plan.id,
-        type: TariffType.OVERNIGHT,
-        vehicleTypes: [],
-        priceCents: 800,
-        sortOrder: 3,
-      },
-      {
-        id: `seed-rule-van-${facility.id}`,
-        planId: plan.id,
-        type: TariffType.HOURLY,
-        vehicleTypes: [VehicleType.VAN, VehicleType.TRUCK],
-        priceCents: 350,
-        sortOrder: 4,
-      },
-    ]
-
-    for (const rule of rules) {
-      await prisma.tariffRule.upsert({
-        where: { id: rule.id },
-        update: {},
-        create: rule,
-      })
-    }
+    await seedTariff(facility.id, data.name)
   }
 
   console.warn(`Seed complete: ${facilities.length} facilities across Athens and Thessaloniki.`)
+}
+
+async function seedTariff(facilityId: string, facilityName: string): Promise<void> {
+  if (facilityName === 'Syntagma Underground Parking') {
+    await seedSyntagma(facilityId)
+  } else if (facilityName === 'Monastiraki Parking') {
+    await seedMonastiraki(facilityId)
+  } else if (facilityName === 'Athens Airport Express Park') {
+    await seedAirport(facilityId)
+  } else if (facilityName === 'Aristotelous Square Parking') {
+    await seedAristotelous(facilityId)
+  } else if (facilityName === 'Thessaloniki Port Parking') {
+    await seedPort(facilityId)
+  }
+}
+
+async function seedSyntagma(facilityId: string): Promise<void> {
+  const planId = `seed-plan-${facilityId}`
+  await prisma.tariffPlan.upsert({
+    where: { id: planId },
+    update: {},
+    create: {
+      id: planId,
+      facilityId,
+      name: 'Standard',
+      isDefault: true,
+      isActive: true,
+      timezone: 'Europe/Athens',
+      graceMinutes: 5,
+      incrementMinutes: 60,
+      vehicleTypes: [],
+    },
+  })
+
+  const winDayId = `seed-win-day-${facilityId}`
+  const winNightId = `seed-win-night-${facilityId}`
+
+  await prisma.rateWindow.upsert({
+    where: { id: winDayId },
+    update: {},
+    create: {
+      id: winDayId,
+      planId,
+      label: 'Ημέρα',
+      dayMask: 127,
+      startMinute: 480,
+      endMinute: 1200,
+    },
+  })
+
+  await prisma.rateWindow.upsert({
+    where: { id: winNightId },
+    update: {},
+    create: {
+      id: winNightId,
+      planId,
+      label: 'Νύχτα',
+      dayMask: 127,
+      startMinute: 1200,
+      endMinute: 480,
+    },
+  })
+
+  const tier1Id = `seed-tier-1-${facilityId}`
+  const tier2Id = `seed-tier-2-${facilityId}`
+
+  await prisma.rateTier.upsert({
+    where: { id: tier1Id },
+    update: {},
+    create: {
+      id: tier1Id,
+      planId,
+      fromMinute: 0,
+      toMinute: 30,
+      unit: RateUnit.FLAT,
+      blockMinutes: null,
+    },
+  })
+
+  await prisma.rateTier.upsert({
+    where: { id: tier2Id },
+    update: {},
+    create: {
+      id: tier2Id,
+      planId,
+      fromMinute: 30,
+      toMinute: null,
+      unit: RateUnit.PER_BLOCK,
+      blockMinutes: 60,
+    },
+  })
+
+  const rates = [
+    { id: `seed-rate-${tier1Id}-${winDayId}`, tierId: tier1Id, windowId: winDayId, priceCents: 200 },
+    { id: `seed-rate-${tier1Id}-${winNightId}`, tierId: tier1Id, windowId: winNightId, priceCents: 100 },
+    { id: `seed-rate-${tier2Id}-${winDayId}`, tierId: tier2Id, windowId: winDayId, priceCents: 250 },
+    { id: `seed-rate-${tier2Id}-${winNightId}`, tierId: tier2Id, windowId: winNightId, priceCents: 120 },
+  ]
+
+  for (const rate of rates) {
+    await prisma.tariffRate.upsert({
+      where: { id: rate.id },
+      update: {},
+      create: { id: rate.id, tierId: rate.tierId, windowId: rate.windowId, priceCents: rate.priceCents, currency: 'EUR' },
+    })
+  }
+
+  await prisma.rateCap.upsert({
+    where: { id: `seed-cap-${facilityId}` },
+    update: {},
+    create: {
+      id: `seed-cap-${facilityId}`,
+      planId,
+      windowMinutes: 1440,
+      capCents: 1500,
+      scope: CapScope.STAY,
+    },
+  })
+}
+
+async function seedMonastiraki(facilityId: string): Promise<void> {
+  const planId = `seed-plan-${facilityId}`
+  await prisma.tariffPlan.upsert({
+    where: { id: planId },
+    update: {},
+    create: {
+      id: planId,
+      facilityId,
+      name: 'Standard',
+      isDefault: true,
+      isActive: true,
+      timezone: 'Europe/Athens',
+      graceMinutes: 0,
+      incrementMinutes: 60,
+      vehicleTypes: [],
+    },
+  })
+
+  const winAllDayId = `seed-win-day-${facilityId}`
+
+  await prisma.rateWindow.upsert({
+    where: { id: winAllDayId },
+    update: {},
+    create: {
+      id: winAllDayId,
+      planId,
+      label: 'Όλο το 24ωρο',
+      dayMask: 127,
+      startMinute: 0,
+      endMinute: 1440,
+    },
+  })
+
+  const tier1Id = `seed-tier-1-${facilityId}`
+
+  await prisma.rateTier.upsert({
+    where: { id: tier1Id },
+    update: {},
+    create: {
+      id: tier1Id,
+      planId,
+      fromMinute: 0,
+      toMinute: null,
+      unit: RateUnit.PER_BLOCK,
+      blockMinutes: 60,
+    },
+  })
+
+  await prisma.tariffRate.upsert({
+    where: { id: `seed-rate-${tier1Id}-${winAllDayId}` },
+    update: {},
+    create: {
+      id: `seed-rate-${tier1Id}-${winAllDayId}`,
+      tierId: tier1Id,
+      windowId: winAllDayId,
+      priceCents: 180,
+      currency: 'EUR',
+    },
+  })
+}
+
+async function seedAirport(facilityId: string): Promise<void> {
+  const carPlanId = `seed-plan-${facilityId}`
+  const vanPlanId = `seed-plan-van-${facilityId}`
+
+  await prisma.tariffPlan.upsert({
+    where: { id: carPlanId },
+    update: {},
+    create: {
+      id: carPlanId,
+      facilityId,
+      name: 'CAR / MOTORCYCLE',
+      isDefault: true,
+      isActive: true,
+      timezone: 'Europe/Athens',
+      graceMinutes: 10,
+      incrementMinutes: 60,
+      vehicleTypes: [VehicleType.CAR, VehicleType.MOTORCYCLE],
+    },
+  })
+
+  await prisma.tariffPlan.upsert({
+    where: { id: vanPlanId },
+    update: {},
+    create: {
+      id: vanPlanId,
+      facilityId,
+      name: 'VAN / TRUCK',
+      isDefault: false,
+      isActive: true,
+      timezone: 'Europe/Athens',
+      graceMinutes: 10,
+      incrementMinutes: 60,
+      vehicleTypes: [VehicleType.VAN, VehicleType.TRUCK],
+    },
+  })
+
+  const winAllDayCarId = `seed-win-day-${facilityId}`
+  const winAllDayVanId = `seed-win-day-van-${facilityId}`
+
+  await prisma.rateWindow.upsert({
+    where: { id: winAllDayCarId },
+    update: {},
+    create: {
+      id: winAllDayCarId,
+      planId: carPlanId,
+      label: 'Όλο το 24ωρο',
+      dayMask: 127,
+      startMinute: 0,
+      endMinute: 1440,
+    },
+  })
+
+  await prisma.rateWindow.upsert({
+    where: { id: winAllDayVanId },
+    update: {},
+    create: {
+      id: winAllDayVanId,
+      planId: vanPlanId,
+      label: 'Όλο το 24ωρο',
+      dayMask: 127,
+      startMinute: 0,
+      endMinute: 1440,
+    },
+  })
+
+  const carTier1Id = `seed-tier-1-${facilityId}`
+  const carTier2Id = `seed-tier-2-${facilityId}`
+  const vanTier1Id = `seed-tier-1-van-${facilityId}`
+
+  await prisma.rateTier.upsert({
+    where: { id: carTier1Id },
+    update: {},
+    create: {
+      id: carTier1Id,
+      planId: carPlanId,
+      fromMinute: 0,
+      toMinute: 60,
+      unit: RateUnit.PER_BLOCK,
+      blockMinutes: 60,
+    },
+  })
+
+  await prisma.rateTier.upsert({
+    where: { id: carTier2Id },
+    update: {},
+    create: {
+      id: carTier2Id,
+      planId: carPlanId,
+      fromMinute: 60,
+      toMinute: null,
+      unit: RateUnit.PER_BLOCK,
+      blockMinutes: 60,
+    },
+  })
+
+  await prisma.rateTier.upsert({
+    where: { id: vanTier1Id },
+    update: {},
+    create: {
+      id: vanTier1Id,
+      planId: vanPlanId,
+      fromMinute: 0,
+      toMinute: null,
+      unit: RateUnit.PER_BLOCK,
+      blockMinutes: 60,
+    },
+  })
+
+  const carRates = [
+    { id: `seed-rate-${carTier1Id}-${winAllDayCarId}`, tierId: carTier1Id, windowId: winAllDayCarId, priceCents: 150 },
+    { id: `seed-rate-${carTier2Id}-${winAllDayCarId}`, tierId: carTier2Id, windowId: winAllDayCarId, priceCents: 300 },
+  ]
+
+  for (const rate of carRates) {
+    await prisma.tariffRate.upsert({
+      where: { id: rate.id },
+      update: {},
+      create: { id: rate.id, tierId: rate.tierId, windowId: rate.windowId, priceCents: rate.priceCents, currency: 'EUR' },
+    })
+  }
+
+  await prisma.tariffRate.upsert({
+    where: { id: `seed-rate-${vanTier1Id}-${winAllDayVanId}` },
+    update: {},
+    create: {
+      id: `seed-rate-${vanTier1Id}-${winAllDayVanId}`,
+      tierId: vanTier1Id,
+      windowId: winAllDayVanId,
+      priceCents: 500,
+      currency: 'EUR',
+    },
+  })
+
+  await prisma.rateCap.upsert({
+    where: { id: `seed-cap-${facilityId}` },
+    update: {},
+    create: {
+      id: `seed-cap-${facilityId}`,
+      planId: carPlanId,
+      windowMinutes: 1440,
+      capCents: 2500,
+      scope: CapScope.STAY,
+    },
+  })
+}
+
+async function seedAristotelous(facilityId: string): Promise<void> {
+  const planId = `seed-plan-${facilityId}`
+  await prisma.tariffPlan.upsert({
+    where: { id: planId },
+    update: {},
+    create: {
+      id: planId,
+      facilityId,
+      name: 'Standard',
+      isDefault: true,
+      isActive: true,
+      timezone: 'Europe/Athens',
+      graceMinutes: 15,
+      incrementMinutes: 15,
+      vehicleTypes: [],
+    },
+  })
+
+  const winAllDayId = `seed-win-day-${facilityId}`
+
+  await prisma.rateWindow.upsert({
+    where: { id: winAllDayId },
+    update: {},
+    create: {
+      id: winAllDayId,
+      planId,
+      label: 'Όλο το 24ωρο',
+      dayMask: 127,
+      startMinute: 0,
+      endMinute: 1440,
+    },
+  })
+
+  const tier1Id = `seed-tier-1-${facilityId}`
+
+  await prisma.rateTier.upsert({
+    where: { id: tier1Id },
+    update: {},
+    create: {
+      id: tier1Id,
+      planId,
+      fromMinute: 0,
+      toMinute: null,
+      unit: RateUnit.PER_BLOCK,
+      blockMinutes: 15,
+    },
+  })
+
+  await prisma.tariffRate.upsert({
+    where: { id: `seed-rate-${tier1Id}-${winAllDayId}` },
+    update: {},
+    create: {
+      id: `seed-rate-${tier1Id}-${winAllDayId}`,
+      tierId: tier1Id,
+      windowId: winAllDayId,
+      priceCents: 50,
+      currency: 'EUR',
+    },
+  })
+
+  await prisma.rateCap.upsert({
+    where: { id: `seed-cap-${facilityId}` },
+    update: {},
+    create: {
+      id: `seed-cap-${facilityId}`,
+      planId,
+      windowMinutes: 1440,
+      capCents: 1200,
+      scope: CapScope.STAY,
+    },
+  })
+}
+
+async function seedPort(facilityId: string): Promise<void> {
+  const planId = `seed-plan-${facilityId}`
+  await prisma.tariffPlan.upsert({
+    where: { id: planId },
+    update: {},
+    create: {
+      id: planId,
+      facilityId,
+      name: 'Standard',
+      isDefault: true,
+      isActive: true,
+      timezone: 'Europe/Athens',
+      graceMinutes: 0,
+      incrementMinutes: 60,
+      vehicleTypes: [],
+    },
+  })
+
+  const winAllDayId = `seed-win-day-${facilityId}`
+
+  await prisma.rateWindow.upsert({
+    where: { id: winAllDayId },
+    update: {},
+    create: {
+      id: winAllDayId,
+      planId,
+      label: 'Όλο το 24ωρο',
+      dayMask: 127,
+      startMinute: 0,
+      endMinute: 1440,
+    },
+  })
+
+  const tier1Id = `seed-tier-1-${facilityId}`
+
+  await prisma.rateTier.upsert({
+    where: { id: tier1Id },
+    update: {},
+    create: {
+      id: tier1Id,
+      planId,
+      fromMinute: 0,
+      toMinute: null,
+      unit: RateUnit.FLAT,
+      blockMinutes: null,
+    },
+  })
+
+  await prisma.tariffRate.upsert({
+    where: { id: `seed-rate-${tier1Id}-${winAllDayId}` },
+    update: {},
+    create: {
+      id: `seed-rate-${tier1Id}-${winAllDayId}`,
+      tierId: tier1Id,
+      windowId: winAllDayId,
+      priceCents: 800,
+      currency: 'EUR',
+    },
+  })
 }
 
 main()

@@ -1,15 +1,34 @@
 import { Injectable } from '@nestjs/common'
-import { TariffType, type TariffPlan, type TariffRule, type VehicleType } from '@prisma/client'
+import type {
+  Prisma,
+  RateCap,
+  RateTier,
+  RateWindow,
+  TariffPlan,
+  TariffRate,
+  VehicleType,
+} from '@prisma/client'
 import { NoApplicableTariffError, FacilityNotFoundError } from '../common/errors/domain.errors'
 import { PrismaService } from '../prisma/prisma.service'
+import { priceStay } from './pricing-engine'
 import {
   QUOTE_TTL_MINUTES,
+  type CompiledPlan,
   type PriceQuote,
-  type QuoteLineItem,
   type QuoteRequest,
 } from './tariff.types'
 
-type PlanWithRules = TariffPlan & { rules: TariffRule[] }
+type PlanWithSchedule = TariffPlan & {
+  tiers: (RateTier & { rates: TariffRate[] })[]
+  windows: (RateWindow & { rates: TariffRate[] })[]
+  caps: RateCap[]
+}
+
+const scheduleInclude = {
+  tiers: { include: { rates: true }, orderBy: { fromMinute: 'asc' } },
+  windows: { include: { rates: true } },
+  caps: true,
+} satisfies Prisma.TariffPlanInclude
 
 @Injectable()
 export class TariffService {
@@ -28,13 +47,13 @@ export class TariffService {
 
     if (!facility) throw new FacilityNotFoundError(facilityId)
 
-    const plan = await this.resolveActivePlan(facilityId, startsAt)
+    const plan = await this.resolveActivePlan(facilityId, startsAt, vehicleType)
     if (!plan) throw new NoApplicableTariffError(facilityId)
 
-    const durationMinutes = Math.ceil((endsAt.getTime() - startsAt.getTime()) / 60_000)
-    const lineItems = this.computeLineItems(plan.rules, vehicleType, durationMinutes, startsAt)
+    const compiled = compilePlan(plan)
+    const result = priceStay(startsAt, endsAt, compiled)
 
-    const totalCents = lineItems.reduce((sum, item) => sum + item.subtotalCents, 0)
+    const durationMinutes = Math.ceil((endsAt.getTime() - startsAt.getTime()) / 60_000)
     const expiresAt = new Date(Date.now() + QUOTE_TTL_MINUTES * 60_000)
 
     return {
@@ -43,18 +62,20 @@ export class TariffService {
       endsAt,
       durationMinutes,
       vehicleType,
-      lineItems,
-      totalCents,
-      currency: 'EUR',
+      lineItems: result.lineItems,
+      totalCents: result.totalCents,
+      currency: compiled.currency,
       expiresAt,
+      planId: compiled.id,
+      planVersion: compiled.version,
     }
   }
 
   /**
-   * Quote totals for many facilities in a single tariff-plan query; line items are
-   * computed in memory. Mirrors computeQuote's plan selection and pricing, but skips
-   * the per-facility existence check (search already filters to active facilities).
-   * Facilities with no applicable plan are omitted (caller treats as no price).
+   * Quote totals for many facilities in a single tariff-plan query; pricing runs in
+   * memory. Mirrors computeQuote's plan selection, but skips the per-facility existence
+   * check (search already filters to active facilities). Facilities whose plan has no
+   * applicable price are omitted (caller treats as no price).
    */
   async computeTotalsByFacility(
     facilityIds: string[],
@@ -69,20 +90,26 @@ export class TariffService {
         facilityId: { in: facilityIds },
         isActive: true,
         OR: [{ validFrom: null }, { validFrom: { lte: startsAt } }],
-        AND: [{ OR: [{ validTo: null }, { validTo: { gte: startsAt } }] }],
+        AND: [
+          { OR: [{ validTo: null }, { validTo: { gte: startsAt } }] },
+          { OR: [{ vehicleTypes: { isEmpty: true } }, { vehicleTypes: { has: vehicleType } }] },
+        ],
       },
-      include: { rules: { orderBy: { sortOrder: 'asc' } } },
+      include: scheduleInclude,
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
     })
 
-    const durationMinutes = Math.ceil((endsAt.getTime() - startsAt.getTime()) / 60_000)
     const totals = new Map<string, number>()
     for (const plan of plans) {
-      // The global ordering matches resolveActivePlan within each facility, so the
-      // first plan seen per facility is its active plan.
+      // Query order matches resolveActivePlan within each facility, so the first plan
+      // seen per facility is its active plan.
       if (totals.has(plan.facilityId)) continue
-      const lineItems = this.computeLineItems(plan.rules, vehicleType, durationMinutes, startsAt)
-      totals.set(plan.facilityId, lineItems.reduce((sum, item) => sum + item.subtotalCents, 0))
+      try {
+        const result = priceStay(startsAt, endsAt, compilePlan(plan))
+        totals.set(plan.facilityId, result.totalCents)
+      } catch {
+        // Incomplete/invalid schedule: omit this facility from priced results.
+      }
     }
     return totals
   }
@@ -90,99 +117,62 @@ export class TariffService {
   private async resolveActivePlan(
     facilityId: string,
     atTime: Date,
-  ): Promise<PlanWithRules | null> {
+    vehicleType: VehicleType,
+  ): Promise<PlanWithSchedule | null> {
     const plans = await this.prisma.tariffPlan.findMany({
       where: {
         facilityId,
         isActive: true,
         OR: [{ validFrom: null }, { validFrom: { lte: atTime } }],
-        AND: [{ OR: [{ validTo: null }, { validTo: { gte: atTime } }] }],
+        AND: [
+          { OR: [{ validTo: null }, { validTo: { gte: atTime } }] },
+          { OR: [{ vehicleTypes: { isEmpty: true } }, { vehicleTypes: { has: vehicleType } }] },
+        ],
       },
-      include: { rules: { orderBy: { sortOrder: 'asc' } } },
+      include: scheduleInclude,
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
     })
 
     return plans[0] ?? null
   }
+}
 
-  private computeLineItems(
-    rules: TariffRule[],
-    vehicleType: VehicleType,
-    durationMinutes: number,
-    startsAt: Date,
-  ): QuoteLineItem[] {
-    const applicable = rules.filter(
-      (r) =>
-        (r.vehicleTypes.length === 0 || r.vehicleTypes.includes(vehicleType)) &&
-        (r.minDurationMinutes == null || durationMinutes >= r.minDurationMinutes) &&
-        (r.maxDurationMinutes == null || durationMinutes <= r.maxDurationMinutes),
-    )
-
-    if (applicable.length === 0) return []
-
-    const isOvernight = this.isOvernightWindow(startsAt, durationMinutes)
-
-    const overnightRule = applicable.find((r) => r.type === TariffType.OVERNIGHT)
-    const flatRule = applicable.find((r) => r.type === TariffType.FLAT)
-    const dailyRule = applicable.find((r) => r.type === TariffType.DAILY)
-    const hourlyRule = applicable.find((r) => r.type === TariffType.HOURLY)
-
-    if (isOvernight && overnightRule) {
-      return [
-        {
-          label: 'Overnight rate',
-          durationMinutes,
-          unitPriceCents: overnightRule.priceCents,
-          quantity: 1,
-          subtotalCents: overnightRule.priceCents,
-        },
-      ]
+function compilePlan(plan: PlanWithSchedule): CompiledPlan {
+  const rates = new Map<string, TariffRate>()
+  for (const tier of plan.tiers) {
+    for (const rate of tier.rates) {
+      rates.set(`${rate.tierId}|${rate.windowId}`, rate)
     }
-
-    if (flatRule) {
-      return [
-        {
-          label: 'Flat rate',
-          durationMinutes,
-          unitPriceCents: flatRule.priceCents,
-          quantity: 1,
-          subtotalCents: flatRule.priceCents,
-        },
-      ]
-    }
-
-    if (durationMinutes >= 60 * 24 && dailyRule) {
-      const days = Math.ceil(durationMinutes / (60 * 24))
-      return [
-        {
-          label: 'Daily rate',
-          durationMinutes,
-          unitPriceCents: dailyRule.priceCents,
-          quantity: days,
-          subtotalCents: dailyRule.priceCents * days,
-        },
-      ]
-    }
-
-    if (hourlyRule) {
-      const hours = Math.ceil(durationMinutes / 60)
-      return [
-        {
-          label: 'Hourly rate',
-          durationMinutes,
-          unitPriceCents: hourlyRule.priceCents,
-          quantity: hours,
-          subtotalCents: hourlyRule.priceCents * hours,
-        },
-      ]
-    }
-
-    return []
   }
 
-  private isOvernightWindow(startsAt: Date, durationMinutes: number): boolean {
-    const hour = startsAt.getHours()
-    const endsNextDay = durationMinutes > 60 * 6
-    return hour >= 20 && endsNextDay
+  const currency = plan.tiers[0]?.rates[0]?.currency ?? 'EUR'
+
+  return {
+    id: plan.id,
+    version: plan.version,
+    timezone: plan.timezone,
+    graceMinutes: plan.graceMinutes,
+    incrementMinutes: plan.incrementMinutes,
+    currency,
+    tiers: plan.tiers.map((t) => ({
+      id: t.id,
+      fromMinute: t.fromMinute,
+      toMinute: t.toMinute,
+      unit: t.unit,
+      blockMinutes: t.blockMinutes,
+    })),
+    windows: plan.windows.map((w) => ({
+      id: w.id,
+      label: w.label,
+      dayMask: w.dayMask,
+      startMinute: w.startMinute,
+      endMinute: w.endMinute,
+    })),
+    caps: plan.caps.map((c) => ({
+      windowMinutes: c.windowMinutes,
+      capCents: c.capCents,
+      scope: c.scope,
+    })),
+    price: (tierId, windowId) => rates.get(`${tierId}|${windowId}`)?.priceCents,
   }
 }

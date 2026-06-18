@@ -122,7 +122,14 @@ export class FacilitiesService {
         rules: true,
         tariffPlans: {
           where: { isActive: true },
-          include: { rules: { orderBy: { sortOrder: 'asc' } } },
+          include: {
+            tiers: {
+              orderBy: { fromMinute: 'asc' },
+              include: { rates: true },
+            },
+            windows: true,
+            caps: true,
+          },
         },
       },
     })
