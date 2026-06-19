@@ -1,6 +1,6 @@
 import { DateTime } from 'luxon'
 import { RateUnit, CapScope } from '@prisma/client'
-import { NoApplicableTariffError } from '../common/errors/domain.errors'
+import { InvalidTariffScheduleError, NoApplicableTariffError } from '../common/errors/domain.errors'
 import type {
   CompiledCap,
   CompiledPlan,
@@ -9,6 +9,8 @@ import type {
   PriceResult,
   QuoteLineItem,
 } from './tariff.types'
+
+const MAX_BILLABLE_MINUTES = 366 * 24 * 60
 
 export function ceilDiv(numerator: number, denominator: number): number {
   return Math.ceil(numerator / denominator)
@@ -63,6 +65,12 @@ export function priceStay(
     Math.max(0, rawMinutes - plan.graceMinutes),
     plan.incrementMinutes,
   )
+
+  // PER_MINUTE tiers advance the pricing loop one minute at a time, so an unbounded
+  // span (e.g. a multi-year simulate request) is a CPU-DoS vector. Cap to a year.
+  if (billable > MAX_BILLABLE_MINUTES) {
+    throw new InvalidTariffScheduleError('stay span exceeds the maximum priceable duration')
+  }
 
   if (billable === 0) {
     return { lineItems: [], totalCents: 0, billableMinutes: 0 }

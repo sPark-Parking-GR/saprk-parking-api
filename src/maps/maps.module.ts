@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
-import { createMapContext } from '@parqin/maps'
-import type { MapProviderConfig } from '@parqin/maps'
+import { createMapContext } from '@spark/maps'
+import type { MapProviderConfig } from '@spark/maps'
 import { MAP_CONTEXT_TOKEN } from './maps.constants'
 import { MapsService } from './maps.service'
 

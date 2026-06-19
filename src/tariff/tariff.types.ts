@@ -72,3 +72,74 @@ export interface PriceResult {
   totalCents: number
   billableMinutes: number
 }
+
+export interface TariffPlanListItem {
+  id: string
+  name: string
+  isDefault: boolean
+  isActive: boolean
+  validFrom: Date | null
+  validTo: Date | null
+  vehicleTypes: string[]
+  version: number
+  updatedAt: Date
+}
+
+export interface TariffDraftTier {
+  key: string
+  fromMinute: number
+  toMinute: number | null
+  unit: string
+  blockMinutes: number | null
+}
+
+export interface TariffDraftWindow {
+  key: string
+  label: string
+  dayMask: number
+  startMinute: number
+  endMinute: number
+}
+
+export interface TariffDraftRate {
+  tierKey: string
+  windowKey: string
+  priceCents: number
+  currency: string
+}
+
+export interface TariffDraftCap {
+  windowMinutes: number
+  capCents: number
+  scope: string
+}
+
+export interface TariffPlanDetail {
+  id: string
+  name: string
+  isDefault: boolean
+  isActive: boolean
+  validFrom: Date | null
+  validTo: Date | null
+  timezone: string
+  graceMinutes: number
+  incrementMinutes: number
+  vehicleTypes: string[]
+  version: number
+  createdAt: Date
+  updatedAt: Date
+  tiers: TariffDraftTier[]
+  windows: TariffDraftWindow[]
+  rates: TariffDraftRate[]
+  caps: TariffDraftCap[]
+}
+
+export interface SimulateQuote {
+  durationMinutes: number
+  billableMinutes: number
+  lineItems: QuoteLineItem[]
+  totalCents: number
+  currency: string
+}
+
+export type SimulateResult = { ok: true; quote: SimulateQuote } | { ok: false; error: string }

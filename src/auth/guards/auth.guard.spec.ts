@@ -1,6 +1,6 @@
 import { UnauthorizedException, type ExecutionContext } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import type { AuthUser } from '@parqin/types'
+import type { AuthUser } from '@spark/types'
 import type { AuthService } from '../auth.service'
 import { AuthGuard } from './auth.guard'
 

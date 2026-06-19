@@ -6,12 +6,21 @@ import {
   BookingStatusTransitionError,
   QuoteExpiredError,
 } from '../common/errors/domain.errors'
+import type { AuthUser } from '@spark/types'
+import { Prisma } from '@prisma/client'
+import { OperatorScopeService } from '../common/authz/operator-scope.service'
 import { InventoryService } from '../inventory/inventory.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { PaymentsService } from '../payments/payments.service'
 import { PrismaService } from '../prisma/prisma.service'
 import { TariffService } from '../tariff/tariff.service'
-import type { BookingResult, ConfirmedBooking, CreateBookingRequest } from './booking.types'
+import type { ListBookingsDto } from './dto/booking.dto'
+import type {
+  BookingList,
+  BookingResult,
+  ConfirmedBooking,
+  CreateBookingRequest,
+} from './booking.types'
 
 @Injectable()
 export class BookingService {
@@ -23,7 +32,61 @@ export class BookingService {
     private readonly inventory: InventoryService,
     private readonly payments: PaymentsService,
     private readonly notifications: NotificationsService,
+    private readonly operatorScope: OperatorScopeService,
   ) {}
+
+  async adminList(user: AuthUser, query: ListBookingsDto): Promise<BookingList> {
+    const scope = await this.operatorScope.resolve(user)
+    const where = this.adminListWhere(scope, query)
+
+    const [rows, total] = await Promise.all([
+      this.prisma.booking.findMany({
+        where,
+        orderBy: { startsAt: 'desc' },
+        skip: query.skip,
+        take: query.take,
+        select: {
+          id: true,
+          accessCode: true,
+          status: true,
+          startsAt: true,
+          endsAt: true,
+          vehiclePlate: true,
+          vehicleType: true,
+          quotedPriceCents: true,
+          finalPriceCents: true,
+          currency: true,
+          createdAt: true,
+          facility: { select: { id: true, name: true } },
+        },
+      }),
+      this.prisma.booking.count({ where }),
+    ])
+
+    return { items: rows, total, skip: query.skip, take: query.take }
+  }
+
+  private adminListWhere(
+    scope: { kind: 'platform' } | { kind: 'operator'; operatorId: string },
+    query: ListBookingsDto,
+  ): Prisma.BookingWhereInput {
+    const facilityWhere =
+      scope.kind === 'operator' ? { operatorId: scope.operatorId } : {}
+    if (scope.kind === 'platform' && query.facilityId) {
+      Object.assign(facilityWhere, { id: query.facilityId })
+    }
+
+    const where: Prisma.BookingWhereInput = { facility: facilityWhere }
+    if (scope.kind === 'operator' && query.facilityId) where.facilityId = query.facilityId
+    if (query.status) where.status = query.status
+    if (query.q) {
+      where.OR = [
+        { accessCode: { contains: query.q, mode: 'insensitive' } },
+        { vehiclePlate: { contains: query.q, mode: 'insensitive' } },
+      ]
+    }
+    return where
+  }
 
   /**
    * Phase 1 of checkout. Holds inventory, creates an external payment intent,
@@ -78,7 +141,7 @@ export class BookingService {
       amountCents: quote.totalCents,
       currency: quote.currency,
       idempotencyKey: `pi_${bookingId}`,
-      description: `Parqin booking ${accessCode}`,
+      description: `sPark booking ${accessCode}`,
       metadata: { bookingId },
     })
 
@@ -348,22 +411,22 @@ export class BookingService {
     }
   }
 
-  async checkIn(bookingId: string, operatorId: string): Promise<void> {
+  async checkIn(bookingId: string, user: AuthUser): Promise<void> {
     await this.transitionByOperator(
       bookingId,
       BookingStatus.CONFIRMED,
       BookingStatus.CHECKED_IN,
-      operatorId,
+      user,
       'booking.checked_in',
     )
   }
 
-  async checkOut(bookingId: string, operatorId: string): Promise<void> {
+  async checkOut(bookingId: string, user: AuthUser): Promise<void> {
     await this.transitionByOperator(
       bookingId,
       BookingStatus.CHECKED_IN,
       BookingStatus.CHECKED_OUT,
-      operatorId,
+      user,
       'booking.checked_out',
     )
   }
@@ -384,26 +447,33 @@ export class BookingService {
     bookingId: string,
     from: BookingStatus,
     to: BookingStatus,
-    operatorId: string,
+    user: AuthUser,
     action: string,
   ): Promise<void> {
+    const scope = await this.operatorScope.resolve(user)
+
     await this.prisma.$transaction(async (tx) => {
       const booking = await tx.booking.findUnique({
         where: { id: bookingId },
-        select: { status: true },
+        select: { status: true, facility: { select: { operatorId: true } } },
       })
       if (!booking) throw new BookingNotFoundError(bookingId)
+      // Cross-operator access is reported as not-found so an operator cannot probe
+      // for bookings outside their own facilities.
+      if (scope.kind === 'operator' && booking.facility.operatorId !== scope.operatorId) {
+        throw new BookingNotFoundError(bookingId)
+      }
       if (booking.status !== from) {
         throw new BookingStatusTransitionError(booking.status, to)
       }
 
       await tx.booking.update({
         where: { id: bookingId },
-        data: { status: to, statusHistory: { create: { status: to, changedBy: operatorId } } },
+        data: { status: to, statusHistory: { create: { status: to, changedBy: user.id } } },
       })
 
       await tx.auditLog.create({
-        data: { actorId: operatorId, action, entityType: 'Booking', entityId: bookingId },
+        data: { actorId: user.id, action, entityType: 'Booking', entityId: bookingId },
       })
     })
   }

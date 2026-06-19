@@ -98,3 +98,49 @@ export function validateSchedule(input: unknown): ScheduleInput {
   validateWindows(parsed.data.windows)
   return parsed.data
 }
+
+interface RateGridTier {
+  id: string
+}
+
+interface RateGridWindow {
+  id: string
+  label: string
+}
+
+interface RateGridRate {
+  tierId: string
+  windowId: string
+}
+
+// The pricing engine looks up a price for every (tier,window) cell it crosses and
+// throws NoApplicableTariffError when one is missing. Guaranteeing a complete,
+// duplicate-free cartesian grid here keeps that runtime failure off the priced path.
+export function validateRateGrid(
+  tiers: RateGridTier[],
+  windows: RateGridWindow[],
+  rates: RateGridRate[],
+): void {
+  const tierIds = new Set(tiers.map((t) => t.id))
+  const windowById = new Map(windows.map((w) => [w.id, w]))
+  const seen = new Set<string>()
+
+  for (const rate of rates) {
+    if (!tierIds.has(rate.tierId)) fail(`rate references unknown tier ${rate.tierId}`)
+    if (!windowById.has(rate.windowId)) fail(`rate references unknown window ${rate.windowId}`)
+    const cell = `${rate.tierId}|${rate.windowId}`
+    const window = windowById.get(rate.windowId)
+    if (seen.has(cell)) {
+      fail(`duplicate rate for tier ${rate.tierId} × window ${window?.label ?? rate.windowId}`)
+    }
+    seen.add(cell)
+  }
+
+  for (const tier of tiers) {
+    for (const window of windows) {
+      if (!seen.has(`${tier.id}|${window.id}`)) {
+        fail(`missing rate for tier ${tier.id} × window ${window.label}`)
+      }
+    }
+  }
+}

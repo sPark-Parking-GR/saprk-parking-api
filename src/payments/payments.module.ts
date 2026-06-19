@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
-import { createPaymentContext } from '@parqin/payments'
-import type { PaymentProviderConfig } from '@parqin/payments'
+import { createPaymentContext } from '@spark/payments'
+import type { PaymentProviderConfig } from '@spark/payments'
 import { PAYMENT_CONTEXT_TOKEN } from './payments.constants'
 import { PaymentsService } from './payments.service'
 

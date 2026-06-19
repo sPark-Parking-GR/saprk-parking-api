@@ -11,10 +11,12 @@ import {
   BookingNotFoundError,
   BookingStatusTransitionError,
   DomainError,
+  FacilityFieldForbiddenError,
   FacilityNotFoundError,
   IdempotencyConflictError,
   NoApplicableTariffError,
   NoAvailabilityError,
+  OperatorContextRequiredError,
   QuoteExpiredError,
 } from '../errors/domain.errors'
 
@@ -58,6 +60,12 @@ export class DomainExceptionFilter implements ExceptionFilter {
   private statusForDomainError(exception: unknown): number | null {
     if (exception instanceof FacilityNotFoundError || exception instanceof BookingNotFoundError) {
       return HttpStatus.NOT_FOUND
+    }
+    if (
+      exception instanceof OperatorContextRequiredError ||
+      exception instanceof FacilityFieldForbiddenError
+    ) {
+      return HttpStatus.FORBIDDEN
     }
     if (
       exception instanceof NoAvailabilityError ||

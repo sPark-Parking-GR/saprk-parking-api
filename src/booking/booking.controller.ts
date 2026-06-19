@@ -7,18 +7,33 @@ import {
   Headers,
   Param,
   Post,
+  Query,
 } from '@nestjs/common'
-import type { AuthUser } from '@parqin/types'
+import type { AuthUser } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { Public } from '../auth/decorators/public.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { BookingService } from './booking.service'
-import { createBookingSchema, type CreateBookingDto } from './dto/booking.dto'
+import {
+  createBookingSchema,
+  listBookingsSchema,
+  type CreateBookingDto,
+  type ListBookingsDto,
+} from './dto/booking.dto'
 
 @Controller('bookings')
 export class BookingController {
   constructor(private readonly bookings: BookingService) {}
+
+  @Roles('operator_staff', 'operator_admin', 'platform_admin')
+  @Get()
+  list(
+    @Query(new ZodValidationPipe(listBookingsSchema)) query: ListBookingsDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.bookings.adminList(user, query)
+  }
 
   @Public()
   @Post()
@@ -70,12 +85,12 @@ export class BookingController {
   @Roles('operator_staff', 'operator_admin')
   @Post(':id/check-in')
   checkIn(@Param('id') id: string, @CurrentUser() user: AuthUser) {
-    return this.bookings.checkIn(id, user.id)
+    return this.bookings.checkIn(id, user)
   }
 
   @Roles('operator_staff', 'operator_admin')
   @Post(':id/check-out')
   checkOut(@Param('id') id: string, @CurrentUser() user: AuthUser) {
-    return this.bookings.checkOut(id, user.id)
+    return this.bookings.checkOut(id, user)
   }
 }

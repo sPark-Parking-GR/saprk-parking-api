@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common'
-import type { AuthContext } from '@parqin/auth'
-import type { AuthResult, SignInCredentials, SignUpData, TokenVerificationResult } from '@parqin/types'
+import type { AuthContext } from '@spark/auth'
+import type { AuthResult, SignInCredentials, SignUpData, TokenVerificationResult } from '@spark/types'
 import { AUTH_CONTEXT_TOKEN } from './auth.constants'
 
 @Injectable()

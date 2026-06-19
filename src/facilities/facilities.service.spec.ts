@@ -3,6 +3,7 @@ import { FacilitiesService } from './facilities.service'
 import type { InventoryService } from '../inventory/inventory.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { TariffService } from '../tariff/tariff.service'
+import type { OperatorScopeService } from '../common/authz/operator-scope.service'
 
 const decimal = (n: number) => ({ toNumber: () => n }) as never
 
@@ -38,6 +39,7 @@ describe('FacilitiesService.search', () => {
       prisma as unknown as PrismaService,
       inventory as unknown as InventoryService,
       tariff as unknown as TariffService,
+      {} as unknown as OperatorScopeService,
     )
   })
 

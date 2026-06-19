@@ -2,6 +2,7 @@ import { RateUnit, CapScope, type VehicleType } from '@prisma/client'
 import { TariffService } from './tariff.service'
 import { priceStay } from './pricing-engine'
 import type { CompiledPlan, CompiledCap } from './tariff.types'
+import type { OperatorScopeService } from '../common/authz/operator-scope.service'
 import type { PrismaService } from '../prisma/prisma.service'
 
 const CAR = 'CAR' as VehicleType
@@ -325,7 +326,10 @@ describe('TariffService.computeTotalsByFacility', () => {
 
   beforeEach(() => {
     prisma = { tariffPlan: { findMany: jest.fn() } }
-    service = new TariffService(prisma as unknown as PrismaService)
+    service = new TariffService(
+      prisma as unknown as PrismaService,
+      {} as unknown as OperatorScopeService,
+    )
   })
 
   it('issues ONE findMany and totals the first plan per facility', async () => {

@@ -61,3 +61,80 @@ export const quoteSchema = z
   })
 
 export type QuoteDto = z.infer<typeof quoteSchema>
+
+const lowercaseVehicleEnum = z.enum(['car', 'motorcycle', 'van', 'truck'])
+
+const timeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Expected HH:mm')
+
+export const openingHoursSchema = z.object({
+  is24h: z.boolean(),
+  schedule: z
+    .record(z.string(), z.object({ open: timeOfDay, close: timeOfDay }).nullable())
+    .optional(),
+})
+
+export const createFacilitySchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    address: z.string().min(1).max(300),
+    lat: z.number().min(-90).max(90),
+    lng: z.number().min(-180).max(180),
+    totalCapacity: z.number().int().positive().max(100_000),
+    onlineQuota: z.number().int().nonnegative().max(100_000),
+    vehicleTypes: z.array(lowercaseVehicleEnum).min(1),
+    heightRestrictionCm: z.number().int().positive().max(1_000).optional(),
+    openingHours: openingHoursSchema,
+    amenities: z.array(z.string().min(1).max(60)).max(50).default([]),
+    cancellationPolicy: z.string().max(2_000).default(''),
+    operatorId: z.string().min(1).optional(),
+  })
+  .refine((data) => data.onlineQuota <= data.totalCapacity, {
+    message: 'onlineQuota cannot exceed totalCapacity',
+    path: ['onlineQuota'],
+  })
+
+export type CreateFacilityDto = z.infer<typeof createFacilitySchema>
+
+export const updateFacilitySchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    address: z.string().min(1).max(300).optional(),
+    lat: z.number().min(-90).max(90).optional(),
+    lng: z.number().min(-180).max(180).optional(),
+    totalCapacity: z.number().int().positive().max(100_000).optional(),
+    onlineQuota: z.number().int().nonnegative().max(100_000).optional(),
+    vehicleTypes: z.array(lowercaseVehicleEnum).min(1).optional(),
+    heightRestrictionCm: z.number().int().positive().max(1_000).optional(),
+    openingHours: openingHoursSchema.optional(),
+    amenities: z.array(z.string().min(1).max(60)).max(50).optional(),
+    cancellationPolicy: z.string().max(2_000).optional(),
+    isActive: z.boolean().optional(),
+    isVerified: z.boolean().optional(),
+    rank: z.number().int().optional(),
+  })
+  .refine((data) => Object.keys(data).length > 0, {
+    message: 'At least one field must be provided',
+  })
+  .refine(
+    (data) =>
+      data.onlineQuota === undefined ||
+      data.totalCapacity === undefined ||
+      data.onlineQuota <= data.totalCapacity,
+    { message: 'onlineQuota cannot exceed totalCapacity', path: ['onlineQuota'] },
+  )
+
+export type UpdateFacilityDto = z.infer<typeof updateFacilitySchema>
+
+export const listFacilitiesSchema = z.object({
+  skip: z.coerce.number().int().nonnegative().default(0),
+  take: z.coerce.number().int().positive().max(100).default(20),
+  q: z.string().trim().max(200).optional(),
+  isActive: z.preprocess((v) => (typeof v === 'string' ? v === 'true' : v), z.boolean().optional()),
+  isVerified: z.preprocess(
+    (v) => (typeof v === 'string' ? v === 'true' : v),
+    z.boolean().optional(),
+  ),
+  operatorId: z.string().min(1).optional(),
+})
+
+export type ListFacilitiesDto = z.infer<typeof listFacilitiesSchema>

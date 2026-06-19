@@ -1,4 +1,4 @@
-import type { VehicleType } from '@prisma/client'
+import type { BookingStatus, VehicleType } from '@prisma/client'
 
 export interface CreateBookingRequest {
   facilityId: string
@@ -32,4 +32,26 @@ export interface ConfirmedBooking {
   endsAt: Date
   finalPriceCents: number
   currency: string
+}
+
+export interface BookingListItem {
+  id: string
+  accessCode: string
+  status: BookingStatus
+  startsAt: Date
+  endsAt: Date
+  vehiclePlate: string
+  vehicleType: VehicleType
+  quotedPriceCents: number
+  finalPriceCents: number | null
+  currency: string
+  facility: { id: string; name: string }
+  createdAt: Date
+}
+
+export interface BookingList {
+  items: BookingListItem[]
+  total: number
+  skip: number
+  take: number
 }

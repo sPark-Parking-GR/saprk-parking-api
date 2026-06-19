@@ -1,12 +1,32 @@
-import { Controller, Get, Param, Query } from '@nestjs/common'
-import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common'
+import { Throttle } from '@nestjs/throttler'
+import type { AuthUser } from '@spark/types'
+import { CurrentUser } from '../auth/decorators/current-user.decorator'
+import { Roles } from '../auth/decorators/roles.decorator'
 import { Public } from '../auth/decorators/public.decorator'
+import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { FacilitiesService } from './facilities.service'
 import {
+  createFacilitySchema,
+  listFacilitiesSchema,
   quoteSchema,
   searchFacilitiesSchema,
+  updateFacilitySchema,
+  type CreateFacilityDto,
+  type ListFacilitiesDto,
   type QuoteDto,
   type SearchFacilitiesDto,
+  type UpdateFacilityDto,
 } from './dto/facility.dto'
 
 @Controller('facilities')
@@ -29,6 +49,50 @@ export class FacilitiesController {
       endsAt: query.endsAt,
       vehicleType: query.vehicleType,
     })
+  }
+
+  @Roles('operator_staff', 'operator_admin', 'platform_admin')
+  @Get()
+  list(
+    @Query(new ZodValidationPipe(listFacilitiesSchema)) query: ListFacilitiesDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.facilities.adminList(user, query)
+  }
+
+  @Roles('operator_staff', 'operator_admin', 'platform_admin')
+  @Get(':id/manage')
+  manage(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.facilities.adminGetById(user, id)
+  }
+
+  @Roles('operator_admin', 'platform_admin')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Post()
+  create(
+    @Body(new ZodValidationPipe(createFacilitySchema)) body: CreateFacilityDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.facilities.create(user, body)
+  }
+
+  @Roles('operator_admin', 'platform_admin')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Patch(':id')
+  update(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(updateFacilitySchema)) body: UpdateFacilityDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.facilities.update(user, id, body)
+  }
+
+  @Roles('operator_admin', 'platform_admin')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Delete(':id')
+  @HttpCode(204)
+  remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.facilities.softDelete(user, id)
   }
 
   @Public()

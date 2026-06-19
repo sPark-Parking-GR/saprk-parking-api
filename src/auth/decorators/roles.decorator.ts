@@ -1,5 +1,5 @@
 import { SetMetadata } from '@nestjs/common'
-import type { UserRole } from '@parqin/types'
+import type { UserRole } from '@spark/types'
 
 export const ROLES_KEY = 'roles'
 

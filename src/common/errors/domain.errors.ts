@@ -54,3 +54,15 @@ export class IdempotencyConflictError extends DomainError {
     super(`A booking with idempotency key ${key} already exists`)
   }
 }
+
+export class OperatorContextRequiredError extends DomainError {
+  constructor() {
+    super('No operator context for this user')
+  }
+}
+
+export class FacilityFieldForbiddenError extends DomainError {
+  constructor(field: string) {
+    super(`Field ${field} cannot be set by this role`)
+  }
+}
