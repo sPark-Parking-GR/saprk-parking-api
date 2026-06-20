@@ -8,6 +8,12 @@ import {
 } from '@nestjs/common'
 import type { FastifyReply } from 'fastify'
 import {
+  AuthError,
+  EmailInUseError,
+  InvalidCredentialsError,
+  InvalidTokenError,
+} from '@spark/auth'
+import {
   BookingNotFoundError,
   BookingStatusTransitionError,
   DomainError,
@@ -48,7 +54,7 @@ export class DomainExceptionFilter implements ExceptionFilter {
 
     const status = this.statusForDomainError(exception)
     if (status) {
-      return { status, body: { message: (exception as DomainError).message } }
+      return { status, body: { message: (exception as Error).message } }
     }
 
     return {
@@ -58,6 +64,12 @@ export class DomainExceptionFilter implements ExceptionFilter {
   }
 
   private statusForDomainError(exception: unknown): number | null {
+    if (exception instanceof InvalidCredentialsError || exception instanceof InvalidTokenError) {
+      return HttpStatus.UNAUTHORIZED
+    }
+    if (exception instanceof EmailInUseError) {
+      return HttpStatus.CONFLICT
+    }
     if (exception instanceof FacilityNotFoundError || exception instanceof BookingNotFoundError) {
       return HttpStatus.NOT_FOUND
     }
@@ -78,7 +90,7 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception instanceof NoApplicableTariffError) {
       return HttpStatus.UNPROCESSABLE_ENTITY
     }
-    if (exception instanceof DomainError) {
+    if (exception instanceof DomainError || exception instanceof AuthError) {
       return HttpStatus.BAD_REQUEST
     }
     return null

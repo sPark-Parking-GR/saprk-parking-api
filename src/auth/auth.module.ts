@@ -2,16 +2,24 @@ import { Module } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import { createAuthContext } from '@spark/auth'
 import type { AuthProviderConfig } from '@spark/auth'
+import { PrismaService } from '../prisma/prisma.service'
 import { AUTH_CONTEXT_TOKEN } from './auth.constants'
 import { AuthController } from './auth.controller'
 import { AuthService } from './auth.service'
+import { PrismaAuthJsUserStore } from './authjs-user.store'
 
-function resolveAuthConfig(config: ConfigService): AuthProviderConfig {
+function resolveAuthConfig(config: ConfigService, prisma: PrismaService): AuthProviderConfig {
   const provider = (config.get<string>('AUTH_PROVIDER') ?? 'authjs') as AuthProviderConfig['provider']
 
   switch (provider) {
     case 'authjs':
-      return { provider: 'authjs', config: { secret: config.getOrThrow('AUTH_SECRET') } }
+      return {
+        provider: 'authjs',
+        config: {
+          secret: config.getOrThrow('AUTH_SECRET'),
+          store: new PrismaAuthJsUserStore(prisma),
+        },
+      }
     case 'firebase':
       return {
         provider: 'firebase',
@@ -47,8 +55,9 @@ function resolveAuthConfig(config: ConfigService): AuthProviderConfig {
   providers: [
     {
       provide: AUTH_CONTEXT_TOKEN,
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => createAuthContext(resolveAuthConfig(config)),
+      inject: [ConfigService, PrismaService],
+      useFactory: (config: ConfigService, prisma: PrismaService) =>
+        createAuthContext(resolveAuthConfig(config, prisma)),
     },
     AuthService,
   ],

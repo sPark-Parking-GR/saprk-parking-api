@@ -1,6 +1,17 @@
-import { PrismaClient, VehicleType, OperatorStatus, RateUnit, CapScope } from '@prisma/client'
+import {
+  PrismaClient,
+  VehicleType,
+  OperatorStatus,
+  RateUnit,
+  CapScope,
+  UserRole,
+  OperatorMemberRole,
+} from '@prisma/client'
+import { hashPassword } from '@spark/auth'
 
 const prisma = new PrismaClient()
+
+const DEV_PASSWORD = 'sPark!Dev2026'
 
 async function main() {
   // ── Operators ──────────────────────────────────────────────────────────────
@@ -28,6 +39,10 @@ async function main() {
       verifiedAt: new Date(),
     },
   })
+
+  // ── Users ────────────────────────────────────────────────────────────────────
+
+  await seedUsers(opAthens.id, opThess.id)
 
   // ── Facilities ─────────────────────────────────────────────────────────────
 
@@ -120,6 +135,70 @@ async function main() {
   }
 
   console.warn(`Seed complete: ${facilities.length} facilities across Athens and Thessaloniki.`)
+}
+
+async function seedUsers(athensOperatorId: string, thessOperatorId: string): Promise<void> {
+  const passwordHash = hashPassword(DEV_PASSWORD)
+
+  const accounts: Array<{
+    email: string
+    role: UserRole
+    displayName: string
+    membership?: { operatorId: string; role: OperatorMemberRole }
+  }> = [
+    { email: 'superadmin@spark.gr', role: UserRole.PLATFORM_ADMIN, displayName: 'Platform Super Admin' },
+    {
+      email: 'admin.athens@spark.gr',
+      role: UserRole.OPERATOR_ADMIN,
+      displayName: 'Athens Operator Admin',
+      membership: { operatorId: athensOperatorId, role: OperatorMemberRole.ADMIN },
+    },
+    {
+      email: 'staff.athens@spark.gr',
+      role: UserRole.OPERATOR_STAFF,
+      displayName: 'Athens Operator Staff',
+      membership: { operatorId: athensOperatorId, role: OperatorMemberRole.STAFF },
+    },
+    {
+      email: 'admin.thessaloniki@spark.gr',
+      role: UserRole.OPERATOR_ADMIN,
+      displayName: 'Thessaloniki Operator Admin',
+      membership: { operatorId: thessOperatorId, role: OperatorMemberRole.ADMIN },
+    },
+  ]
+
+  for (const account of accounts) {
+    const user = await prisma.user.upsert({
+      where: { email: account.email },
+      update: { passwordHash, role: account.role, displayName: account.displayName, emailVerified: true },
+      create: {
+        email: account.email,
+        passwordHash,
+        role: account.role,
+        displayName: account.displayName,
+        emailVerified: true,
+      },
+    })
+
+    if (account.membership) {
+      await prisma.operatorMembership.upsert({
+        where: {
+          operatorId_userId: { operatorId: account.membership.operatorId, userId: user.id },
+        },
+        update: { role: account.membership.role },
+        create: {
+          operatorId: account.membership.operatorId,
+          userId: user.id,
+          role: account.membership.role,
+        },
+      })
+    }
+  }
+
+  console.warn(
+    `Seeded ${accounts.length} dashboard users (password: "${DEV_PASSWORD}"):\n` +
+      accounts.map((a) => `  - ${a.email} [${a.role}]`).join('\n'),
+  )
 }
 
 async function seedTariff(facilityId: string, facilityName: string): Promise<void> {
