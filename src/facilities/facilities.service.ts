@@ -12,19 +12,19 @@ import {
 import { InventoryService } from '../inventory/inventory.service'
 import { PrismaService } from '../prisma/prisma.service'
 import { TariffService } from '../tariff/tariff.service'
-import type {
-  CreateFacilityDto,
-  ListFacilitiesDto,
-  UpdateFacilityDto,
-} from './dto/facility.dto'
+import type { CreateFacilityDto, ListFacilitiesDto, UpdateFacilityDto } from './dto/facility.dto'
 import type {
   AdminFacility,
   AdminFacilityList,
   AdminFacilityListItem,
+  FacilityCluster,
   FacilitySearchParams,
+  FacilitySearchResponse,
   FacilitySearchResult,
   MapBounds,
 } from './facilities.types'
+
+const MAX_POINTS = 250
 
 const VEHICLE_TO_PRISMA: Record<ContractVehicleType, VehicleType> = {
   car: VehicleType.CAR,
@@ -55,7 +55,21 @@ export class FacilitiesService {
     private readonly operatorScope: OperatorScopeService,
   ) {}
 
-  async search(params: FacilitySearchParams): Promise<FacilitySearchResult[]> {
+  async search(params: FacilitySearchParams): Promise<FacilitySearchResponse> {
+    const { lat, lng, radiusMeters, bounds } = params
+
+    const total = await this.countInArea(lat, lng, radiusMeters, bounds)
+
+    if (bounds && total > MAX_POINTS) {
+      const clusters = await this.buildClusters(bounds)
+      return { mode: 'clusters', points: [], clusters, total }
+    }
+
+    const points = await this.searchPoints(params)
+    return { mode: 'points', points, clusters: [], total }
+  }
+
+  private async searchPoints(params: FacilitySearchParams): Promise<FacilitySearchResult[]> {
     const { lat, lng, radiusMeters, bounds, startsAt, endsAt, vehicleType } = params
 
     // GiST-indexed spatial prefilter: the bbox (or exact radius) lookup runs on the
@@ -136,7 +150,8 @@ export class FacilitiesService {
             AND ST_Intersects(
               "geog",
               ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326)::geography
-            )`
+            )
+          LIMIT ${MAX_POINTS}`
       : await this.prisma.$queryRaw<Array<{ id: string }>>`
           SELECT id FROM "Facility"
           WHERE "isActive" AND "isVerified"
@@ -144,8 +159,76 @@ export class FacilitiesService {
               "geog",
               ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography,
               ${radiusMeters}
-            )`
+            )
+          ORDER BY "geog" <-> ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography
+          LIMIT ${MAX_POINTS}`
     return rows.map((r) => r.id)
+  }
+
+  /**
+   * Cheap count of facilities in the search area using the same spatial predicate as
+   * the points prefilter, so clustering can be decided without hydrating any rows.
+   */
+  private async countInArea(
+    lat: number,
+    lng: number,
+    radiusMeters: number,
+    bounds?: MapBounds,
+  ): Promise<number> {
+    const rows = bounds
+      ? await this.prisma.$queryRaw<Array<{ count: number }>>`
+          SELECT count(*)::int AS count FROM "Facility"
+          WHERE "isActive" AND "isVerified"
+            AND ST_Intersects(
+              "geog",
+              ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326)::geography
+            )`
+      : await this.prisma.$queryRaw<Array<{ count: number }>>`
+          SELECT count(*)::int AS count FROM "Facility"
+          WHERE "isActive" AND "isVerified"
+            AND ST_DWithin(
+              "geog",
+              ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography,
+              ${radiusMeters}
+            )`
+    return rows[0]?.count ?? 0
+  }
+
+  /**
+   * Aggregates in-bounds facilities into a fixed 12x12 grid of the visible rectangle.
+   * The GiST index on `geog` serves the same ST_Intersects predicate as the points path.
+   */
+  private async buildClusters(bounds: MapBounds): Promise<FacilityCluster[]> {
+    const COLS = 12
+    const ROWS = 12
+    const cellLng = (bounds.east - bounds.west) / COLS
+    const cellLat = (bounds.north - bounds.south) / ROWS
+
+    const rows = await this.prisma.$queryRaw<
+      Array<{ gx: number; gy: number; count: number; lat: number; lng: number }>
+    >`
+      SELECT
+        floor((ST_X(g) - ${bounds.west}) / ${cellLng})::int AS gx,
+        floor((ST_Y(g) - ${bounds.south}) / ${cellLat})::int AS gy,
+        count(*)::int AS count,
+        avg(ST_Y(g)) AS lat,
+        avg(ST_X(g)) AS lng
+      FROM (
+        SELECT "geog"::geometry AS g FROM "Facility"
+        WHERE "isActive" AND "isVerified"
+          AND ST_Intersects(
+            "geog",
+            ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326)::geography
+          )
+      ) s
+      GROUP BY gx, gy`
+
+    return rows.map((r) => ({
+      id: `c_${r.gx}_${r.gy}`,
+      lat: Number(r.lat),
+      lng: Number(r.lng),
+      count: r.count,
+    }))
   }
 
   async getDetail(id: string) {
@@ -238,8 +321,7 @@ export class FacilitiesService {
   async create(user: AuthUser, dto: CreateFacilityDto): Promise<AdminFacility> {
     const scope = await this.operatorScope.resolve(user)
 
-    const operatorId =
-      scope.kind === 'platform' ? dto.operatorId : scope.operatorId
+    const operatorId = scope.kind === 'platform' ? dto.operatorId : scope.operatorId
     if (!operatorId) throw new DomainError('operatorId required')
 
     const operator = await this.prisma.parkingOperator.findUnique({
@@ -362,7 +444,10 @@ export class FacilitiesService {
     })
   }
 
-  private adminListWhere(scope: OperatorScope, query: ListFacilitiesDto): Prisma.FacilityWhereInput {
+  private adminListWhere(
+    scope: OperatorScope,
+    query: ListFacilitiesDto,
+  ): Prisma.FacilityWhereInput {
     const filters: Prisma.FacilityWhereInput[] = []
     if (query.q) {
       filters.push({

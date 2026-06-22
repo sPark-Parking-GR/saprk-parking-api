@@ -77,3 +77,17 @@ export interface FacilitySearchResult {
   rank: number
   thumbnailUrl: string | null
 }
+
+export interface FacilityCluster {
+  id: string
+  lat: number
+  lng: number
+  count: number
+}
+
+export interface FacilitySearchResponse {
+  mode: 'points' | 'clusters'
+  points: FacilitySearchResult[]
+  clusters: FacilityCluster[]
+  total: number
+}

@@ -68,15 +68,21 @@ describe('FacilitiesService.search', () => {
 
     expect(inventory.countOverlappingByFacility).toHaveBeenCalledTimes(1)
     expect(tariff.computeTotalsByFacility).toHaveBeenCalledTimes(1)
-    expect(inventory.countOverlappingByFacility).toHaveBeenCalledWith(['f1', 'f2'], startsAt, endsAt)
+    expect(inventory.countOverlappingByFacility).toHaveBeenCalledWith(
+      ['f1', 'f2'],
+      startsAt,
+      endsAt,
+    )
 
-    const f1 = res.find((r) => r.id === 'f1')!
+    expect(res.mode).toBe('points')
+
+    const f1 = res.points.find((r) => r.id === 'f1')!
     expect(f1.remainingSlots).toBe(4)
     expect(f1.available).toBe(true)
     expect(f1.priceCents).toBe(500)
     expect(f1.thumbnailUrl).toBe('thumb.jpg')
 
-    const f2 = res.find((r) => r.id === 'f2')!
+    const f2 = res.points.find((r) => r.id === 'f2')!
     expect(f2.remainingSlots).toBe(0)
     expect(f2.available).toBe(false)
     expect(f2.priceCents).toBeNull()
@@ -89,9 +95,15 @@ describe('FacilitiesService.search', () => {
       makeFacility({ id: 'f2', rank: 5, lat: decimal(37.99), lng: decimal(23.74) }),
     ])
 
-    const res = await service.search({ lat: 37.98, lng: 23.73, radiusMeters: 5000, startsAt, endsAt })
+    const res = await service.search({
+      lat: 37.98,
+      lng: 23.73,
+      radiusMeters: 5000,
+      startsAt,
+      endsAt,
+    })
 
-    expect(res.map((r) => r.id)).toEqual(['f2', 'f1'])
+    expect(res.points.map((r) => r.id)).toEqual(['f2', 'f1'])
   })
 
   it('hydrates only the ids returned by the spatial prefilter', async () => {
@@ -108,19 +120,53 @@ describe('FacilitiesService.search', () => {
     prisma.$queryRaw.mockResolvedValue([{ id: 'f1' }])
     prisma.facility.findMany.mockResolvedValue([makeFacility({})])
 
-    const res = await service.search({ lat: 37.98, lng: 23.73, radiusMeters: 5000, startsAt, endsAt })
+    const res = await service.search({
+      lat: 37.98,
+      lng: 23.73,
+      radiusMeters: 5000,
+      startsAt,
+      endsAt,
+    })
 
     expect(tariff.computeTotalsByFacility).not.toHaveBeenCalled()
-    expect(res[0]!.priceCents).toBeNull()
+    expect(res.points[0]!.priceCents).toBeNull()
   })
 
   it('returns empty without hydrating or batching when the prefilter matches nothing', async () => {
     prisma.$queryRaw.mockResolvedValue([])
 
-    const res = await service.search({ lat: 37.98, lng: 23.73, radiusMeters: 1000, startsAt, endsAt })
+    const res = await service.search({
+      lat: 37.98,
+      lng: 23.73,
+      radiusMeters: 1000,
+      startsAt,
+      endsAt,
+    })
 
-    expect(res).toEqual([])
+    expect(res.mode).toBe('points')
+    expect(res.points).toEqual([])
     expect(prisma.facility.findMany).not.toHaveBeenCalled()
     expect(inventory.countOverlappingByFacility).not.toHaveBeenCalled()
+  })
+
+  it('returns grid clusters (not points) when bounds match more than MAX_POINTS facilities', async () => {
+    prisma.$queryRaw
+      .mockResolvedValueOnce([{ count: 1000 }])
+      .mockResolvedValueOnce([{ gx: 0, gy: 0, count: 600, lat: 37.98, lng: 23.73 }])
+
+    const res = await service.search({
+      lat: 37.98,
+      lng: 23.73,
+      radiusMeters: 5000,
+      bounds: { north: 38, south: 37, east: 24, west: 23 },
+      startsAt,
+      endsAt,
+    })
+
+    expect(res.mode).toBe('clusters')
+    expect(res.total).toBe(1000)
+    expect(res.points).toEqual([])
+    expect(res.clusters).toEqual([{ id: 'c_0_0', lat: 37.98, lng: 23.73, count: 600 }])
+    expect(prisma.facility.findMany).not.toHaveBeenCalled()
   })
 })
