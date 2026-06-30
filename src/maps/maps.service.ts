@@ -32,6 +32,10 @@ export class MapsService {
     return this.maps.searchPlaces(query, options)
   }
 
+  getPlaceDetails(placeId: string): Promise<Place | null> {
+    return this.maps.getPlaceDetails(placeId)
+  }
+
   getDirections(
     origin: LatLng,
     destination: LatLng,

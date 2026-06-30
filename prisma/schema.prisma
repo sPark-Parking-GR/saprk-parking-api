@@ -6,7 +6,7 @@ generator client {
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
-  extensions = [postgis]
+  extensions = [postgis, pg_trgm]
 }
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
@@ -89,6 +89,25 @@ enum PromotionType {
   STANDARD
   FEATURED
   PREMIUM
+}
+
+enum IngestSource {
+  OSM
+  GOOGLE
+}
+
+enum RawPlaceStatus {
+  PENDING
+  PROCESSED
+  REJECTED
+  DUPLICATE
+}
+
+enum TileStatus {
+  PENDING
+  FETCHING
+  FETCHED
+  FAILED
 }
 
 // ─── User & Auth ──────────────────────────────────────────────────────────────
@@ -207,6 +226,17 @@ model Facility {
   isActive            Boolean  @default(false)
   isVerified          Boolean  @default(false)
   rank                Int      @default(0)
+  // Ingestion provenance. Null for operator-created facilities; set for rows
+  // promoted from RawPlace. sourceRef = OSM element id or Google place_id.
+  source              IngestSource?
+  sourceRef           String?
+  sourceUpdatedAt     DateTime?
+  contentHash         String?
+  // Google enrichment is a refreshable cache (ToS: place_id may persist, other
+  // fields must be refreshed). googleSyncedAt marks when the cached Google fields
+  // were last pulled so a refresh job can re-fetch before the TTL lapses.
+  googlePlaceId       String?  @unique
+  googleSyncedAt      DateTime?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -222,6 +252,7 @@ model Facility {
   // via raw SQL in the migration; Prisma treats it as an opaque column.
   geog Unsupported("geography(Point, 4326)")?
 
+  @@unique([source, sourceRef])
   @@index([lat, lng])
   @@index([isActive, isVerified])
   @@index([operatorId])
@@ -470,6 +501,60 @@ model Review {
 
   @@unique([facilityId, userId])
   @@index([facilityId])
+}
+
+// ─── Ingestion ────────────────────────────────────────────────────────────────
+
+// Landing zone for external data (OSM Overpass, Google Places). Raw payloads are
+// stored untouched, then normalized, deduped and promoted to Facility. Never write
+// external data straight to Facility.
+model RawPlace {
+  id          String         @id @default(cuid())
+  source      IngestSource
+  // OSM element id (e.g. "node/123") or Google place_id.
+  sourceRef   String
+  // 'node' | 'way' | 'relation' (OSM) or 'place' (Google).
+  sourceType  String
+  raw         Json
+  lat         Decimal        @db.Decimal(10, 7)
+  lng         Decimal        @db.Decimal(10, 7)
+  tileId      String?
+  // Hash of normalized payload; skip reprocessing when unchanged.
+  contentHash String
+  status      RawPlaceStatus @default(PENDING)
+  // Set once promoted/matched to a Facility.
+  facilityId  String?
+  fetchedAt   DateTime       @default(now())
+  processedAt DateTime?
+
+  // Generated geography point, kept in sync with lat/lng by the database. Managed
+  // via raw SQL in the migration; Prisma treats it as an opaque column.
+  geog Unsupported("geography(Point, 4326)")?
+
+  @@unique([source, sourceRef])
+  @@index([status])
+  @@index([tileId])
+  @@index([geog], type: Gist)
+}
+
+// Bounding-box tiles driving the tiled extract. Tracks per-tile coverage so runs
+// are incremental and resumable.
+model IngestTile {
+  id            String       @id @default(cuid())
+  source        IngestSource
+  south         Decimal      @db.Decimal(10, 7)
+  west          Decimal      @db.Decimal(10, 7)
+  north         Decimal      @db.Decimal(10, 7)
+  east          Decimal      @db.Decimal(10, 7)
+  status        TileStatus   @default(PENDING)
+  resultCount   Int          @default(0)
+  lastError     String?
+  lastFetchedAt DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([source, south, west, north, east])
+  @@index([source, status])
 }
 
 // ─── Audit ────────────────────────────────────────────────────────────────────

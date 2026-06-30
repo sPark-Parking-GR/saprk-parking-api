@@ -8,6 +8,7 @@ import { RolesGuard } from './auth/guards/roles.guard'
 import { BookingModule } from './booking/booking.module'
 import { DomainExceptionFilter } from './common/filters/domain-exception.filter'
 import { FacilitiesModule } from './facilities/facilities.module'
+import { IngestionModule } from './ingestion/ingestion.module'
 import { InventoryModule } from './inventory/inventory.module'
 import { JobsModule } from './jobs/jobs.module'
 import { MapsModule } from './maps/maps.module'
@@ -30,6 +31,7 @@ import { TariffModule } from './tariff/tariff.module'
     FacilitiesModule,
     BookingModule,
     JobsModule,
+    IngestionModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: DomainExceptionFilter },
