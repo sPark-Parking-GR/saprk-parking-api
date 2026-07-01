@@ -1,4 +1,4 @@
-import { VehicleType } from '@prisma/client'
+import { FacilityKind, VehicleType } from '@prisma/client'
 import { normalizeOsm } from './osm-normalizer'
 
 const base = { sourceRef: 'node/1', lat: 37.98, lng: 23.72 }
@@ -99,6 +99,35 @@ describe('normalizeOsm', () => {
       expect(normalizeOsm({ ...base, tags: { access: 'customers' } }).access).toBe('customers')
       expect(normalizeOsm({ ...base, tags: { access: 'yes' } }).access).toBe('public')
       expect(normalizeOsm({ ...base, tags: {} }).access).toBe('public')
+    })
+  })
+
+  describe('kind classification', () => {
+    it('classifies a restricted-access lot as RESTRICTED regardless of fee', () => {
+      expect(normalizeOsm({ ...base, tags: { access: 'private', fee: 'yes' } }).kind).toBe(FacilityKind.RESTRICTED)
+      expect(normalizeOsm({ ...base, tags: { access: 'customers' } }).kind).toBe(FacilityKind.RESTRICTED)
+      expect(normalizeOsm({ ...base, tags: { access: 'permit' } }).kind).toBe(FacilityKind.RESTRICTED)
+    })
+
+    it('classifies a paid lot as BUSINESS', () => {
+      expect(normalizeOsm({ ...base, tags: { fee: 'yes' } }).kind).toBe(FacilityKind.BUSINESS)
+    })
+
+    it('classifies a covered/built parking structure as BUSINESS', () => {
+      expect(normalizeOsm({ ...base, tags: { parking: 'underground' } }).kind).toBe(FacilityKind.BUSINESS)
+      expect(normalizeOsm({ ...base, tags: { parking: 'multi-storey' } }).kind).toBe(FacilityKind.BUSINESS)
+      expect(normalizeOsm({ ...base, tags: { parking: 'garage' } }).kind).toBe(FacilityKind.BUSINESS)
+    })
+
+    it('classifies free and on-street lots as FREE_PUBLIC', () => {
+      expect(normalizeOsm({ ...base, tags: { fee: 'no' } }).kind).toBe(FacilityKind.FREE_PUBLIC)
+      expect(normalizeOsm({ ...base, tags: { parking: 'street_side' } }).kind).toBe(FacilityKind.FREE_PUBLIC)
+      expect(normalizeOsm({ ...base, tags: { parking: 'lane' } }).kind).toBe(FacilityKind.FREE_PUBLIC)
+    })
+
+    it('leaves an untagged surface lot UNKNOWN for review', () => {
+      expect(normalizeOsm({ ...base, tags: { parking: 'surface' } }).kind).toBe(FacilityKind.UNKNOWN)
+      expect(normalizeOsm({ ...base, tags: {} }).kind).toBe(FacilityKind.UNKNOWN)
     })
   })
 

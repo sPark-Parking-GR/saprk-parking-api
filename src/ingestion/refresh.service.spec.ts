@@ -57,6 +57,7 @@ describe('RefreshService.refreshStale', () => {
     expect(data.address).toBe('New Addr')
     expect(data.openingHoursJson).toEqual({ is24h: true })
     expect(data.amenities.sort()).toEqual(['24h_access', 'covered'])
+    expect(data.kind).toBe('BUSINESS')
     expect(data.googleSyncedAt).toBeInstanceOf(Date)
   })
 

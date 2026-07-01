@@ -1,4 +1,4 @@
-import type { IngestSource, VehicleType } from '@prisma/client'
+import type { FacilityKind, IngestSource, VehicleType } from '@prisma/client'
 
 export type AccessClass = 'public' | 'private' | 'customers'
 
@@ -21,6 +21,7 @@ export interface CanonicalPlace {
   address: string
   lat: number
   lng: number
+  kind: FacilityKind
   totalCapacity: number
   vehicleTypes: VehicleType[]
   heightRestrictionCm: number | null

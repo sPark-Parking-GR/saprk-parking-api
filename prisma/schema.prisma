@@ -110,6 +110,15 @@ enum TileStatus {
   FAILED
 }
 
+// How a facility is used, so free public lots and commercial parking businesses are
+// managed separately. OSM mixes both; Google only ever returns real businesses.
+enum FacilityKind {
+  BUSINESS    // commercial parking operation (paid; bookable candidate)
+  FREE_PUBLIC // free public / on-street parking area — never bookable
+  RESTRICTED  // private or customers-only — not public
+  UNKNOWN     // insufficient source signal to classify
+}
+
 // ─── User & Auth ──────────────────────────────────────────────────────────────
 
 model User {
@@ -226,6 +235,9 @@ model Facility {
   isActive            Boolean  @default(false)
   isVerified          Boolean  @default(false)
   rank                Int      @default(0)
+  // Free public lot vs commercial parking business vs restricted. Classified at
+  // ingestion; lets the two be surfaced and managed separately.
+  kind                FacilityKind @default(UNKNOWN)
   // Ingestion provenance. Null for operator-created facilities; set for rows
   // promoted from RawPlace. sourceRef = OSM element id or Google place_id.
   source              IngestSource?
@@ -255,6 +267,7 @@ model Facility {
   @@unique([source, sourceRef])
   @@index([lat, lng])
   @@index([isActive, isVerified])
+  @@index([kind, isActive])
   @@index([operatorId])
   @@index([geog], type: Gist)
 }

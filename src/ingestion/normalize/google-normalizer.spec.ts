@@ -1,4 +1,4 @@
-import { IngestSource, VehicleType } from '@prisma/client'
+import { FacilityKind, IngestSource, VehicleType } from '@prisma/client'
 import type { Place } from '@spark/types'
 import { normalizeGoogle } from './google-normalizer'
 
@@ -27,6 +27,7 @@ describe('normalizeGoogle', () => {
     expect(out.totalCapacity).toBe(0)
     expect(out.heightRestrictionCm).toBeNull()
     expect(out.vehicleTypes).toEqual([VehicleType.CAR])
+    expect(out.kind).toBe(FacilityKind.BUSINESS)
   })
 
   describe('opening hours', () => {

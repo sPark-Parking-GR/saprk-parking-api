@@ -8,6 +8,7 @@ import {
   INGESTION_PROMOTE_QUEUE,
   INGESTION_QUEUE,
   INGESTION_REFRESH_QUEUE,
+  INGESTION_SWEEP_QUEUE,
   REFRESH_INTERVAL_MS,
 } from './ingestion.constants'
 import { GoogleFetchProcessor } from './google.processor'
@@ -19,6 +20,7 @@ import { PromotionProcessor } from './promotion.processor'
 import { PromotionService } from './promotion.service'
 import { RefreshProcessor } from './refresh.processor'
 import { RefreshService } from './refresh.service'
+import { SweepProcessor } from './sweep.processor'
 
 @Module({
   imports: [
@@ -27,6 +29,7 @@ import { RefreshService } from './refresh.service'
     BullModule.registerQueue({ name: INGESTION_GOOGLE_QUEUE }),
     BullModule.registerQueue({ name: INGESTION_PROMOTE_QUEUE }),
     BullModule.registerQueue({ name: INGESTION_REFRESH_QUEUE }),
+    BullModule.registerQueue({ name: INGESTION_SWEEP_QUEUE }),
   ],
   controllers: [IngestionController],
   providers: [
@@ -38,6 +41,7 @@ import { RefreshService } from './refresh.service'
     PromotionProcessor,
     RefreshService,
     RefreshProcessor,
+    SweepProcessor,
   ],
 })
 export class IngestionModule implements OnModuleInit {

@@ -8,10 +8,11 @@ import { MapsService } from '../maps/maps.service'
 import { PrismaService } from '../prisma/prisma.service'
 import {
   GOOGLE_MAX_RESULTS,
-  GOOGLE_NEARBY_RADIUS_METERS,
+  GOOGLE_MAX_SUBDIVIDE_DEPTH,
   INGESTION_GOOGLE_QUEUE,
 } from './ingestion.constants'
-import type { TileFetchJobData } from './ingestion.service'
+import { IngestionService, type TileFetchJobData } from './ingestion.service'
+import { quadrants, tileRadiusMeters } from './tiling'
 
 @Processor(INGESTION_GOOGLE_QUEUE, { concurrency: 1, limiter: { max: 5, duration: 1_000 } })
 export class GoogleFetchProcessor extends WorkerHost {
@@ -20,12 +21,13 @@ export class GoogleFetchProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly maps: MapsService,
+    private readonly ingestion: IngestionService,
   ) {
     super()
   }
 
   async process(job: Job<TileFetchJobData>): Promise<void> {
-    const { tileId, tile } = job.data
+    const { tileId, tile, depth = 0 } = job.data
     await this.prisma.ingestTile.update({
       where: { id: tileId },
       data: { status: TileStatus.FETCHING },
@@ -35,7 +37,7 @@ export class GoogleFetchProcessor extends WorkerHost {
       const center = { lat: (tile.south + tile.north) / 2, lng: (tile.west + tile.east) / 2 }
       const places = await this.maps.searchPlaces('', {
         location: center,
-        radius: GOOGLE_NEARBY_RADIUS_METERS,
+        radius: tileRadiusMeters(tile),
         types: ['parking'],
       })
 
@@ -44,8 +46,18 @@ export class GoogleFetchProcessor extends WorkerHost {
         if (await this.storePlace(place, tileId)) stored++
       }
 
+      // Cap hit = likely truncation. Recover by re-fetching four quadrant subtiles
+      // (enqueued before this tile is marked FETCHED, so the sweep's region wait sees
+      // them and does not promote early). At the depth floor we accept the truncation.
       if (places.length >= GOOGLE_MAX_RESULTS) {
-        this.logger.warn(`Tile ${tileId} hit the ${GOOGLE_MAX_RESULTS}-result cap — possible truncation`)
+        if (depth < GOOGLE_MAX_SUBDIVIDE_DEPTH) {
+          await this.ingestion.enqueueGoogleSubtiles(quadrants(tile), depth + 1)
+          this.logger.log(`Tile ${tileId} hit the cap — subdividing at depth ${depth + 1}`)
+        } else {
+          this.logger.warn(
+            `Tile ${tileId} hit the ${GOOGLE_MAX_RESULTS}-result cap at max depth — truncation accepted`,
+          )
+        }
       }
 
       await this.prisma.ingestTile.update({

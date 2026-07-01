@@ -1,4 +1,4 @@
-import { IngestSource, VehicleType } from '@prisma/client'
+import { FacilityKind, IngestSource, VehicleType } from '@prisma/client'
 import type { AccessClass, CanonicalOpeningHours, CanonicalPlace, CanonicalRule } from './canonical'
 
 export interface OsmInput {
@@ -59,6 +59,28 @@ function parseOpeningHours(value: string | undefined): CanonicalOpeningHours {
   return { is24h: false }
 }
 
+// OSM parking mixes free public/on-street lots with commercial garages. Classify so
+// the two are managed separately, most-decisive signal first: access restrictions win
+// (a private/customers/permit lot is not publicly usable regardless of fee), then the
+// explicit fee tag, then geometry — on-street is free, a covered/built structure
+// (underground/multi-storey/garage) is an operated commercial facility. Anything left
+// is UNKNOWN for review rather than guessed.
+const ON_STREET = new Set(['street_side', 'lane'])
+const RESTRICTED_ACCESS = new Set(['private', 'customers', 'permit'])
+
+export function classifyOsm(tags: Record<string, string>): FacilityKind {
+  if (RESTRICTED_ACCESS.has(tags['access'] ?? '')) return FacilityKind.RESTRICTED
+
+  const fee = tags['fee']
+  if (fee === 'yes') return FacilityKind.BUSINESS
+  if (fee === 'no' || fee === 'free') return FacilityKind.FREE_PUBLIC
+
+  const parking = tags['parking'] ?? ''
+  if (ON_STREET.has(parking)) return FacilityKind.FREE_PUBLIC
+  if (COVERED_TYPES.has(parking)) return FacilityKind.BUSINESS
+  return FacilityKind.UNKNOWN
+}
+
 function deriveAccess(tags: Record<string, string>): AccessClass {
   switch (tags['access']) {
     case 'private':
@@ -110,6 +132,7 @@ export function normalizeOsm(input: OsmInput): CanonicalPlace {
     address: deriveAddress(tags),
     lat: input.lat,
     lng: input.lng,
+    kind: classifyOsm(tags),
     totalCapacity: parseCapacity(tags['capacity']),
     vehicleTypes: [VehicleType.CAR],
     heightRestrictionCm: parseHeightCm(tags['maxheight']),

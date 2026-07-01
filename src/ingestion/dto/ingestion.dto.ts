@@ -1,7 +1,7 @@
 import { VehicleType } from '@prisma/client'
 import { z } from 'zod'
 import { openingHoursSchema } from '../../facilities/dto/facility.dto'
-import { DEFAULT_TILE_DEGREES } from '../ingestion.constants'
+import { DEFAULT_TILE_DEGREES, GREEK_CITY_REGIONS } from '../ingestion.constants'
 
 export const ingestRegionSchema = z
   .object({
@@ -21,6 +21,25 @@ export const ingestRegionSchema = z
   })
 
 export type IngestRegionDto = z.infer<typeof ingestRegionSchema>
+
+// Sweep: drive the full osm→google→promote pipeline over a set of areas at once.
+// Areas come by known city name and/or as explicit bounding boxes; at least one
+// area is required so a sweep never no-ops.
+const cityNameSchema = z.enum(
+  Object.keys(GREEK_CITY_REGIONS) as [string, ...string[]],
+)
+
+export const sweepSchema = z
+  .object({
+    cities: z.array(cityNameSchema).max(50).default([]),
+    regions: z.array(ingestRegionSchema).max(50).default([]),
+  })
+  .refine((b) => b.cities.length + b.regions.length > 0, {
+    message: 'provide at least one city or region',
+    path: ['cities'],
+  })
+
+export type SweepDto = z.infer<typeof sweepSchema>
 
 // Looser than the operator-facing createFacilitySchema: external sources often
 // lack capacity, address or hours. Catalog rows are non-bookable, so zero capacity

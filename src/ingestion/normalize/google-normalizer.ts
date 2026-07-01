@@ -1,4 +1,4 @@
-import { IngestSource, VehicleType } from '@prisma/client'
+import { FacilityKind, IngestSource, VehicleType } from '@prisma/client'
 import type { Place } from '@spark/types'
 import {
   DAY_NAMES,
@@ -53,6 +53,8 @@ export function normalizeGoogle(place: Place): CanonicalPlace {
     address: place.address.formattedAddress,
     lat: place.coordinates.lat,
     lng: place.coordinates.lng,
+    // Google Places only surfaces real parking businesses, never free public lots.
+    kind: FacilityKind.BUSINESS,
     totalCapacity: 0,
     vehicleTypes: [VehicleType.CAR],
     heightRestrictionCm: null,

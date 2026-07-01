@@ -1,6 +1,6 @@
 import { InjectQueue } from '@nestjs/bullmq'
 import { Injectable, Logger } from '@nestjs/common'
-import { Prisma } from '@prisma/client'
+import { FacilityKind, Prisma } from '@prisma/client'
 import { Queue } from 'bullmq'
 import { MapsService } from '../maps/maps.service'
 import { PrismaService } from '../prisma/prisma.service'
@@ -98,6 +98,9 @@ export class RefreshService {
           ...(canonical.address ? { address: canonical.address } : {}),
           openingHoursJson: canonical.openingHours as unknown as Prisma.InputJsonValue,
           amenities,
+          // A live Google place is a business — keep kind in sync so rows synced before
+          // classification existed self-heal on refresh.
+          kind: FacilityKind.BUSINESS,
           googleSyncedAt: new Date(),
         },
       })

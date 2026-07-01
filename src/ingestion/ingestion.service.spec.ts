@@ -7,6 +7,7 @@ describe('IngestionService.enqueueRegion', () => {
   let queue: { add: jest.Mock }
   let googleQueue: { add: jest.Mock }
   let promoteQueue: { add: jest.Mock }
+  let sweepQueue: { add: jest.Mock }
   let service: IngestionService
 
   beforeEach(() => {
@@ -19,11 +20,13 @@ describe('IngestionService.enqueueRegion', () => {
     queue = { add: jest.fn().mockResolvedValue(undefined) }
     googleQueue = { add: jest.fn().mockResolvedValue(undefined) }
     promoteQueue = { add: jest.fn().mockResolvedValue(undefined) }
+    sweepQueue = { add: jest.fn().mockResolvedValue(undefined) }
     service = new IngestionService(
       prisma as unknown as PrismaService,
       queue as unknown as Queue,
       googleQueue as unknown as Queue,
       promoteQueue as unknown as Queue,
+      sweepQueue as unknown as Queue,
     )
   })
 
