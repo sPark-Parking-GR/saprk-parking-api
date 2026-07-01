@@ -75,6 +75,7 @@ describe('FacilitiesService admin writes', () => {
       count: jest.Mock
       create: jest.Mock
       update: jest.Mock
+      updateMany: jest.Mock
     }
     parkingOperator: { findUnique: jest.Mock }
     auditLog: { create: jest.Mock }
@@ -91,7 +92,11 @@ describe('FacilitiesService admin writes', () => {
 
   beforeEach(() => {
     const tx = {
-      facility: { create: jest.fn(), update: jest.fn() },
+      facility: {
+        create: jest.fn(),
+        update: jest.fn(),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
       auditLog: { create: jest.fn() },
     }
     prisma = {
@@ -101,6 +106,7 @@ describe('FacilitiesService admin writes', () => {
         count: jest.fn().mockResolvedValue(0),
         create: tx.facility.create,
         update: tx.facility.update,
+        updateMany: tx.facility.updateMany,
       },
       parkingOperator: { findUnique: jest.fn().mockResolvedValue({ id: 'op1' }) },
       auditLog: { create: tx.auditLog.create },
@@ -229,6 +235,89 @@ describe('FacilitiesService admin writes', () => {
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ action: 'facility.deactivated' }) }),
     )
+  })
+
+  it('admin list exposes kind and operator name', async () => {
+    setScope({ kind: 'platform' })
+    prisma.facility.findMany.mockResolvedValue([
+      makeRow({ kind: 'BUSINESS', source: 'GOOGLE', operator: { name: 'Acme Parking' } }),
+    ])
+    prisma.facility.count.mockResolvedValue(1)
+
+    const res = await service.adminList(platformUser, { skip: 0, take: 20 })
+
+    expect(prisma.facility.findMany.mock.calls[0]![0].select.operator).toEqual({
+      select: { name: true },
+    })
+    expect(res.items[0]).toMatchObject({
+      kind: 'BUSINESS',
+      source: 'GOOGLE',
+      operatorName: 'Acme Parking',
+    })
+    expect((res.items[0] as unknown as { operator?: unknown }).operator).toBeUndefined()
+  })
+
+  it('admin list filters by kind', async () => {
+    setScope({ kind: 'platform' })
+
+    await service.adminList(platformUser, { skip: 0, take: 20, kind: 'UNKNOWN' })
+
+    const where = prisma.facility.findMany.mock.calls[0]![0].where
+    expect(where.AND).toEqual([{ kind: 'UNKNOWN' }])
+  })
+
+  it('bulk deploy activates and verifies scoped rows and audits', async () => {
+    setScope({ kind: 'platform' })
+    prisma.facility.updateMany.mockResolvedValue({ count: 3 })
+
+    const res = await service.bulkUpdate(platformUser, {
+      ids: ['a', 'b', 'c'],
+      action: 'deploy',
+    })
+
+    expect(res).toEqual({ affected: 3 })
+    expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['a', 'b', 'c'] } },
+      data: { isActive: true, isVerified: true },
+    })
+    expect(prisma.auditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'facility.bulk.deploy' }),
+      }),
+    )
+  })
+
+  it('bulk delete soft-deletes (isActive false)', async () => {
+    setScope({ kind: 'operator', operatorId: 'op1' })
+    prisma.facility.updateMany.mockResolvedValue({ count: 2 })
+
+    await service.bulkUpdate(operatorUser, { ids: ['a', 'b'], action: 'delete' })
+
+    expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['a', 'b'] }, operatorId: 'op1' },
+      data: { isActive: false },
+    })
+  })
+
+  it('operator cannot bulk deploy (self-verify forbidden)', async () => {
+    setScope({ kind: 'operator', operatorId: 'op1' })
+
+    await expect(
+      service.bulkUpdate(operatorUser, { ids: ['a'], action: 'deploy' }),
+    ).rejects.toBeInstanceOf(FacilityFieldForbiddenError)
+    expect(prisma.facility.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('bulk enable is scoped to the operator (foreign ids cannot be touched)', async () => {
+    setScope({ kind: 'operator', operatorId: 'op1' })
+    prisma.facility.updateMany.mockResolvedValue({ count: 1 })
+
+    await service.bulkUpdate(operatorUser, { ids: ['mine', 'foreign'], action: 'enable' })
+
+    expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['mine', 'foreign'] }, operatorId: 'op1' },
+      data: { isActive: true },
+    })
   })
 })
 

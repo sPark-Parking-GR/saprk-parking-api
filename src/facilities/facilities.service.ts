@@ -12,11 +12,20 @@ import {
 import { InventoryService } from '../inventory/inventory.service'
 import { PrismaService } from '../prisma/prisma.service'
 import { TariffService } from '../tariff/tariff.service'
-import type { CreateFacilityDto, ListFacilitiesDto, UpdateFacilityDto } from './dto/facility.dto'
+import type {
+  BulkFacilityDto,
+  CreateFacilityDto,
+  ListFacilitiesDto,
+  UpdateFacilityDto,
+} from './dto/facility.dto'
 import type {
   AdminFacility,
   AdminFacilityList,
   AdminFacilityListItem,
+  AdminMapParams,
+  AdminMapPoint,
+  AdminMapResponse,
+  BulkFacilityResult,
   FacilityCluster,
   FacilitySearchParams,
   FacilitySearchResponse,
@@ -297,7 +306,10 @@ export class FacilitiesService {
           onlineQuota: true,
           isActive: true,
           isVerified: true,
+          kind: true,
+          source: true,
           operatorId: true,
+          operator: { select: { name: true } },
           createdAt: true,
           updatedAt: true,
         },
@@ -305,7 +317,10 @@ export class FacilitiesService {
       this.prisma.facility.count({ where }),
     ])
 
-    const items: AdminFacilityListItem[] = rows.map((r) => ({ ...r }))
+    const items: AdminFacilityListItem[] = rows.map(({ operator, ...r }) => ({
+      ...r,
+      operatorName: operator.name,
+    }))
     return { items, total, skip: query.skip, take: query.take }
   }
 
@@ -444,6 +459,152 @@ export class FacilitiesService {
     })
   }
 
+  async bulkUpdate(user: AuthUser, dto: BulkFacilityDto): Promise<BulkFacilityResult> {
+    const scope = await this.operatorScope.resolve(user)
+
+    // Verification is platform-only; operators cannot self-verify (mirrors `update`).
+    if (dto.action === 'deploy' && scope.kind === 'operator') {
+      throw new FacilityFieldForbiddenError('isVerified')
+    }
+
+    const data = this.bulkData(dto.action)
+    // ids are only a filter — scopeWhere is the authorization boundary, so an
+    // operator passing foreign ids simply updates none of them.
+    const where: Prisma.FacilityWhereInput = {
+      id: { in: dto.ids },
+      ...this.operatorScope.scopeWhere(scope),
+    }
+
+    const affected = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.facility.updateMany({ where, data })
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          action: `facility.bulk.${dto.action}`,
+          entityType: 'Facility',
+          entityId: `${result.count} of ${dto.ids.length}`,
+        },
+      })
+      return result.count
+    })
+
+    return { affected }
+  }
+
+  private bulkData(action: BulkFacilityDto['action']): Prisma.FacilityUpdateManyMutationInput {
+    switch (action) {
+      case 'deploy':
+        return { isActive: true, isVerified: true }
+      case 'enable':
+        return { isActive: true }
+      case 'disable':
+      case 'delete':
+        return { isActive: false }
+    }
+  }
+
+  async adminMap(user: AuthUser, params: AdminMapParams): Promise<AdminMapResponse> {
+    const scope = await this.operatorScope.resolve(user)
+    const where = this.adminMapWhere(scope, params)
+
+    const total = await this.prisma.facility.count({ where })
+    if (total === 0) return { mode: 'points', points: [], clusters: [], total }
+
+    if (total > MAX_POINTS) {
+      const clusters = await this.buildAdminClusters(where, params.bounds)
+      return { mode: 'clusters', points: [], clusters, total }
+    }
+
+    const rows = await this.prisma.facility.findMany({
+      where,
+      select: {
+        id: true,
+        name: true,
+        lat: true,
+        lng: true,
+        kind: true,
+        isActive: true,
+        isVerified: true,
+      },
+      take: MAX_POINTS,
+    })
+
+    const points: AdminMapPoint[] = rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      lat: r.lat.toNumber(),
+      lng: r.lng.toNumber(),
+      kind: r.kind,
+      isActive: r.isActive,
+      isVerified: r.isVerified,
+    }))
+    return { mode: 'points', points, clusters: [], total }
+  }
+
+  private adminMapWhere(scope: OperatorScope, params: AdminMapParams): Prisma.FacilityWhereInput {
+    const { bounds } = params
+    const filters: Prisma.FacilityWhereInput[] = [
+      { lat: { gte: bounds.south, lte: bounds.north } },
+      { lng: { gte: bounds.west, lte: bounds.east } },
+    ]
+    if (params.q) {
+      filters.push({
+        OR: [
+          { name: { contains: params.q, mode: 'insensitive' } },
+          { address: { contains: params.q, mode: 'insensitive' } },
+        ],
+      })
+    }
+    if (params.isActive !== undefined) filters.push({ isActive: params.isActive })
+    if (params.isVerified !== undefined) filters.push({ isVerified: params.isVerified })
+    if (params.kind) filters.push({ kind: params.kind })
+    if (scope.kind === 'platform' && params.operatorId) {
+      filters.push({ operatorId: params.operatorId })
+    }
+    return { ...this.operatorScope.scopeWhere(scope), AND: filters }
+  }
+
+  /**
+   * Aggregates in-bounds admin facilities into a 12x12 grid of the visible rectangle,
+   * using the same scoped predicate as the points path so clustering respects filters.
+   */
+  private async buildAdminClusters(
+    where: Prisma.FacilityWhereInput,
+    bounds: MapBounds,
+  ): Promise<FacilityCluster[]> {
+    const COLS = 12
+    const ROWS = 12
+    const cellLng = (bounds.east - bounds.west) / COLS
+    const cellLat = (bounds.north - bounds.south) / ROWS
+
+    const rows = await this.prisma.facility.findMany({
+      where,
+      select: { lat: true, lng: true },
+    })
+
+    const cells = new Map<string, { count: number; latSum: number; lngSum: number }>()
+    for (const row of rows) {
+      const lat = row.lat.toNumber()
+      const lng = row.lng.toNumber()
+      const gx = Math.floor((lng - bounds.west) / cellLng)
+      const gy = Math.floor((lat - bounds.south) / cellLat)
+      const key = `${gx}_${gy}`
+      const cell = cells.get(key) ?? { count: 0, latSum: 0, lngSum: 0 }
+      cell.count += 1
+      cell.latSum += lat
+      cell.lngSum += lng
+      cells.set(key, cell)
+    }
+
+    return Array.from(cells.entries()).map(([key, cell]) => ({
+      id: `c_${key}`,
+      lat: cell.latSum / cell.count,
+      lng: cell.lngSum / cell.count,
+      count: cell.count,
+    }))
+  }
+
   private adminListWhere(
     scope: OperatorScope,
     query: ListFacilitiesDto,
@@ -459,6 +620,7 @@ export class FacilitiesService {
     }
     if (query.isActive !== undefined) filters.push({ isActive: query.isActive })
     if (query.isVerified !== undefined) filters.push({ isVerified: query.isVerified })
+    if (query.kind) filters.push({ kind: query.kind })
     if (scope.kind === 'platform' && query.operatorId) {
       filters.push({ operatorId: query.operatorId })
     }

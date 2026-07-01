@@ -1,4 +1,4 @@
-import { VehicleType } from '@prisma/client'
+import { FacilityKind, VehicleType } from '@prisma/client'
 import { z } from 'zod'
 
 export const searchFacilitiesSchema = z
@@ -125,16 +125,49 @@ export const updateFacilitySchema = z
 
 export type UpdateFacilityDto = z.infer<typeof updateFacilitySchema>
 
+const booleanFromQuery = z.preprocess(
+  (v) => (typeof v === 'string' ? v === 'true' : v),
+  z.boolean().optional(),
+)
+
 export const listFacilitiesSchema = z.object({
   skip: z.coerce.number().int().nonnegative().default(0),
   take: z.coerce.number().int().positive().max(100).default(20),
   q: z.string().trim().max(200).optional(),
-  isActive: z.preprocess((v) => (typeof v === 'string' ? v === 'true' : v), z.boolean().optional()),
-  isVerified: z.preprocess(
-    (v) => (typeof v === 'string' ? v === 'true' : v),
-    z.boolean().optional(),
-  ),
+  isActive: booleanFromQuery,
+  isVerified: booleanFromQuery,
+  kind: z.nativeEnum(FacilityKind).optional(),
   operatorId: z.string().min(1).optional(),
 })
 
 export type ListFacilitiesDto = z.infer<typeof listFacilitiesSchema>
+
+export const bulkFacilitySchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(500),
+  action: z.enum(['enable', 'disable', 'deploy', 'delete']),
+})
+
+export type BulkFacilityDto = z.infer<typeof bulkFacilitySchema>
+
+export const adminMapSchema = z
+  .object({
+    north: z.coerce.number().min(-90).max(90),
+    south: z.coerce.number().min(-90).max(90),
+    east: z.coerce.number().min(-180).max(180),
+    west: z.coerce.number().min(-180).max(180),
+    q: z.string().trim().max(200).optional(),
+    isActive: booleanFromQuery,
+    isVerified: booleanFromQuery,
+    kind: z.nativeEnum(FacilityKind).optional(),
+    operatorId: z.string().min(1).optional(),
+  })
+  .refine((d) => d.south < d.north, {
+    message: 'south must be less than north',
+    path: ['south'],
+  })
+  .refine((d) => d.west < d.east, {
+    message: 'west must be less than east',
+    path: ['west'],
+  })
+
+export type AdminMapDto = z.infer<typeof adminMapSchema>

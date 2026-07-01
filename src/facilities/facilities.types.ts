@@ -1,5 +1,5 @@
 import type { OpeningHours, VehicleType as ContractVehicleType } from '@spark/types'
-import type { VehicleType } from '@prisma/client'
+import type { FacilityKind, IngestSource, VehicleType } from '@prisma/client'
 
 export interface MapBounds {
   north: number
@@ -49,7 +49,10 @@ export interface AdminFacilityListItem {
   onlineQuota: number
   isActive: boolean
   isVerified: boolean
+  kind: FacilityKind
+  source: IngestSource | null
   operatorId: string
+  operatorName: string
   createdAt: Date
   updatedAt: Date
 }
@@ -59,6 +62,38 @@ export interface AdminFacilityList {
   total: number
   skip: number
   take: number
+}
+
+export interface AdminMapPoint {
+  id: string
+  name: string
+  lat: number
+  lng: number
+  kind: FacilityKind
+  isActive: boolean
+  isVerified: boolean
+}
+
+export interface AdminMapParams {
+  bounds: MapBounds
+  q?: string
+  isActive?: boolean
+  isVerified?: boolean
+  kind?: FacilityKind
+  operatorId?: string
+}
+
+export interface AdminMapResponse {
+  mode: 'points' | 'clusters'
+  points: AdminMapPoint[]
+  clusters: FacilityCluster[]
+  total: number
+}
+
+export type BulkFacilityAction = 'enable' | 'disable' | 'deploy' | 'delete'
+
+export interface BulkFacilityResult {
+  affected: number
 }
 
 export interface FacilitySearchResult {

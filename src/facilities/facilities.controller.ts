@@ -17,11 +17,15 @@ import { Public } from '../auth/decorators/public.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { FacilitiesService } from './facilities.service'
 import {
+  adminMapSchema,
+  bulkFacilitySchema,
   createFacilitySchema,
   listFacilitiesSchema,
   quoteSchema,
   searchFacilitiesSchema,
   updateFacilitySchema,
+  type AdminMapDto,
+  type BulkFacilityDto,
   type CreateFacilityDto,
   type ListFacilitiesDto,
   type QuoteDto,
@@ -61,9 +65,33 @@ export class FacilitiesController {
   }
 
   @Roles('operator_staff', 'operator_admin', 'platform_admin')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  @Get('map')
+  adminMap(
+    @Query(new ZodValidationPipe(adminMapSchema)) query: AdminMapDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    const { north, south, east, west, ...filters } = query
+    return this.facilities.adminMap(user, {
+      bounds: { north, south, east, west },
+      ...filters,
+    })
+  }
+
+  @Roles('operator_staff', 'operator_admin', 'platform_admin')
   @Get(':id/manage')
   manage(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.facilities.adminGetById(user, id)
+  }
+
+  @Roles('operator_admin', 'platform_admin')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Patch('bulk')
+  bulk(
+    @Body(new ZodValidationPipe(bulkFacilitySchema)) body: BulkFacilityDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.facilities.bulkUpdate(user, body)
   }
 
   @Roles('operator_admin', 'platform_admin')
