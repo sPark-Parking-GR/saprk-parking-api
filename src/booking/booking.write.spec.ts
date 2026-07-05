@@ -1,7 +1,7 @@
 import type { AuthUser } from '@spark/types'
 import { BookingStatus } from '@prisma/client'
 import { BookingService } from './booking.service'
-import { OperatorScopeService, type OperatorScope } from '../common/authz/operator-scope.service'
+import type { OperatorScopeService, OperatorScope } from '../common/authz/operator-scope.service'
 import {
   BookingNotFoundError,
   BookingStatusTransitionError,

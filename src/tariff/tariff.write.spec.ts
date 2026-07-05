@@ -2,7 +2,7 @@ import type { AuthUser } from '@spark/types'
 import { Prisma } from '@prisma/client'
 import { TariffService, assignmentMismatchReason, canBeDefault } from './tariff.service'
 import type { VehicleType } from '@prisma/client'
-import { OperatorScopeService, type OperatorScope } from '../common/authz/operator-scope.service'
+import type { OperatorScopeService, OperatorScope } from '../common/authz/operator-scope.service'
 import {
   DefaultTariffRequiredError,
   DomainError,
