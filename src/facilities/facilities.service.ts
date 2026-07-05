@@ -8,10 +8,12 @@ import {
   DomainError,
   FacilityFieldForbiddenError,
   FacilityNotFoundError,
+  TariffAssignmentMismatchError,
+  TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import { InventoryService } from '../inventory/inventory.service'
 import { PrismaService } from '../prisma/prisma.service'
-import { TariffService } from '../tariff/tariff.service'
+import { TariffService, assignmentMismatchReason } from '../tariff/tariff.service'
 import type {
   BulkFacilityDto,
   CreateFacilityDto,
@@ -25,12 +27,15 @@ import type {
   AdminMapParams,
   AdminMapPoint,
   AdminMapResponse,
+  BulkFacilityAction,
   BulkFacilityResult,
   FacilityCluster,
   FacilitySearchParams,
   FacilitySearchResponse,
   FacilitySearchResult,
+  FacilityTariffAssignments,
   MapBounds,
+  ResolvedTariffAssignment,
 } from './facilities.types'
 
 const MAX_POINTS = 250
@@ -246,15 +251,18 @@ export class FacilitiesService {
       include: {
         images: { orderBy: { sortOrder: 'asc' } },
         rules: true,
-        tariffPlans: {
-          where: { isActive: true },
+        tariffAssignments: {
           include: {
-            tiers: {
-              orderBy: { fromMinute: 'asc' },
-              include: { rates: true },
+            tariffPlan: {
+              include: {
+                tiers: {
+                  orderBy: { fromMinute: 'asc' },
+                  include: { rates: true },
+                },
+                windows: true,
+                caps: true,
+              },
             },
-            windows: true,
-            caps: true,
           },
         },
       },
@@ -268,14 +276,138 @@ export class FacilitiesService {
       _count: true,
     })
 
+    // Public facility read: returns only explicit per-vehicle-type rows (no operator-default
+    // resolution — that belongs to the editor UI's getTariffAssignments). Assignment and
+    // activation are independent: a plan can be deactivated while still assigned, so null
+    // out an assigned-but-inactive plan per row so a dead plan is never shown as live pricing.
+    const { tariffAssignments, ...rest } = facility
+    const assignments = tariffAssignments.map((a) => ({
+      ...a,
+      tariffPlan: a.tariffPlan.isActive ? a.tariffPlan : null,
+    }))
+
     return {
-      ...facility,
+      ...rest,
+      tariffAssignments: assignments,
       lat: facility.lat.toNumber(),
       lng: facility.lng.toNumber(),
       rating: {
         average: ratingAgg._avg.rating ?? null,
         count: ratingAgg._count,
       },
+    }
+  }
+
+  /**
+   * Sets or clears ONE assignment row for a facility's concrete `(vehicleType)` slot. Both
+   * the facility and — when assigning — the plan must belong to the caller's operator scope;
+   * checking only one side would let an operator assign another operator's private plan to
+   * their facility (pricing leak), or point their plan at a foreign facility. The plan's
+   * own `vehicleTypes` must not contradict the target slot. Delete-then-create (not upsert)
+   * works around the Prisma compound whereUnique gotcha.
+   */
+  async assignTariff(
+    user: AuthUser,
+    facilityId: string,
+    vehicleType: VehicleType,
+    tariffPlanId: string | null,
+  ): Promise<{ facilityId: string; vehicleType: VehicleType; tariffPlanId: string | null }> {
+    const scope = await this.operatorScope.resolve(user)
+    const scopeWhere = this.operatorScope.scopeWhere(scope)
+
+    const facility = await this.prisma.facility.findFirst({
+      where: { id: facilityId, ...scopeWhere },
+      select: { id: true },
+    })
+    if (!facility) throw new FacilityNotFoundError(facilityId)
+
+    if (tariffPlanId !== null) {
+      const plan = await this.prisma.tariffPlan.findFirst({
+        where: { id: tariffPlanId, ...scopeWhere },
+        select: { id: true, vehicleTypes: true },
+      })
+      if (!plan) throw new TariffPlanNotFoundError(tariffPlanId)
+
+      const mismatch = assignmentMismatchReason(plan.vehicleTypes, vehicleType)
+      if (mismatch) throw new TariffAssignmentMismatchError(mismatch)
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.facilityTariffAssignment.deleteMany({ where: { facilityId, vehicleType } })
+      if (tariffPlanId !== null) {
+        await tx.facilityTariffAssignment.create({
+          data: { facilityId, tariffPlanId, vehicleType },
+        })
+      }
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          action: tariffPlanId ? 'facility.tariff_assigned' : 'facility.tariff_unassigned',
+          entityType: 'Facility',
+          entityId: facilityId,
+          payload: { vehicleType, tariffPlanId },
+        },
+      })
+    })
+
+    return { facilityId, vehicleType, tariffPlanId }
+  }
+
+  /**
+   * The RESOLVED tariff per vehicle type for one facility: for each of the 4 vehicle types,
+   * the facility's explicit row when present, else the operator's active default plan, else
+   * nothing. Same facility-ownership check as other facility-scoped admin reads. Gives the
+   * editor UI an honest picture including implicit default coverage.
+   */
+  async getTariffAssignments(
+    user: AuthUser,
+    facilityId: string,
+  ): Promise<FacilityTariffAssignments> {
+    const scope = await this.operatorScope.resolve(user)
+    const facility = await this.prisma.facility.findFirst({
+      where: { id: facilityId, ...this.operatorScope.scopeWhere(scope) },
+      select: { id: true, operatorId: true },
+    })
+    if (!facility) throw new FacilityNotFoundError(facilityId)
+
+    const [rows, defaultPlan] = await Promise.all([
+      this.prisma.facilityTariffAssignment.findMany({
+        where: { facilityId },
+        select: { vehicleType: true, tariffPlanId: true, tariffPlan: { select: { name: true } } },
+      }),
+      this.prisma.tariffPlan.findFirst({
+        where: { operatorId: facility.operatorId, isDefault: true, isActive: true },
+        select: { id: true, name: true },
+      }),
+    ])
+
+    const explicitByType = new Map(rows.map((r) => [r.vehicleType, r]))
+
+    const assignments: ResolvedTariffAssignment[] = Object.values(VehicleType).map((vt) => {
+      const explicit = explicitByType.get(vt)
+      if (explicit) {
+        return {
+          vehicleType: vt,
+          tariffPlanId: explicit.tariffPlanId,
+          tariffPlanName: explicit.tariffPlan.name,
+          source: 'explicit',
+        }
+      }
+      if (defaultPlan) {
+        return {
+          vehicleType: vt,
+          tariffPlanId: defaultPlan.id,
+          tariffPlanName: defaultPlan.name,
+          source: 'default',
+        }
+      }
+      return { vehicleType: vt, tariffPlanId: null, tariffPlanName: null, source: 'none' }
+    })
+
+    return {
+      assignments,
+      defaultPlan: defaultPlan ? { id: defaultPlan.id, name: defaultPlan.name } : null,
     }
   }
 
@@ -461,19 +593,123 @@ export class FacilitiesService {
 
   async bulkUpdate(user: AuthUser, dto: BulkFacilityDto): Promise<BulkFacilityResult> {
     const scope = await this.operatorScope.resolve(user)
+    const scopeWhere = this.operatorScope.scopeWhere(scope)
 
     // Verification is platform-only; operators cannot self-verify (mirrors `update`).
     if (dto.action === 'deploy' && scope.kind === 'operator') {
       throw new FacilityFieldForbiddenError('isVerified')
     }
 
-    const data = this.bulkData(dto.action)
-    // ids are only a filter — scopeWhere is the authorization boundary, so an
-    // operator passing foreign ids simply updates none of them.
-    const where: Prisma.FacilityWhereInput = {
-      id: { in: dto.ids },
-      ...this.operatorScope.scopeWhere(scope),
+    // assignTariff carries a dynamic per-slot payload and its own multi-plan ownership
+    // check, so it can't route through the static bulkData / single-updateMany path.
+    if (dto.action === 'assignTariff') {
+      return this.bulkAssignTariff(user, dto.ids, dto.assignments, scopeWhere)
     }
+
+    return this.runBulk(user, dto.action, dto.ids, scopeWhere, this.bulkData(dto.action))
+  }
+
+  /**
+   * Bulk sets/clears assignment rows across many facilities and vehicle-type slots.
+   *
+   * Tenant safety: collect every DISTINCT non-null plan id across the whole assignments
+   * array and verify EVERY one belongs to the caller's scope before any write — a naive
+   * check of only the first pair would let an attacker smuggle a foreign plan in later
+   * entries. Any out-of-scope plan rejects the whole call with no partial writes.
+   *
+   * The write is two set-based queries (not a loop over ids × assignments): one deleteMany
+   * clearing each targeted slot on each scoped facility, then one createMany inserting the
+   * non-null pairs. Facility ownership stays enforced via `scopeWhere`, so foreign ids are
+   * silently excluded (matching the other bulk actions), not hard-errored.
+   */
+  private async bulkAssignTariff(
+    user: AuthUser,
+    ids: string[],
+    assignments: { vehicleType: VehicleType; tariffPlanId: string | null }[],
+    scopeWhere: { operatorId?: string },
+  ): Promise<BulkFacilityResult> {
+    const planIds = [
+      ...new Set(
+        assignments
+          .map((a) => a.tariffPlanId)
+          .filter((id): id is string => id !== null),
+      ),
+    ]
+
+    if (planIds.length > 0) {
+      const owned = await this.prisma.tariffPlan.findMany({
+        where: { id: { in: planIds }, ...scopeWhere },
+        select: { id: true, vehicleTypes: true },
+      })
+      const ownedById = new Map(owned.map((p) => [p.id, p.vehicleTypes]))
+
+      for (const planId of planIds) {
+        if (!ownedById.has(planId)) throw new TariffPlanNotFoundError(planId)
+      }
+
+      // Every non-null assignment's slot must be consistent with its plan's own vehicle types.
+      for (const a of assignments) {
+        if (a.tariffPlanId === null) continue
+        const mismatch = assignmentMismatchReason(ownedById.get(a.tariffPlanId)!, a.vehicleType)
+        if (mismatch) throw new TariffAssignmentMismatchError(mismatch)
+      }
+    }
+
+    const slots = assignments.map((a) => a.vehicleType)
+
+    const affected = await this.prisma.$transaction(async (tx) => {
+      // Only in-scope facilities count as affected; ownership rides on the facility filter.
+      const scoped = await tx.facility.findMany({
+        where: { id: { in: ids }, ...scopeWhere },
+        select: { id: true },
+      })
+      const scopedIds = scoped.map((f) => f.id)
+
+      if (scopedIds.length > 0) {
+        await tx.facilityTariffAssignment.deleteMany({
+          where: { facilityId: { in: scopedIds }, vehicleType: { in: slots } },
+        })
+
+        const rows = scopedIds.flatMap((facilityId) =>
+          assignments
+            .filter((a) => a.tariffPlanId !== null)
+            .map((a) => ({
+              facilityId,
+              tariffPlanId: a.tariffPlanId as string,
+              vehicleType: a.vehicleType,
+            })),
+        )
+        if (rows.length > 0) {
+          await tx.facilityTariffAssignment.createMany({ data: rows })
+        }
+      }
+
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'facility.bulk.assignTariff',
+          entityType: 'Facility',
+          entityId: `${scopedIds.length} of ${ids.length}`,
+        },
+      })
+
+      return scopedIds.length
+    })
+
+    return { affected }
+  }
+
+  private async runBulk(
+    user: AuthUser,
+    action: BulkFacilityAction,
+    ids: string[],
+    scopeWhere: { operatorId?: string },
+    data: Prisma.FacilityUncheckedUpdateManyInput,
+  ): Promise<BulkFacilityResult> {
+    // ids are only a filter — scopeWhere is the authorization boundary, so an operator
+    // passing foreign ids simply updates none of them.
+    const where: Prisma.FacilityWhereInput = { id: { in: ids }, ...scopeWhere }
 
     const affected = await this.prisma.$transaction(async (tx) => {
       const result = await tx.facility.updateMany({ where, data })
@@ -481,9 +717,9 @@ export class FacilitiesService {
         data: {
           actorId: user.id,
           actorRole: user.role,
-          action: `facility.bulk.${dto.action}`,
+          action: `facility.bulk.${action}`,
           entityType: 'Facility',
-          entityId: `${result.count} of ${dto.ids.length}`,
+          entityId: `${result.count} of ${ids.length}`,
         },
       })
       return result.count
@@ -492,7 +728,9 @@ export class FacilitiesService {
     return { affected }
   }
 
-  private bulkData(action: BulkFacilityDto['action']): Prisma.FacilityUpdateManyMutationInput {
+  private bulkData(
+    action: Exclude<BulkFacilityAction, 'assignTariff'>,
+  ): Prisma.FacilityUpdateManyMutationInput {
     switch (action) {
       case 'deploy':
         return { isActive: true, isVerified: true }

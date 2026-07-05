@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common'
+import { Prisma } from '@prisma/client'
 import type {
-  Prisma,
   RateCap,
   RateTier,
   RateWindow,
@@ -11,9 +11,12 @@ import type {
 import type { AuthUser } from '@spark/types'
 import { OperatorScopeService } from '../common/authz/operator-scope.service'
 import {
+  DefaultTariffRequiredError,
+  DomainError,
   InvalidTariffScheduleError,
   NoApplicableTariffError,
   FacilityNotFoundError,
+  TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import { PrismaService } from '../prisma/prisma.service'
 import { compileDraft } from './draft-compiler'
@@ -32,6 +35,7 @@ import {
 import {
   QUOTE_TTL_MINUTES,
   type CompiledPlan,
+  type PlanAssignments,
   type PriceQuote,
   type QuoteRequest,
   type SimulateResult,
@@ -51,6 +55,48 @@ const scheduleInclude = {
   caps: true,
 } satisfies Prisma.TariffPlanInclude
 
+/**
+ * A facility's assigned plan applies to a quote only when it is active, the quote
+ * instant sits inside the plan's validity window, and the plan prices the requested
+ * vehicle class (empty vehicleTypes = all classes).
+ */
+export function isPlanApplicable(
+  plan: TariffPlan,
+  at: Date,
+  vehicleType: VehicleType,
+): boolean {
+  if (!plan.isActive) return false
+  if (plan.validFrom && plan.validFrom > at) return false
+  if (plan.validTo && plan.validTo < at) return false
+  if (plan.vehicleTypes.length > 0 && !plan.vehicleTypes.includes(vehicleType)) return false
+  return true
+}
+
+/**
+ * A plan can only serve as an operator's catch-all default when its own `vehicleTypes`
+ * is empty (empty = "prices every vehicle type"); a type-restricted plan can't fall back
+ * for the types it doesn't price.
+ */
+export function canBeDefault(vehicleTypes: VehicleType[]): boolean {
+  return vehicleTypes.length === 0
+}
+
+/**
+ * Guards that an assignment row's target vehicle-type slot doesn't contradict what the
+ * plan is designed to price (its own `vehicleTypes`, empty = "all"): the plan must price
+ * all types or include that concrete type. Returns a human-readable reason when the
+ * pairing is invalid, else null.
+ */
+export function assignmentMismatchReason(
+  planVehicleTypes: VehicleType[],
+  slot: VehicleType,
+): string | null {
+  if (planVehicleTypes.length > 0 && !planVehicleTypes.includes(slot)) {
+    return `plan does not price vehicle type ${slot}`
+  }
+  return null
+}
+
 @Injectable()
 export class TariffService {
   constructor(
@@ -67,12 +113,26 @@ export class TariffService {
 
     const facility = await this.prisma.facility.findFirst({
       where: { id: facilityId, isActive: true, isVerified: true },
+      include: {
+        tariffAssignments: {
+          where: { vehicleType },
+          include: { tariffPlan: { include: scheduleInclude } },
+        },
+      },
     })
 
     if (!facility) throw new FacilityNotFoundError(facilityId)
 
-    const plan = await this.resolveActivePlan(facilityId, startsAt, vehicleType)
-    if (!plan) throw new NoApplicableTariffError(facilityId)
+    let plan: PlanWithSchedule | null = facility.tariffAssignments[0]?.tariffPlan ?? null
+    if (!plan) {
+      plan = await this.prisma.tariffPlan.findFirst({
+        where: { operatorId: facility.operatorId, isDefault: true, isActive: true },
+        include: scheduleInclude,
+      })
+    }
+    if (!plan || !isPlanApplicable(plan, startsAt, vehicleType)) {
+      throw new NoApplicableTariffError(facilityId)
+    }
 
     const compiled = compilePlan(plan)
     const result = priceStay(startsAt, endsAt, compiled)
@@ -96,10 +156,11 @@ export class TariffService {
   }
 
   /**
-   * Quote totals for many facilities in a single tariff-plan query; pricing runs in
-   * memory. Mirrors computeQuote's plan selection, but skips the per-facility existence
-   * check (search already filters to active facilities). Facilities whose plan has no
-   * applicable price are omitted (caller treats as no price).
+   * Quote totals for many facilities in exactly two queries; pricing runs in memory. Each
+   * facility resolves to its per-vehicle-type row when present, else its operator's active
+   * default plan. Defaults are batched by distinct operator (one findMany), never per
+   * facility. Facilities with no covering/applicable plan, or whose plan can't price, are
+   * omitted (caller treats as no price).
    */
   async computeTotalsByFacility(
     facilityIds: string[],
@@ -109,28 +170,37 @@ export class TariffService {
   ): Promise<Map<string, number>> {
     if (facilityIds.length === 0 || endsAt <= startsAt) return new Map()
 
-    const plans = await this.prisma.tariffPlan.findMany({
-      where: {
-        facilityId: { in: facilityIds },
-        isActive: true,
-        OR: [{ validFrom: null }, { validFrom: { lte: startsAt } }],
-        AND: [
-          { OR: [{ validTo: null }, { validTo: { gte: startsAt } }] },
-          { OR: [{ vehicleTypes: { isEmpty: true } }, { vehicleTypes: { has: vehicleType } }] },
-        ],
+    const facilities = await this.prisma.facility.findMany({
+      where: { id: { in: facilityIds } },
+      select: {
+        id: true,
+        operatorId: true,
+        tariffAssignments: {
+          where: { vehicleType },
+          include: { tariffPlan: { include: scheduleInclude } },
+        },
       },
-      include: scheduleInclude,
-      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
     })
 
+    const operatorIds = [...new Set(facilities.map((f) => f.operatorId))]
+    const defaults = operatorIds.length
+      ? await this.prisma.tariffPlan.findMany({
+          where: { operatorId: { in: operatorIds }, isDefault: true, isActive: true },
+          include: scheduleInclude,
+        })
+      : []
+    const defaultsByOperator = new Map(defaults.map((d) => [d.operatorId, d]))
+
     const totals = new Map<string, number>()
-    for (const plan of plans) {
-      // Query order matches resolveActivePlan within each facility, so the first plan
-      // seen per facility is its active plan.
-      if (totals.has(plan.facilityId)) continue
+    for (const facility of facilities) {
+      const plan =
+        facility.tariffAssignments[0]?.tariffPlan ??
+        defaultsByOperator.get(facility.operatorId) ??
+        null
+      if (!plan || !isPlanApplicable(plan, startsAt, vehicleType)) continue
       try {
         const result = priceStay(startsAt, endsAt, compilePlan(plan))
-        totals.set(plan.facilityId, result.totalCents)
+        totals.set(facility.id, result.totalCents)
       } catch {
         // Incomplete/invalid schedule: omit this facility from priced results.
       }
@@ -138,39 +208,17 @@ export class TariffService {
     return totals
   }
 
-  private async resolveActivePlan(
-    facilityId: string,
-    atTime: Date,
-    vehicleType: VehicleType,
-  ): Promise<PlanWithSchedule | null> {
-    const plans = await this.prisma.tariffPlan.findMany({
-      where: {
-        facilityId,
-        isActive: true,
-        OR: [{ validFrom: null }, { validFrom: { lte: atTime } }],
-        AND: [
-          { OR: [{ validTo: null }, { validTo: { gte: atTime } }] },
-          { OR: [{ vehicleTypes: { isEmpty: true } }, { vehicleTypes: { has: vehicleType } }] },
-        ],
-      },
-      include: scheduleInclude,
-      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
-    })
-
-    return plans[0] ?? null
-  }
-
-  async listPlans(user: AuthUser, facilityId: string): Promise<{ items: TariffPlanListItem[] }> {
-    await this.assertFacilityOwned(user, facilityId)
+  async listPlans(user: AuthUser): Promise<{ items: TariffPlanListItem[] }> {
+    const scope = await this.operatorScope.resolve(user)
 
     const plans = await this.prisma.tariffPlan.findMany({
-      where: { facilityId },
-      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+      where: { ...this.operatorScope.scopeWhere(scope) },
+      orderBy: { createdAt: 'asc' },
       select: {
         id: true,
         name: true,
-        isDefault: true,
         isActive: true,
+        isDefault: true,
         validFrom: true,
         validTo: true,
         vehicleTypes: true,
@@ -182,8 +230,8 @@ export class TariffService {
     const items = plans.map((p) => ({
       id: p.id,
       name: p.name,
-      isDefault: p.isDefault,
       isActive: p.isActive,
+      isDefault: p.isDefault,
       validFrom: p.validFrom,
       validTo: p.validTo,
       vehicleTypes: p.vehicleTypes.map((v) => VEHICLE_FROM_PRISMA[v]),
@@ -194,44 +242,50 @@ export class TariffService {
     return { items }
   }
 
-  async getPlanDetail(
-    user: AuthUser,
-    facilityId: string,
-    planId: string,
-  ): Promise<TariffPlanDetail> {
-    await this.assertFacilityOwned(user, facilityId)
+  async getPlanDetail(user: AuthUser, planId: string): Promise<TariffPlanDetail> {
+    await this.assertPlanOwned(user, planId)
 
-    const plan = await this.prisma.tariffPlan.findFirst({
-      where: { id: planId, facilityId },
+    const plan = await this.prisma.tariffPlan.findFirstOrThrow({
+      where: { id: planId },
       include: scheduleInclude,
     })
-    if (!plan) throw new FacilityNotFoundError(facilityId)
 
     return this.toPlanDetail(plan)
   }
 
-  async createPlan(
-    user: AuthUser,
-    facilityId: string,
-    draft: TariffDraftDto,
-  ): Promise<TariffPlanDetail> {
-    await this.assertFacilityOwned(user, facilityId)
+  async createPlan(user: AuthUser, draft: TariffDraftDto): Promise<TariffPlanDetail> {
+    const scope = await this.operatorScope.resolve(user)
     this.validateDraft(draft)
 
+    const operatorId = scope.kind === 'platform' ? draft.operatorId : scope.operatorId
+    if (!operatorId) throw new DomainError('operatorId required')
+
+    const operator = await this.prisma.parkingOperator.findUnique({
+      where: { id: operatorId },
+      select: { id: true },
+    })
+    if (!operator) throw new DomainError('operatorId required')
+
+    if (draft.isDefault && !canBeDefault(draft.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v]))) {
+      throw new DomainError('A default plan must price every vehicle type (leave vehicleTypes empty).')
+    }
+
     const created = await this.prisma.$transaction(async (tx) => {
+      // Creation can only add or replace a default, never remove the operator's last one,
+      // so no replacement guard is needed here: swap the flag off any current default.
       if (draft.isDefault) {
         await tx.tariffPlan.updateMany({
-          where: { facilityId, isDefault: true },
+          where: { operatorId, isDefault: true },
           data: { isDefault: false },
         })
       }
 
       const plan = await tx.tariffPlan.create({
         data: {
-          facilityId,
+          operatorId,
           name: draft.name,
-          isDefault: draft.isDefault,
           isActive: draft.isActive,
+          isDefault: draft.isDefault,
           validFrom: draft.validFrom ? new Date(draft.validFrom) : null,
           validTo: draft.validTo ? new Date(draft.validTo) : null,
           timezone: draft.timezone,
@@ -262,23 +316,52 @@ export class TariffService {
 
   async updatePlan(
     user: AuthUser,
-    facilityId: string,
     planId: string,
     draft: TariffDraftDto,
+    newDefaultPlanId?: string,
   ): Promise<TariffPlanDetail> {
-    await this.assertFacilityOwned(user, facilityId)
+    await this.assertPlanOwned(user, planId)
     this.validateDraft(draft)
+
+    const draftVehicleTypes = draft.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v])
+
+    // A default plan must always price every vehicle type; leaving it default with a
+    // restricted vehicleTypes list is an invalid combination, not a swap situation.
+    if (draft.isDefault && !canBeDefault(draftVehicleTypes)) {
+      throw new DomainError('A default plan must price every vehicle type (leave vehicleTypes empty).')
+    }
 
     const updated = await this.prisma.$transaction(async (tx) => {
       const existing = await tx.tariffPlan.findFirst({
-        where: { id: planId, facilityId },
-        select: { id: true, version: true },
+        where: { id: planId },
+        select: {
+          id: true,
+          version: true,
+          operatorId: true,
+          isActive: true,
+          isDefault: true,
+          vehicleTypes: true,
+        },
       })
-      if (!existing) throw new FacilityNotFoundError(facilityId)
+      if (!existing) throw new TariffPlanNotFoundError(planId)
 
-      if (draft.isDefault) {
+      // Only protect when this plan is currently the operator's active default AND the
+      // draft removes that status — either by unsetting isDefault (plan stays active) or
+      // by deactivating the plan (regardless of the draft's isDefault flag).
+      if (existing.isDefault && existing.isActive) {
+        const willUnsetDefault = !draft.isDefault
+        const willDeactivate = !draft.isActive
+        if (willDeactivate) {
+          await this.guardDefaultRemoval(tx, existing.operatorId, planId, false, newDefaultPlanId)
+        } else if (willUnsetDefault) {
+          await this.guardDefaultRemoval(tx, existing.operatorId, planId, true, newDefaultPlanId)
+        }
+      } else if (draft.isDefault) {
+        // Promoting this plan to default (it wasn't one before) — clear whichever other
+        // plan currently holds it first, same as createPlan, so this never collides with
+        // the one-active-default-per-operator partial unique index.
         await tx.tariffPlan.updateMany({
-          where: { facilityId, isDefault: true, id: { not: planId } },
+          where: { operatorId: existing.operatorId, isDefault: true, id: { not: planId } },
           data: { isDefault: false },
         })
       }
@@ -294,14 +377,14 @@ export class TariffService {
         where: { id: planId },
         data: {
           name: draft.name,
-          isDefault: draft.isDefault,
           isActive: draft.isActive,
+          isDefault: draft.isDefault,
           validFrom: draft.validFrom ? new Date(draft.validFrom) : null,
           validTo: draft.validTo ? new Date(draft.validTo) : null,
           timezone: draft.timezone,
           graceMinutes: draft.graceMinutes,
           incrementMinutes: draft.incrementMinutes,
-          vehicleTypes: draft.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v]),
+          vehicleTypes: draftVehicleTypes,
           version: existing.version + 1,
         },
       })
@@ -324,15 +407,28 @@ export class TariffService {
     return this.toPlanDetail(updated)
   }
 
-  async softDeletePlan(user: AuthUser, facilityId: string, planId: string): Promise<void> {
-    await this.assertFacilityOwned(user, facilityId)
+  /**
+   * Soft-deletes a plan: unassigns it from every facility currently pointing at it and
+   * deactivates it, atomically. Deactivating a still-assigned plan is allowed and always
+   * unassigns — the frontend gates this behind a confirm modal (see getAssignments).
+   */
+  async deletePlan(user: AuthUser, planId: string, newDefaultPlanId?: string): Promise<void> {
+    await this.assertPlanOwned(user, planId)
 
     await this.prisma.$transaction(async (tx) => {
       const existing = await tx.tariffPlan.findFirst({
-        where: { id: planId, facilityId },
-        select: { id: true },
+        where: { id: planId },
+        select: { id: true, operatorId: true, isActive: true, isDefault: true },
       })
-      if (!existing) throw new FacilityNotFoundError(facilityId)
+      if (!existing) throw new TariffPlanNotFoundError(planId)
+
+      // Deletion always removes the plan from the active set, so if it was the operator's
+      // active default a replacement must be promoted once other active plans remain.
+      if (existing.isDefault && existing.isActive) {
+        await this.guardDefaultRemoval(tx, existing.operatorId, planId, false, newDefaultPlanId)
+      }
+
+      await tx.facilityTariffAssignment.deleteMany({ where: { tariffPlanId: planId } })
 
       await tx.tariffPlan.update({ where: { id: planId }, data: { isActive: false } })
 
@@ -340,7 +436,7 @@ export class TariffService {
         data: {
           actorId: user.id,
           actorRole: user.role,
-          action: 'tariff_plan.deactivated',
+          action: 'tariff_plan.deleted',
           entityType: 'TariffPlan',
           entityId: planId,
         },
@@ -348,8 +444,57 @@ export class TariffService {
     })
   }
 
-  async simulate(user: AuthUser, facilityId: string, input: SimulateDto): Promise<SimulateResult> {
-    await this.assertFacilityOwned(user, facilityId)
+  async getAssignments(user: AuthUser, planId: string): Promise<PlanAssignments> {
+    await this.assertPlanOwned(user, planId)
+
+    const plan = await this.prisma.tariffPlan.findFirstOrThrow({
+      where: { id: planId },
+      select: { operatorId: true, isDefault: true },
+    })
+
+    // A plan can back several rows on the same facility (one per vehicle type), so dedupe
+    // by facilityId — this summary counts distinct facilities with an explicit row, not rows.
+    const rows = await this.prisma.facilityTariffAssignment.findMany({
+      where: { tariffPlanId: planId },
+      select: { facility: { select: { id: true, name: true } } },
+    })
+
+    const byId = new Map<string, { id: string; name: string }>()
+    for (const row of rows) {
+      byId.set(row.facility.id, row.facility)
+    }
+    const facilities = Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name))
+
+    // Implicit usage only matters for the operator's default plan: every facility that
+    // lacks an explicit row for at least one vehicle type falls back to it. Skip the
+    // extra queries for non-default plans (this endpoint is hit often).
+    let implicitFacilityCount = 0
+    if (plan.isDefault) {
+      const facilityCounts = await this.prisma.facilityTariffAssignment.groupBy({
+        by: ['facilityId'],
+        where: { facility: { operatorId: plan.operatorId } },
+        _count: { vehicleType: true },
+      })
+      const fullyCoveredIds = new Set(
+        facilityCounts.filter((f) => f._count.vehicleType >= 4).map((f) => f.facilityId),
+      )
+      const totalOperatorFacilities = await this.prisma.facility.count({
+        where: { operatorId: plan.operatorId },
+      })
+      implicitFacilityCount = totalOperatorFacilities - fullyCoveredIds.size
+    }
+
+    return {
+      facilities,
+      count: facilities.length,
+      isDefault: plan.isDefault,
+      implicitFacilityCount,
+    }
+  }
+
+  async simulate(user: AuthUser, input: SimulateDto): Promise<SimulateResult> {
+    // Nothing persisted is touched; keep a scope resolution for role/tenancy consistency.
+    await this.operatorScope.resolve(user)
 
     const { draft, startsAt, endsAt } = input
 
@@ -439,13 +584,65 @@ export class TariffService {
     }
   }
 
-  private async assertFacilityOwned(user: AuthUser, facilityId: string): Promise<void> {
+  /**
+   * Enforces the "at least one active default once 2+ active plans remain" invariant when
+   * a plan is losing its active-default status (either unset while staying active, or
+   * deactivated/deleted). `planStaysActive` decides whether the plan itself still counts
+   * toward the remaining active set:
+   *  - unset-default-but-stays-active → true  (it remains active, just no longer default)
+   *  - deactivate/delete              → false (it leaves the active set entirely)
+   * With ≤1 active plan remaining the invariant is exempt (0 or 1 active plans need no
+   * default). Otherwise a valid, catch-all `newDefaultPlanId` must be promoted; the
+   * partial unique index is the concurrency guard — a concurrent promotion loses with a
+   * P2002 which we translate to DefaultTariffRequiredError.
+   */
+  private async guardDefaultRemoval(
+    tx: Prisma.TransactionClient,
+    operatorId: string,
+    planId: string,
+    planStaysActive: boolean,
+    newDefaultPlanId: string | undefined,
+  ): Promise<void> {
+    const others = await tx.tariffPlan.findMany({
+      where: { operatorId, isActive: true, id: { not: planId } },
+      select: { id: true, vehicleTypes: true },
+    })
+    const remainingActive = planStaysActive ? others.length + 1 : others.length
+    if (remainingActive <= 1) return
+
+    if (!newDefaultPlanId) throw new DefaultTariffRequiredError()
+
+    const candidate = others.find((o) => o.id === newDefaultPlanId)
+    if (!candidate) throw new TariffPlanNotFoundError(newDefaultPlanId)
+    if (!canBeDefault(candidate.vehicleTypes)) {
+      throw new DomainError('Candidate plan cannot price all vehicle types, so it cannot become the default.')
+    }
+
+    // Clear this plan's own default flag first — the caller's own update (later in the
+    // same transaction) will set its final isDefault/isActive value, but the partial
+    // unique index rejects the promotion below if this plan still holds isDefault:true
+    // at that moment (two active defaults for the same operator, even momentarily).
+    await tx.tariffPlan.update({ where: { id: planId }, data: { isDefault: false } })
+
+    try {
+      await tx.tariffPlan.update({ where: { id: newDefaultPlanId }, data: { isDefault: true } })
+    } catch (error) {
+      // A concurrent request already promoted a different default; the partial unique
+      // index rejects this one. Surface as a conflict so the caller re-picks.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new DefaultTariffRequiredError()
+      }
+      throw error
+    }
+  }
+
+  private async assertPlanOwned(user: AuthUser, planId: string): Promise<void> {
     const scope = await this.operatorScope.resolve(user)
-    const facility = await this.prisma.facility.findFirst({
-      where: { id: facilityId, ...this.operatorScope.scopeWhere(scope) },
+    const plan = await this.prisma.tariffPlan.findFirst({
+      where: { id: planId, ...this.operatorScope.scopeWhere(scope) },
       select: { id: true },
     })
-    if (!facility) throw new FacilityNotFoundError(facilityId)
+    if (!plan) throw new TariffPlanNotFoundError(planId)
   }
 
   private validateDraft(draft: TariffDraftDto): void {
@@ -547,8 +744,8 @@ export class TariffService {
     return {
       id: plan.id,
       name: plan.name,
-      isDefault: plan.isDefault,
       isActive: plan.isActive,
+      isDefault: plan.isDefault,
       validFrom: plan.validFrom,
       validTo: plan.validTo,
       timezone: plan.timezone,

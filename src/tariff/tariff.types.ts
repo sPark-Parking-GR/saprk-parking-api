@@ -76,13 +76,25 @@ export interface PriceResult {
 export interface TariffPlanListItem {
   id: string
   name: string
-  isDefault: boolean
   isActive: boolean
+  isDefault: boolean
   validFrom: Date | null
   validTo: Date | null
   vehicleTypes: string[]
   version: number
   updatedAt: Date
+}
+
+export interface PlanAssignment {
+  id: string
+  name: string
+}
+
+export interface PlanAssignments {
+  facilities: PlanAssignment[]
+  count: number
+  isDefault: boolean
+  implicitFacilityCount: number
 }
 
 export interface TariffDraftTier {
@@ -117,8 +129,8 @@ export interface TariffDraftCap {
 export interface TariffPlanDetail {
   id: string
   name: string
-  isDefault: boolean
   isActive: boolean
+  isDefault: boolean
   validFrom: Date | null
   validTo: Date | null
   timezone: string

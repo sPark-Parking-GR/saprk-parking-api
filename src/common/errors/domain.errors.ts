@@ -43,9 +43,27 @@ export class FacilityNotFoundError extends DomainError {
   }
 }
 
+export class TariffPlanNotFoundError extends DomainError {
+  constructor(id: string) {
+    super(`Tariff plan ${id} not found`)
+  }
+}
+
 export class InvalidTariffScheduleError extends DomainError {
   constructor(reason: string) {
     super(`Invalid tariff schedule: ${reason}`)
+  }
+}
+
+export class TariffAssignmentMismatchError extends DomainError {
+  constructor(reason: string) {
+    super(`Tariff assignment rejected: ${reason}`)
+  }
+}
+
+export class DefaultTariffRequiredError extends DomainError {
+  constructor() {
+    super('Removing this default leaves active plans with no default. Choose a replacement.')
   }
 }
 

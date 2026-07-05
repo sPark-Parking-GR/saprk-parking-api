@@ -80,8 +80,10 @@ const draftCapSchema = z.object({
 export const tariffDraftSchema = z
   .object({
     name: z.string().min(1).max(200),
-    isDefault: z.boolean(),
+    // Only honored for platform-admin callers; operator callers infer it from scope.
+    operatorId: z.string().min(1).optional(),
     isActive: z.boolean(),
+    isDefault: z.boolean().default(false),
     validFrom: z.string().datetime().nullable(),
     validTo: z.string().datetime().nullable(),
     timezone: z.string().min(1).max(64),
@@ -155,14 +157,7 @@ export const simulateSchema = z.object({
 
 export type SimulateDto = z.infer<typeof simulateSchema>
 
-export const facilityIdParamSchema = z.object({
-  facilityId: z.string().min(1),
-})
-
-export type FacilityIdParam = z.infer<typeof facilityIdParamSchema>
-
 export const planParamSchema = z.object({
-  facilityId: z.string().min(1),
   planId: z.string().min(1),
 })
 

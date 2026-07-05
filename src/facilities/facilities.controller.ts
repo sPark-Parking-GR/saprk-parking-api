@@ -18,6 +18,7 @@ import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { FacilitiesService } from './facilities.service'
 import {
   adminMapSchema,
+  assignTariffSchema,
   bulkFacilitySchema,
   createFacilitySchema,
   listFacilitiesSchema,
@@ -25,6 +26,7 @@ import {
   searchFacilitiesSchema,
   updateFacilitySchema,
   type AdminMapDto,
+  type AssignTariffDto,
   type BulkFacilityDto,
   type CreateFacilityDto,
   type ListFacilitiesDto,
@@ -102,6 +104,23 @@ export class FacilitiesController {
     @CurrentUser() user: AuthUser,
   ) {
     return this.facilities.create(user, body)
+  }
+
+  @Roles('operator_staff', 'operator_admin', 'platform_admin')
+  @Get(':id/tariff-assignments')
+  tariffAssignments(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.facilities.getTariffAssignments(user, id)
+  }
+
+  @Roles('operator_admin', 'platform_admin')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Patch(':id/tariff-plan')
+  assignTariff(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(assignTariffSchema)) body: AssignTariffDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.facilities.assignTariff(user, id, body.vehicleType, body.tariffPlanId)
   }
 
   @Roles('operator_admin', 'platform_admin')

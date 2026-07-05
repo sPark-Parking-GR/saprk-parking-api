@@ -131,7 +131,7 @@ async function main() {
       },
     })
 
-    await seedTariff(facility.id, data.name)
+    await seedTariff(facility.id, data.operatorId, data.name)
   }
 
   console.warn(`Seed complete: ${facilities.length} facilities across Athens and Thessaloniki.`)
@@ -201,31 +201,50 @@ async function seedUsers(athensOperatorId: string, thessOperatorId: string): Pro
   )
 }
 
-async function seedTariff(facilityId: string, facilityName: string): Promise<void> {
+async function seedTariff(facilityId: string, operatorId: string, facilityName: string): Promise<void> {
   if (facilityName === 'Syntagma Underground Parking') {
-    await seedSyntagma(facilityId)
+    await seedSyntagma(facilityId, operatorId)
   } else if (facilityName === 'Monastiraki Parking') {
-    await seedMonastiraki(facilityId)
+    await seedMonastiraki(facilityId, operatorId)
   } else if (facilityName === 'Athens Airport Express Park') {
-    await seedAirport(facilityId)
+    await seedAirport(facilityId, operatorId)
   } else if (facilityName === 'Aristotelous Square Parking') {
-    await seedAristotelous(facilityId)
+    await seedAristotelous(facilityId, operatorId)
   } else if (facilityName === 'Thessaloniki Port Parking') {
-    await seedPort(facilityId)
+    await seedPort(facilityId, operatorId)
   }
 }
 
-async function seedSyntagma(facilityId: string): Promise<void> {
+async function assignVehicleType(
+  facilityId: string,
+  vehicleType: VehicleType,
+  tariffPlanId: string,
+): Promise<void> {
+  await prisma.facilityTariffAssignment.deleteMany({ where: { facilityId, vehicleType } })
+  await prisma.facilityTariffAssignment.create({
+    data: { id: `seed-assign-${vehicleType}-${facilityId}`, facilityId, tariffPlanId, vehicleType },
+  })
+}
+
+async function seedSyntagma(facilityId: string, operatorId: string): Promise<string> {
   const planId = `seed-plan-${facilityId}`
+  // Only one active default per operator (partial unique index) — clear any other
+  // plan currently holding it before this upsert claims it, so re-seeding an
+  // already-migrated DB (where the backfill may have picked a different plan) is
+  // deterministic rather than racing the unique constraint.
+  await prisma.tariffPlan.updateMany({
+    where: { operatorId, isDefault: true, id: { not: planId } },
+    data: { isDefault: false },
+  })
   await prisma.tariffPlan.upsert({
     where: { id: planId },
-    update: {},
+    update: { isDefault: true },
     create: {
       id: planId,
-      facilityId,
+      operatorId,
       name: 'Standard',
-      isDefault: true,
       isActive: true,
+      isDefault: true,
       timezone: 'Europe/Athens',
       graceMinutes: 5,
       incrementMinutes: 60,
@@ -317,18 +336,21 @@ async function seedSyntagma(facilityId: string): Promise<void> {
       scope: CapScope.STAY,
     },
   })
+
+  // Athens' operator default (isDefault above) — no explicit per-vehicle-type rows
+  // needed, demonstrates the fallback-to-default resolution path.
+  return planId
 }
 
-async function seedMonastiraki(facilityId: string): Promise<void> {
+async function seedMonastiraki(facilityId: string, operatorId: string): Promise<string> {
   const planId = `seed-plan-${facilityId}`
   await prisma.tariffPlan.upsert({
     where: { id: planId },
-    update: {},
+    update: { isDefault: false },
     create: {
       id: planId,
-      facilityId,
+      operatorId,
       name: 'Standard',
-      isDefault: true,
       isActive: true,
       timezone: 'Europe/Athens',
       graceMinutes: 0,
@@ -378,9 +400,22 @@ async function seedMonastiraki(facilityId: string): Promise<void> {
       currency: 'EUR',
     },
   })
+
+  // Not the operator default (Syntagma is) — needs explicit rows for every
+  // vehicle type this facility accepts.
+  await assignVehicleType(facilityId, VehicleType.CAR, planId)
+  await assignVehicleType(facilityId, VehicleType.MOTORCYCLE, planId)
+  await assignVehicleType(facilityId, VehicleType.VAN, planId)
+
+  return planId
 }
 
-async function seedAirport(facilityId: string): Promise<void> {
+// Two plans exist for this facility, assigned per vehicle type rather than one
+// plan for the whole facility — demonstrates the per-vehicle-type assignment
+// capability (car/motorcycle bill under one plan, van/truck under another, same
+// facility). Neither plan is the operator default (non-empty vehicleTypes
+// disqualifies them), so every vehicle type needs an explicit row.
+async function seedAirport(facilityId: string, operatorId: string): Promise<string> {
   const carPlanId = `seed-plan-${facilityId}`
   const vanPlanId = `seed-plan-van-${facilityId}`
 
@@ -389,9 +424,8 @@ async function seedAirport(facilityId: string): Promise<void> {
     update: {},
     create: {
       id: carPlanId,
-      facilityId,
+      operatorId,
       name: 'CAR / MOTORCYCLE',
-      isDefault: true,
       isActive: true,
       timezone: 'Europe/Athens',
       graceMinutes: 10,
@@ -405,9 +439,8 @@ async function seedAirport(facilityId: string): Promise<void> {
     update: {},
     create: {
       id: vanPlanId,
-      facilityId,
+      operatorId,
       name: 'VAN / TRUCK',
-      isDefault: false,
       isActive: true,
       timezone: 'Europe/Athens',
       graceMinutes: 10,
@@ -524,19 +557,30 @@ async function seedAirport(facilityId: string): Promise<void> {
       scope: CapScope.STAY,
     },
   })
+
+  await assignVehicleType(facilityId, VehicleType.CAR, carPlanId)
+  await assignVehicleType(facilityId, VehicleType.MOTORCYCLE, carPlanId)
+  await assignVehicleType(facilityId, VehicleType.VAN, vanPlanId)
+  await assignVehicleType(facilityId, VehicleType.TRUCK, vanPlanId)
+
+  return carPlanId
 }
 
-async function seedAristotelous(facilityId: string): Promise<void> {
+async function seedAristotelous(facilityId: string, operatorId: string): Promise<string> {
   const planId = `seed-plan-${facilityId}`
+  await prisma.tariffPlan.updateMany({
+    where: { operatorId, isDefault: true, id: { not: planId } },
+    data: { isDefault: false },
+  })
   await prisma.tariffPlan.upsert({
     where: { id: planId },
-    update: {},
+    update: { isDefault: true },
     create: {
       id: planId,
-      facilityId,
+      operatorId,
       name: 'Standard',
-      isDefault: true,
       isActive: true,
+      isDefault: true,
       timezone: 'Europe/Athens',
       graceMinutes: 15,
       incrementMinutes: 15,
@@ -597,18 +641,20 @@ async function seedAristotelous(facilityId: string): Promise<void> {
       scope: CapScope.STAY,
     },
   })
+
+  // Thessaloniki's operator default (isDefault above) — no explicit rows needed.
+  return planId
 }
 
-async function seedPort(facilityId: string): Promise<void> {
+async function seedPort(facilityId: string, operatorId: string): Promise<string> {
   const planId = `seed-plan-${facilityId}`
   await prisma.tariffPlan.upsert({
     where: { id: planId },
-    update: {},
+    update: { isDefault: false },
     create: {
       id: planId,
-      facilityId,
+      operatorId,
       name: 'Standard',
-      isDefault: true,
       isActive: true,
       timezone: 'Europe/Athens',
       graceMinutes: 0,
@@ -658,6 +704,14 @@ async function seedPort(facilityId: string): Promise<void> {
       currency: 'EUR',
     },
   })
+
+  // Not the operator default (Aristotelous is) — needs explicit rows for every
+  // vehicle type this facility accepts.
+  await assignVehicleType(facilityId, VehicleType.CAR, planId)
+  await assignVehicleType(facilityId, VehicleType.VAN, planId)
+  await assignVehicleType(facilityId, VehicleType.TRUCK, planId)
+
+  return planId
 }
 
 main()

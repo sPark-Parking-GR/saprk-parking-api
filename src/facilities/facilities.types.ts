@@ -20,6 +20,18 @@ export interface FacilitySearchParams {
   vehicleType?: VehicleType
 }
 
+export interface ResolvedTariffAssignment {
+  vehicleType: VehicleType
+  tariffPlanId: string | null
+  tariffPlanName: string | null
+  source: 'explicit' | 'default' | 'none'
+}
+
+export interface FacilityTariffAssignments {
+  assignments: ResolvedTariffAssignment[]
+  defaultPlan: { id: string; name: string } | null
+}
+
 export interface AdminFacility {
   id: string
   operatorId: string
@@ -90,7 +102,7 @@ export interface AdminMapResponse {
   total: number
 }
 
-export type BulkFacilityAction = 'enable' | 'disable' | 'deploy' | 'delete'
+export type BulkFacilityAction = 'enable' | 'disable' | 'deploy' | 'delete' | 'assignTariff'
 
 export interface BulkFacilityResult {
   affected: number

@@ -170,3 +170,78 @@ describe('FacilitiesService.search', () => {
     expect(prisma.facility.findMany).not.toHaveBeenCalled()
   })
 })
+
+describe('FacilitiesService.getDetail', () => {
+  let prisma: {
+    facility: { findFirst: jest.Mock }
+    review: { aggregate: jest.Mock }
+  }
+  let service: FacilitiesService
+
+  const activePlan = { id: 'plan1', isActive: true, name: 'Standard', tiers: [], windows: [], caps: [] }
+  const inactivePlan = { ...activePlan, id: 'plan2', isActive: false }
+
+  function detailRow(
+    tariffAssignments: { vehicleType: string; tariffPlan: unknown }[],
+  ) {
+    return {
+      id: 'f1',
+      name: 'Lot A',
+      lat: decimal(37.98),
+      lng: decimal(23.73),
+      images: [],
+      rules: [],
+      tariffAssignments,
+    }
+  }
+
+  beforeEach(() => {
+    prisma = {
+      facility: { findFirst: jest.fn() },
+      review: { aggregate: jest.fn().mockResolvedValue({ _avg: { rating: null }, _count: 0 }) },
+    }
+    service = new FacilitiesService(
+      prisma as unknown as PrismaService,
+      {} as unknown as InventoryService,
+      {} as unknown as TariffService,
+      {} as unknown as OperatorScopeService,
+    )
+  })
+
+  it('includes the tariffAssignments relation (an array, not a singular plan)', async () => {
+    prisma.facility.findFirst.mockResolvedValue(
+      detailRow([{ vehicleType: 'CAR', tariffPlan: activePlan }]),
+    )
+
+    const res = await service.getDetail('f1')
+
+    const include = prisma.facility.findFirst.mock.calls[0]![0].include as Record<string, unknown>
+    expect(include.tariffAssignments).toBeDefined()
+    expect(include.tariffPlan).toBeUndefined()
+    expect(res.tariffAssignments).toEqual([{ vehicleType: 'CAR', tariffPlan: activePlan }])
+  })
+
+  it('nulls out an assigned-but-inactive plan per row (no dead live pricing)', async () => {
+    prisma.facility.findFirst.mockResolvedValue(
+      detailRow([
+        { vehicleType: 'CAR', tariffPlan: activePlan },
+        { vehicleType: 'TRUCK', tariffPlan: inactivePlan },
+      ]),
+    )
+
+    const res = await service.getDetail('f1')
+
+    expect(res.tariffAssignments).toEqual([
+      { vehicleType: 'CAR', tariffPlan: activePlan },
+      { vehicleType: 'TRUCK', tariffPlan: null },
+    ])
+  })
+
+  it('returns an empty tariffAssignments array when nothing is assigned', async () => {
+    prisma.facility.findFirst.mockResolvedValue(detailRow([]))
+
+    const res = await service.getDetail('f1')
+
+    expect(res.tariffAssignments).toEqual([])
+  })
+})

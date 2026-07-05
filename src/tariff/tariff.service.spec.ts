@@ -286,16 +286,20 @@ describe('pricing-engine.priceStay', () => {
 })
 
 describe('TariffService.computeTotalsByFacility', () => {
-  let prisma: { tariffPlan: { findMany: jest.Mock } }
+  let prisma: { facility: { findMany: jest.Mock }; tariffPlan: { findMany: jest.Mock } }
   let service: TariffService
 
   const startsAt = new Date('2026-06-18T10:00:00Z')
   const endsAt = new Date('2026-06-18T12:00:00Z')
 
-  function dbPlan(facilityId: string, hourlyCents: number) {
+  function dbPlan(hourlyCents: number, over: Record<string, unknown> = {}) {
     return {
-      id: `${facilityId}-plan`,
-      facilityId,
+      id: 'p',
+      operatorId: 'op1',
+      isActive: true,
+      validFrom: null,
+      validTo: null,
+      vehicleTypes: [] as VehicleType[],
       version: 1,
       timezone: 'Europe/Athens',
       graceMinutes: 0,
@@ -321,36 +325,54 @@ describe('TariffService.computeTotalsByFacility', () => {
         },
       ],
       caps: [],
+      ...over,
     }
   }
 
+  // A facility with an explicit CAR-vehicleType row carrying the plan (or no row at all).
+  function facilityWithPlan(id: string, plan: unknown, operatorId = 'op1') {
+    return {
+      id,
+      operatorId,
+      tariffAssignments: plan ? [{ vehicleType: CAR, tariffPlan: plan }] : [],
+    }
+  }
+
+  function facilityNoRow(id: string, operatorId = 'op1') {
+    return { id, operatorId, tariffAssignments: [] as { vehicleType: VehicleType; tariffPlan: unknown }[] }
+  }
+
   beforeEach(() => {
-    prisma = { tariffPlan: { findMany: jest.fn() } }
+    prisma = {
+      facility: { findMany: jest.fn() },
+      tariffPlan: { findMany: jest.fn().mockResolvedValue([]) },
+    }
     service = new TariffService(
       prisma as unknown as PrismaService,
       {} as unknown as OperatorScopeService,
     )
   })
 
-  it('issues ONE findMany and totals the first plan per facility', async () => {
-    prisma.tariffPlan.findMany.mockResolvedValue([
-      dbPlan('f1', 400),
-      { ...dbPlan('f1', 999), id: 'f1-plan-2' },
-      dbPlan('f2', 750),
+  it('totals each facility from its explicit assigned plan in a fixed two queries', async () => {
+    prisma.facility.findMany.mockResolvedValue([
+      facilityWithPlan('f1', dbPlan(400)),
+      facilityWithPlan('f2', dbPlan(750)),
     ])
 
     const totals = await service.computeTotalsByFacility(['f1', 'f2'], startsAt, endsAt, CAR)
 
+    // One facility findMany, plus one tariffPlan findMany for the batched defaults.
+    expect(prisma.facility.findMany).toHaveBeenCalledTimes(1)
     expect(prisma.tariffPlan.findMany).toHaveBeenCalledTimes(1)
     expect(totals.get('f1')).toBe(800)
     expect(totals.get('f2')).toBe(1500)
   })
 
-  it('omits facilities whose plan has no applicable price', async () => {
-    const broken = dbPlan('f2', 0)
-    broken.windows[0]!.rates = []
-    broken.tiers[0]!.rates = []
-    prisma.tariffPlan.findMany.mockResolvedValue([dbPlan('f1', 400), broken])
+  it('omits a facility with no explicit row and no operator default', async () => {
+    prisma.facility.findMany.mockResolvedValue([
+      facilityWithPlan('f1', dbPlan(400)),
+      facilityNoRow('f2'),
+    ])
 
     const totals = await service.computeTotalsByFacility(['f1', 'f2'], startsAt, endsAt, CAR)
 
@@ -358,21 +380,99 @@ describe('TariffService.computeTotalsByFacility', () => {
     expect(totals.has('f2')).toBe(false)
   })
 
-  it('skips the query for empty ids or a non-positive window', async () => {
+  it('omits a facility whose explicit plan is inactive', async () => {
+    prisma.facility.findMany.mockResolvedValue([
+      facilityWithPlan('f1', dbPlan(400)),
+      facilityWithPlan('f2', dbPlan(750, { isActive: false })),
+    ])
+
+    const totals = await service.computeTotalsByFacility(['f1', 'f2'], startsAt, endsAt, CAR)
+
+    expect(totals.get('f1')).toBe(800)
+    expect(totals.has('f2')).toBe(false)
+  })
+
+  it('omits a facility whose plan does not cover the vehicle type', async () => {
+    prisma.facility.findMany.mockResolvedValue([
+      facilityWithPlan('f1', dbPlan(400, { vehicleTypes: ['TRUCK'] as VehicleType[] })),
+    ])
+
+    const totals = await service.computeTotalsByFacility(['f1'], startsAt, endsAt, CAR)
+
+    expect(totals.has('f1')).toBe(false)
+  })
+
+  it('omits facilities whose plan has no applicable price', async () => {
+    const broken = dbPlan(0)
+    broken.windows[0]!.rates = []
+    broken.tiers[0]!.rates = []
+    prisma.facility.findMany.mockResolvedValue([
+      facilityWithPlan('f1', dbPlan(400)),
+      facilityWithPlan('f2', broken),
+    ])
+
+    const totals = await service.computeTotalsByFacility(['f1', 'f2'], startsAt, endsAt, CAR)
+
+    expect(totals.get('f1')).toBe(800)
+    expect(totals.has('f2')).toBe(false)
+  })
+
+  it('skips both queries for empty ids or a non-positive window', async () => {
     expect((await service.computeTotalsByFacility([], startsAt, endsAt, CAR)).size).toBe(0)
     expect((await service.computeTotalsByFacility(['f1'], endsAt, startsAt, CAR)).size).toBe(0)
+    expect(prisma.facility.findMany).not.toHaveBeenCalled()
     expect(prisma.tariffPlan.findMany).not.toHaveBeenCalled()
   })
 
-  it('filters the query by vehicle type (empty list or matching)', async () => {
-    prisma.tariffPlan.findMany.mockResolvedValue([])
+  it('queries the given facility ids and loads only the exact-vehicleType row', async () => {
+    prisma.facility.findMany.mockResolvedValue([])
     await service.computeTotalsByFacility(['f1'], startsAt, endsAt, CAR)
-    const where = prisma.tariffPlan.findMany.mock.calls[0][0].where
-    const vehicleClause = where.AND.find(
-      (c: { OR?: unknown[] }) =>
-        Array.isArray(c.OR) &&
-        c.OR.some((o) => typeof o === 'object' && o !== null && 'vehicleTypes' in o),
-    )
-    expect(vehicleClause).toBeDefined()
+    const call = prisma.facility.findMany.mock.calls[0][0]
+    expect(call.where).toEqual({ id: { in: ['f1'] } })
+    expect(call.select.tariffAssignments.where).toEqual({ vehicleType: CAR })
+  })
+
+  it('falls back to the operator default when there is no explicit row', async () => {
+    prisma.facility.findMany.mockResolvedValue([facilityNoRow('f1')])
+    prisma.tariffPlan.findMany.mockResolvedValue([dbPlan(400)])
+
+    const totals = await service.computeTotalsByFacility(['f1'], startsAt, endsAt, CAR)
+
+    expect(totals.get('f1')).toBe(800)
+  })
+
+  it('prefers the explicit row over the operator default when both exist', async () => {
+    prisma.facility.findMany.mockResolvedValue([facilityWithPlan('f1', dbPlan(750))])
+    prisma.tariffPlan.findMany.mockResolvedValue([dbPlan(400)])
+
+    const totals = await service.computeTotalsByFacility(['f1'], startsAt, endsAt, CAR)
+
+    // 750/h from the explicit row, not 400/h from the default.
+    expect(totals.get('f1')).toBe(1500)
+  })
+
+  it('batches the defaults query by DISTINCT operator, not per facility', async () => {
+    // f1,f2 on op1; f3 on op2 — three facilities, two distinct operators.
+    prisma.facility.findMany.mockResolvedValue([
+      facilityNoRow('f1', 'op1'),
+      facilityNoRow('f2', 'op1'),
+      facilityNoRow('f3', 'op2'),
+    ])
+    prisma.tariffPlan.findMany.mockResolvedValue([
+      dbPlan(400, { operatorId: 'op1' }),
+      dbPlan(600, { operatorId: 'op2' }),
+    ])
+
+    const totals = await service.computeTotalsByFacility(['f1', 'f2', 'f3'], startsAt, endsAt, CAR)
+
+    expect(prisma.tariffPlan.findMany).toHaveBeenCalledTimes(1)
+    expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where).toEqual({
+      operatorId: { in: ['op1', 'op2'] },
+      isDefault: true,
+      isActive: true,
+    })
+    expect(totals.get('f1')).toBe(800)
+    expect(totals.get('f2')).toBe(800)
+    expect(totals.get('f3')).toBe(1200)
   })
 })

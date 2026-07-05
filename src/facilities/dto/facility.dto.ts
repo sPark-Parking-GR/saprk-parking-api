@@ -142,12 +142,48 @@ export const listFacilitiesSchema = z.object({
 
 export type ListFacilitiesDto = z.infer<typeof listFacilitiesSchema>
 
-export const bulkFacilitySchema = z.object({
-  ids: z.array(z.string().min(1)).min(1).max(500),
-  action: z.enum(['enable', 'disable', 'deploy', 'delete']),
+const bulkIds = z.array(z.string().min(1)).min(1).max(500)
+
+// A single concrete vehicle-type slot for a facility. Every row targets one vehicle
+// type; a vehicle type with no row falls back to the operator's default plan.
+const assignmentRowSchema = z.object({
+  vehicleType: z.nativeEnum(VehicleType),
+  tariffPlanId: z.string().min(1).nullable(),
 })
 
+// One slot cannot carry two different plans in the same call.
+const noDuplicateSlots = (rows: { vehicleType: VehicleType }[]) => {
+  const seen = new Set<VehicleType>()
+  for (const row of rows) {
+    if (seen.has(row.vehicleType)) return false
+    seen.add(row.vehicleType)
+  }
+  return true
+}
+
+export const bulkFacilitySchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('enable'), ids: bulkIds }),
+  z.object({ action: z.literal('disable'), ids: bulkIds }),
+  z.object({ action: z.literal('deploy'), ids: bulkIds }),
+  z.object({ action: z.literal('delete'), ids: bulkIds }),
+  z.object({
+    action: z.literal('assignTariff'),
+    ids: bulkIds,
+    assignments: z
+      .array(assignmentRowSchema)
+      .min(1)
+      .refine(noDuplicateSlots, { message: 'duplicate vehicleType in assignments' }),
+  }),
+])
+
 export type BulkFacilityDto = z.infer<typeof bulkFacilitySchema>
+
+export const assignTariffSchema = z.object({
+  vehicleType: z.nativeEnum(VehicleType),
+  tariffPlanId: z.string().min(1).nullable(),
+})
+
+export type AssignTariffDto = z.infer<typeof assignTariffSchema>
 
 export const adminMapSchema = z
   .object({

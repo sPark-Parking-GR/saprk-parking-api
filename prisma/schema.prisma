@@ -199,6 +199,7 @@ model ParkingOperator {
   facilities     Facility[]
   memberships    OperatorMembership[]
   promotionPlans PromotionPlan[]
+  tariffPlans    TariffPlan[]
 
   @@index([status])
 }
@@ -252,13 +253,13 @@ model Facility {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  operator      ParkingOperator @relation(fields: [operatorId], references: [id])
-  images        FacilityImage[]
-  rules         FacilityRule[]
-  tariffPlans   TariffPlan[]
-  bookings      Booking[]
-  reviews       Review[]
-  promotionPlan PromotionPlan?
+  operator         ParkingOperator            @relation(fields: [operatorId], references: [id])
+  tariffAssignments FacilityTariffAssignment[]
+  images           FacilityImage[]
+  rules            FacilityRule[]
+  bookings         Booking[]
+  reviews          Review[]
+  promotionPlan    PromotionPlan?
 
   // Generated geography point (kept in sync with lat/lng by the database). Managed
   // via raw SQL in the migration; Prisma treats it as an opaque column.
@@ -300,10 +301,14 @@ model FacilityRule {
 
 model TariffPlan {
   id               String        @id @default(cuid())
-  facilityId       String
+  operatorId       String
   name             String
-  isDefault        Boolean       @default(false)
   isActive         Boolean       @default(true)
+  // Catch-all for any facility vehicle-type slot with no explicit override. Only a
+  // plan with empty vehicleTypes (prices everything) may be default. At most one
+  // active default per operator (partial unique index in the migration); required
+  // once an operator has 2+ active plans, enforced in the service layer.
+  isDefault        Boolean       @default(false)
   validFrom        DateTime?
   validTo          DateTime?
   // IANA zone for all wall-clock window math (DST-correct). Never server-local.
@@ -319,12 +324,32 @@ model TariffPlan {
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
-  facility Facility     @relation(fields: [facilityId], references: [id], onDelete: Cascade)
-  tiers    RateTier[]
-  windows  RateWindow[]
-  caps     RateCap[]
+  operator          ParkingOperator            @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  facilityAssignments FacilityTariffAssignment[]
+  tiers             RateTier[]
+  windows           RateWindow[]
+  caps              RateCap[]
 
-  @@index([facilityId, isActive])
+  @@index([operatorId, isActive])
+}
+
+// Assigns a plan to a facility for one concrete vehicle type. A plan may back many
+// rows/facilities; a facility may have up to one row per VehicleType. Any vehicle
+// type with no row here falls back to the operator's default plan (TariffPlan.isDefault)
+// — there is no per-facility wildcard/catch-all row anymore.
+model FacilityTariffAssignment {
+  id           String      @id @default(cuid())
+  facilityId   String
+  tariffPlanId String
+  vehicleType  VehicleType
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  facility   Facility   @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  tariffPlan TariffPlan @relation(fields: [tariffPlanId], references: [id], onDelete: Cascade)
+
+  @@unique([facilityId, vehicleType])
+  @@index([tariffPlanId])
 }
 
 // Partitions the 24h clock for time-of-day pricing (e.g. Day vs Night). With no

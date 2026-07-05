@@ -16,6 +16,7 @@ import {
 import {
   BookingNotFoundError,
   BookingStatusTransitionError,
+  DefaultTariffRequiredError,
   DomainError,
   FacilityFieldForbiddenError,
   FacilityNotFoundError,
@@ -24,6 +25,7 @@ import {
   NoAvailabilityError,
   OperatorContextRequiredError,
   QuoteExpiredError,
+  TariffPlanNotFoundError,
 } from '../errors/domain.errors'
 
 @Catch()
@@ -70,7 +72,11 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (exception instanceof EmailInUseError) {
       return HttpStatus.CONFLICT
     }
-    if (exception instanceof FacilityNotFoundError || exception instanceof BookingNotFoundError) {
+    if (
+      exception instanceof FacilityNotFoundError ||
+      exception instanceof BookingNotFoundError ||
+      exception instanceof TariffPlanNotFoundError
+    ) {
       return HttpStatus.NOT_FOUND
     }
     if (
@@ -83,7 +89,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof NoAvailabilityError ||
       exception instanceof QuoteExpiredError ||
       exception instanceof BookingStatusTransitionError ||
-      exception instanceof IdempotencyConflictError
+      exception instanceof IdempotencyConflictError ||
+      exception instanceof DefaultTariffRequiredError
     ) {
       return HttpStatus.CONFLICT
     }

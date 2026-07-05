@@ -4,11 +4,14 @@ import { OperatorScopeService, type OperatorScope } from '../common/authz/operat
 import {
   FacilityFieldForbiddenError,
   FacilityNotFoundError,
+  TariffAssignmentMismatchError,
+  TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import type { InventoryService } from '../inventory/inventory.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { TariffService } from '../tariff/tariff.service'
 import {
+  bulkFacilitySchema,
   createFacilitySchema,
   updateFacilitySchema,
   type CreateFacilityDto,
@@ -77,6 +80,13 @@ describe('FacilitiesService admin writes', () => {
       update: jest.Mock
       updateMany: jest.Mock
     }
+    facilityTariffAssignment: {
+      findMany: jest.Mock
+      deleteMany: jest.Mock
+      create: jest.Mock
+      createMany: jest.Mock
+    }
+    tariffPlan: { findFirst: jest.Mock; findMany: jest.Mock }
     parkingOperator: { findUnique: jest.Mock }
     auditLog: { create: jest.Mock }
     operatorMembership: { findFirst: jest.Mock }
@@ -90,12 +100,24 @@ describe('FacilitiesService admin writes', () => {
     scope.scopeWhere.mockReturnValue(s.kind === 'platform' ? {} : { operatorId: s.operatorId })
   }
 
+  let tx: {
+    facility: { create: jest.Mock; update: jest.Mock; updateMany: jest.Mock; findMany: jest.Mock }
+    facilityTariffAssignment: { deleteMany: jest.Mock; create: jest.Mock; createMany: jest.Mock }
+    auditLog: { create: jest.Mock }
+  }
+
   beforeEach(() => {
-    const tx = {
+    tx = {
       facility: {
         create: jest.fn(),
         update: jest.fn(),
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      facilityTariffAssignment: {
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+        create: jest.fn(),
+        createMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
       auditLog: { create: jest.fn() },
     }
@@ -107,6 +129,16 @@ describe('FacilitiesService admin writes', () => {
         create: tx.facility.create,
         update: tx.facility.update,
         updateMany: tx.facility.updateMany,
+      },
+      facilityTariffAssignment: {
+        findMany: jest.fn().mockResolvedValue([]),
+        deleteMany: tx.facilityTariffAssignment.deleteMany,
+        create: tx.facilityTariffAssignment.create,
+        createMany: tx.facilityTariffAssignment.createMany,
+      },
+      tariffPlan: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'plan1', vehicleTypes: [] }),
+        findMany: jest.fn().mockResolvedValue([{ id: 'plan1', vehicleTypes: [] }]),
       },
       parkingOperator: { findUnique: jest.fn().mockResolvedValue({ id: 'op1' }) },
       auditLog: { create: tx.auditLog.create },
@@ -317,6 +349,289 @@ describe('FacilitiesService admin writes', () => {
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['mine', 'foreign'] }, operatorId: 'op1' },
       data: { isActive: true },
+    })
+  })
+
+  describe('assignTariff (single facility, one slot)', () => {
+    it('sets a concrete-vehicleType row after verifying facility + plan in scope, then audits', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
+      prisma.tariffPlan.findFirst.mockResolvedValue({ id: 'plan1', vehicleTypes: [] })
+
+      const res = await service.assignTariff(operatorUser, 'f1', 'CAR' as never, 'plan1')
+
+      expect(prisma.facility.findFirst.mock.calls[0]![0].where).toEqual({
+        id: 'f1',
+        operatorId: 'op1',
+      })
+      expect(prisma.tariffPlan.findFirst.mock.calls[0]![0].where).toEqual({
+        id: 'plan1',
+        operatorId: 'op1',
+      })
+      expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
+        where: { facilityId: 'f1', vehicleType: 'CAR' },
+      })
+      expect(tx.facilityTariffAssignment.create).toHaveBeenCalledWith({
+        data: { facilityId: 'f1', tariffPlanId: 'plan1', vehicleType: 'CAR' },
+      })
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'facility.tariff_assigned',
+            payload: { vehicleType: 'CAR', tariffPlanId: 'plan1' },
+          }),
+        }),
+      )
+      expect(res).toEqual({ facilityId: 'f1', vehicleType: 'CAR', tariffPlanId: 'plan1' })
+    })
+
+    it('rejects a concrete slot the plan does not price (consistency guardrail)', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
+      prisma.tariffPlan.findFirst.mockResolvedValue({ id: 'plan1', vehicleTypes: ['TRUCK'] })
+
+      await expect(
+        service.assignTariff(operatorUser, 'f1', 'CAR' as never, 'plan1'),
+      ).rejects.toBeInstanceOf(TariffAssignmentMismatchError)
+      expect(tx.facilityTariffAssignment.create).not.toHaveBeenCalled()
+      expect(tx.facilityTariffAssignment.deleteMany).not.toHaveBeenCalled()
+    })
+
+    it('rejects when the facility is not in the caller scope (no write)', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.facility.findFirst.mockResolvedValue(null)
+
+      await expect(
+        service.assignTariff(operatorUser, 'f-other', 'CAR' as never, 'plan1'),
+      ).rejects.toBeInstanceOf(FacilityNotFoundError)
+      expect(prisma.tariffPlan.findFirst).not.toHaveBeenCalled()
+      expect(tx.facilityTariffAssignment.create).not.toHaveBeenCalled()
+    })
+
+    it('rejects when the plan is not in the caller scope (cross-operator leak blocked)', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
+      prisma.tariffPlan.findFirst.mockResolvedValue(null)
+
+      await expect(
+        service.assignTariff(operatorUser, 'f1', 'CAR' as never, 'plan-other'),
+      ).rejects.toBeInstanceOf(TariffPlanNotFoundError)
+      expect(tx.facilityTariffAssignment.create).not.toHaveBeenCalled()
+    })
+
+    it('clears a slot when tariffPlanId is null without a plan lookup or create', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
+
+      await service.assignTariff(operatorUser, 'f1', 'CAR' as never, null)
+
+      expect(prisma.tariffPlan.findFirst).not.toHaveBeenCalled()
+      expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
+        where: { facilityId: 'f1', vehicleType: 'CAR' },
+      })
+      expect(tx.facilityTariffAssignment.create).not.toHaveBeenCalled()
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ action: 'facility.tariff_unassigned' }),
+        }),
+      )
+    })
+  })
+
+  describe('bulkUpdate assignTariff', () => {
+    it('assigns multiple slots across scoped facilities after validating every plan', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.tariffPlan.findMany.mockResolvedValue([
+        { id: 'planCar', vehicleTypes: ['CAR'] },
+        { id: 'planTruck', vehicleTypes: [] },
+      ])
+      tx.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
+
+      const res = await service.bulkUpdate(operatorUser, {
+        action: 'assignTariff',
+        ids: ['a', 'b'],
+        assignments: [
+          { vehicleType: 'CAR' as never, tariffPlanId: 'planCar' },
+          { vehicleType: 'TRUCK' as never, tariffPlanId: 'planTruck' },
+        ],
+      })
+
+      // Every distinct plan id was ownership-checked in one query.
+      expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where).toEqual({
+        id: { in: ['planCar', 'planTruck'] },
+        operatorId: 'op1',
+      })
+      // One deleteMany clearing both targeted concrete slots on both scoped facilities.
+      expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
+        where: {
+          facilityId: { in: ['a', 'b'] },
+          vehicleType: { in: ['CAR', 'TRUCK'] },
+        },
+      })
+      // One createMany inserting every facility × non-null-plan pair.
+      expect(tx.facilityTariffAssignment.createMany).toHaveBeenCalledWith({
+        data: [
+          { facilityId: 'a', tariffPlanId: 'planCar', vehicleType: 'CAR' },
+          { facilityId: 'a', tariffPlanId: 'planTruck', vehicleType: 'TRUCK' },
+          { facilityId: 'b', tariffPlanId: 'planCar', vehicleType: 'CAR' },
+          { facilityId: 'b', tariffPlanId: 'planTruck', vehicleType: 'TRUCK' },
+        ],
+      })
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ action: 'facility.bulk.assignTariff' }),
+        }),
+      )
+      expect(res).toEqual({ affected: 2 })
+    })
+
+    it('only in-scope facilities are affected; foreign ids are silently excluded', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.tariffPlan.findMany.mockResolvedValue([{ id: 'plan1', vehicleTypes: [] }])
+      // Only 'mine' matches id IN (...) AND operatorId = op1.
+      tx.facility.findMany.mockResolvedValue([{ id: 'mine' }])
+
+      const res = await service.bulkUpdate(operatorUser, {
+        action: 'assignTariff',
+        ids: ['mine', 'foreign'],
+        assignments: [{ vehicleType: 'CAR' as never, tariffPlanId: 'plan1' }],
+      })
+
+      expect(tx.facility.findMany.mock.calls[0]![0].where).toEqual({
+        id: { in: ['mine', 'foreign'] },
+        operatorId: 'op1',
+      })
+      expect(tx.facilityTariffAssignment.createMany).toHaveBeenCalledWith({
+        data: [{ facilityId: 'mine', tariffPlanId: 'plan1', vehicleType: 'CAR' }],
+      })
+      expect(res).toEqual({ affected: 1 })
+    })
+
+    it('rejects the whole call when ANY plan id in the array is out of scope (no writes)', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      // Caller owns planMine but not planOther; findMany returns only the owned one.
+      prisma.tariffPlan.findMany.mockResolvedValue([{ id: 'planMine', vehicleTypes: [] }])
+
+      await expect(
+        service.bulkUpdate(operatorUser, {
+          action: 'assignTariff',
+          ids: ['a'],
+          assignments: [
+            { vehicleType: 'CAR' as never, tariffPlanId: 'planMine' },
+            { vehicleType: 'TRUCK' as never, tariffPlanId: 'planOther' },
+          ],
+        }),
+      ).rejects.toBeInstanceOf(TariffPlanNotFoundError)
+      expect(tx.facility.findMany).not.toHaveBeenCalled()
+      expect(tx.facilityTariffAssignment.deleteMany).not.toHaveBeenCalled()
+      expect(tx.facilityTariffAssignment.createMany).not.toHaveBeenCalled()
+    })
+
+    it('bulk clear (all null plans) deletes the targeted slots and inserts nothing', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      tx.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
+
+      await service.bulkUpdate(operatorUser, {
+        action: 'assignTariff',
+        ids: ['a', 'b'],
+        assignments: [{ vehicleType: 'CAR' as never, tariffPlanId: null }],
+      })
+
+      expect(prisma.tariffPlan.findMany).not.toHaveBeenCalled()
+      expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
+        where: { facilityId: { in: ['a', 'b'] }, vehicleType: { in: ['CAR'] } },
+      })
+      expect(tx.facilityTariffAssignment.createMany).not.toHaveBeenCalled()
+    })
+
+    it('rejects a duplicate vehicleType within one assignments array (DTO refine)', () => {
+      const res = bulkFacilitySchema.safeParse({
+        action: 'assignTariff',
+        ids: ['a'],
+        assignments: [
+          { vehicleType: 'CAR', tariffPlanId: 'p1' },
+          { vehicleType: 'CAR', tariffPlanId: 'p2' },
+        ],
+      })
+      expect(res.success).toBe(false)
+    })
+
+    it('rejects a null vehicleType in an assignment row (wildcard slot is gone)', () => {
+      const res = bulkFacilitySchema.safeParse({
+        action: 'assignTariff',
+        ids: ['a'],
+        assignments: [{ vehicleType: null, tariffPlanId: 'p1' }],
+      })
+      expect(res.success).toBe(false)
+    })
+  })
+
+  describe('getTariffAssignments (resolved 4-row view)', () => {
+    const ALL_TYPES = ['CAR', 'MOTORCYCLE', 'VAN', 'TRUCK']
+
+    it('sources all 4 rows from the operator default when there are no explicit rows', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', operatorId: 'op1' })
+      prisma.facilityTariffAssignment.findMany.mockResolvedValue([])
+      prisma.tariffPlan.findFirst.mockResolvedValue({ id: 'def', name: 'Default' })
+
+      const res = await service.getTariffAssignments(operatorUser, 'f1')
+
+      expect(res.defaultPlan).toEqual({ id: 'def', name: 'Default' })
+      expect(res.assignments).toHaveLength(4)
+      expect(res.assignments.map((a) => a.vehicleType).sort()).toEqual([...ALL_TYPES].sort())
+      for (const a of res.assignments) {
+        expect(a.source).toBe('default')
+        expect(a.tariffPlanId).toBe('def')
+        expect(a.tariffPlanName).toBe('Default')
+      }
+    })
+
+    it('sources all 4 rows as none (null ids) when there is neither explicit rows nor a default', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', operatorId: 'op1' })
+      prisma.facilityTariffAssignment.findMany.mockResolvedValue([])
+      prisma.tariffPlan.findFirst.mockResolvedValue(null)
+
+      const res = await service.getTariffAssignments(operatorUser, 'f1')
+
+      expect(res.defaultPlan).toBeNull()
+      expect(res.assignments).toHaveLength(4)
+      for (const a of res.assignments) {
+        expect(a.source).toBe('none')
+        expect(a.tariffPlanId).toBeNull()
+        expect(a.tariffPlanName).toBeNull()
+      }
+    })
+
+    it('mixes explicit rows with default-covered rows', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', operatorId: 'op1' })
+      prisma.facilityTariffAssignment.findMany.mockResolvedValue([
+        { vehicleType: 'CAR', tariffPlanId: 'planCar', tariffPlan: { name: 'Car Plan' } },
+      ])
+      prisma.tariffPlan.findFirst.mockResolvedValue({ id: 'def', name: 'Default' })
+
+      const res = await service.getTariffAssignments(operatorUser, 'f1')
+
+      const byType = new Map(res.assignments.map((a) => [a.vehicleType, a]))
+      expect(byType.get('CAR' as never)).toEqual({
+        vehicleType: 'CAR',
+        tariffPlanId: 'planCar',
+        tariffPlanName: 'Car Plan',
+        source: 'explicit',
+      })
+      expect(byType.get('TRUCK' as never)!.source).toBe('default')
+      expect(byType.get('TRUCK' as never)!.tariffPlanId).toBe('def')
+    })
+
+    it('rejects a facility outside the caller scope', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.facility.findFirst.mockResolvedValue(null)
+
+      await expect(service.getTariffAssignments(operatorUser, 'f-other')).rejects.toBeInstanceOf(
+        FacilityNotFoundError,
+      )
     })
   })
 })
