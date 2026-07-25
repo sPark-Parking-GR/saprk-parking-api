@@ -1,8 +1,40 @@
 import { Module } from '@nestjs/common'
+import { ConfigService } from '@nestjs/config'
+import { createEmailContext } from '@spark/notifications'
+import type { EmailProviderConfig } from '@spark/notifications'
+import { NOTIFICATIONS_EMAIL_CONTEXT_TOKEN } from './notifications.constants'
 import { NotificationsService } from './notifications.service'
 
+function resolveEmailConfig(config: ConfigService): EmailProviderConfig {
+  const provider = (config.get<string>('EMAIL_PROVIDER') ?? 'console') as EmailProviderConfig['provider']
+
+  switch (provider) {
+    case 'console':
+      return { provider: 'console', config: {} }
+    case 'sendgrid':
+      return {
+        provider: 'sendgrid',
+        config: { apiKey: config.getOrThrow('SENDGRID_API_KEY') },
+      }
+    case 'postmark':
+      return {
+        provider: 'postmark',
+        config: { serverToken: config.getOrThrow('POSTMARK_SERVER_TOKEN') },
+      }
+    default:
+      throw new Error(`Unknown EMAIL_PROVIDER: ${provider}`)
+  }
+}
+
 @Module({
-  providers: [NotificationsService],
+  providers: [
+    {
+      provide: NOTIFICATIONS_EMAIL_CONTEXT_TOKEN,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => createEmailContext(resolveEmailConfig(config)),
+    },
+    NotificationsService,
+  ],
   exports: [NotificationsService],
 })
 export class NotificationsModule {}

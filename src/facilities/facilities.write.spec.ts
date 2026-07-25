@@ -1,7 +1,9 @@
 import type { AuthUser } from '@spark/types'
+import { Prisma } from '@prisma/client'
 import { FacilitiesService } from './facilities.service'
 import { OperatorScopeService, type OperatorScope } from '../common/authz/operator-scope.service'
 import {
+  FacilityAlreadyExistsError,
   FacilityFieldForbiddenError,
   FacilityNotFoundError,
   TariffAssignmentMismatchError,
@@ -101,9 +103,16 @@ describe('FacilitiesService admin writes', () => {
   }
 
   let tx: {
-    facility: { create: jest.Mock; update: jest.Mock; updateMany: jest.Mock; findMany: jest.Mock }
+    facility: {
+      create: jest.Mock
+      update: jest.Mock
+      updateMany: jest.Mock
+      findMany: jest.Mock
+      count: jest.Mock
+    }
     facilityTariffAssignment: { deleteMany: jest.Mock; create: jest.Mock; createMany: jest.Mock }
     auditLog: { create: jest.Mock }
+    $executeRaw: jest.Mock
   }
 
   beforeEach(() => {
@@ -113,6 +122,7 @@ describe('FacilitiesService admin writes', () => {
         update: jest.fn(),
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
         findMany: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(0),
       },
       facilityTariffAssignment: {
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -120,6 +130,7 @@ describe('FacilitiesService admin writes', () => {
         createMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
       auditLog: { create: jest.fn() },
+      $executeRaw: jest.fn().mockResolvedValue(0),
     }
     prisma = {
       facility: {
@@ -186,6 +197,44 @@ describe('FacilitiesService admin writes', () => {
     await expect(service.create(platformUser, { ...validCreate })).rejects.toThrow(
       'operatorId required',
     )
+  })
+
+  describe('one-facility-per-operator cap', () => {
+    it('rejects a second create when the operator already owns a facility', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      tx.facility.count.mockResolvedValue(1)
+
+      await expect(service.create(operatorUser, { ...validCreate })).rejects.toBeInstanceOf(
+        FacilityAlreadyExistsError,
+      )
+      expect(tx.facility.create).not.toHaveBeenCalled()
+    })
+
+    it('locks the operator row (FOR UPDATE) before the cap count', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      prisma.facility.create.mockResolvedValue(makeRow())
+
+      await service.create(operatorUser, { ...validCreate })
+
+      expect(tx.$executeRaw).toHaveBeenCalled()
+      const lockOrder = tx.$executeRaw.mock.invocationCallOrder[0]!
+      const countOrder = tx.facility.count.mock.invocationCallOrder[0]!
+      expect(lockOrder).toBeLessThan(countOrder)
+    })
+
+    it('translates a P2002 unique-violation race into FacilityAlreadyExistsError', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      tx.facility.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('unique', {
+          code: 'P2002',
+          clientVersion: 'test',
+        }),
+      )
+
+      await expect(service.create(operatorUser, { ...validCreate })).rejects.toBeInstanceOf(
+        FacilityAlreadyExistsError,
+      )
+    })
   })
 
   it('operator update cannot set isVerified', async () => {

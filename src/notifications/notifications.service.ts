@@ -1,33 +1,53 @@
-import { Injectable, Logger } from '@nestjs/common'
-import { ConfigService } from '@nestjs/config'
-import { ConsoleNotificationProvider } from './providers/console-notification.provider'
-import type { BookingNotificationData, INotificationProvider } from './notification.types'
+import { Inject, Injectable, Logger } from '@nestjs/common'
+import type { EmailContext } from '@spark/notifications'
+import { NOTIFICATIONS_EMAIL_CONTEXT_TOKEN } from './notifications.constants'
+import type { BookingNotificationData } from './notification.types'
 
 @Injectable()
 export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name)
-  private readonly provider: INotificationProvider
 
-  constructor(config: ConfigService) {
-    const name = config.get<string>('NOTIFICATION_PROVIDER') ?? 'console'
-    this.provider = this.resolveProvider(name)
-  }
+  constructor(
+    @Inject(NOTIFICATIONS_EMAIL_CONTEXT_TOKEN) private readonly emailContext: EmailContext,
+  ) {}
 
   async sendBookingConfirmation(data: BookingNotificationData): Promise<void> {
-    await this.safeSend(() => this.provider.sendBookingConfirmation(data), 'confirmation')
+    await this.safeSend(
+      () =>
+        this.emailContext.send({
+          to: data.recipientEmail,
+          subject: `Booking confirmed — ${data.facilityName}`,
+          template: 'booking-confirmation',
+          data: { ...data },
+        }),
+      'confirmation',
+    )
   }
 
   async sendBookingCancellation(data: BookingNotificationData): Promise<void> {
-    await this.safeSend(() => this.provider.sendBookingCancellation(data), 'cancellation')
+    await this.safeSend(
+      () =>
+        this.emailContext.send({
+          to: data.recipientEmail,
+          subject: `Booking cancelled — ${data.facilityName}`,
+          template: 'booking-cancellation',
+          data: { ...data },
+        }),
+      'cancellation',
+    )
   }
 
-  private resolveProvider(name: string): INotificationProvider {
-    switch (name) {
-      case 'console':
-        return new ConsoleNotificationProvider()
-      default:
-        throw new Error(`Unknown NOTIFICATION_PROVIDER: ${name}`)
-    }
+  async sendOperatorInvite(data: { to: string; businessName: string; acceptUrl: string }): Promise<void> {
+    await this.safeSend(
+      () =>
+        this.emailContext.send({
+          to: data.to,
+          subject: `You're invited to sPark — ${data.businessName}`,
+          template: 'operator-invite',
+          data: { ...data },
+        }),
+      'operator invite',
+    )
   }
 
   private async safeSend(fn: () => Promise<void>, kind: string): Promise<void> {

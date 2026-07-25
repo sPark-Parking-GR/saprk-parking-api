@@ -36,6 +36,13 @@ enum OperatorMemberRole {
   ADMIN
 }
 
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
 enum RateUnit {
   PER_MINUTE
   PER_BLOCK
@@ -128,6 +135,9 @@ model User {
   displayName   String?
   avatarUrl     String?
   passwordHash  String?
+  // Set for Firebase-provisioned identities so the Firebase-backed auth provider can
+  // round-trip the remote uid through the shared user store; null for authjs users.
+  firebaseUid   String?  @unique
   emailVerified Boolean  @default(false)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -137,6 +147,7 @@ model User {
   bookings            Booking[]
   reviews             Review[]
   operatorMemberships OperatorMembership[]
+  invitesSent         OperatorInvite[]
 
   @@index([email])
 }
@@ -200,7 +211,34 @@ model ParkingOperator {
   memberships    OperatorMembership[]
   promotionPlans PromotionPlan[]
   tariffPlans    TariffPlan[]
+  invites        OperatorInvite[]
 
+  @@index([status])
+}
+
+// Platform-admin-issued B2B onboarding invite. Created alongside a PENDING operator;
+// accepting the single-use, expiring link provisions the operator's admin identity and
+// flips the operator to VERIFIED. Only the sha256 hash of the raw token is stored.
+model OperatorInvite {
+  id           String       @id @default(cuid())
+  email        String
+  businessName String
+  // Nullable: revoke() deletes the never-claimed shell operator but keeps this row (with
+  // its REVOKED status) for audit visibility in the invites list, rather than cascading it
+  // away with the operator.
+  operatorId   String?
+  tokenHash    String       @unique
+  status       InviteStatus @default(PENDING)
+  invitedById  String
+  expiresAt    DateTime
+  acceptedAt   DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  operator  ParkingOperator? @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+  invitedBy User             @relation(fields: [invitedById], references: [id])
+
+  @@index([email])
   @@index([status])
 }
 
@@ -215,6 +253,7 @@ model OperatorMembership {
   user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([operatorId, userId])
+  @@index([userId])
 }
 
 // ─── Facility ─────────────────────────────────────────────────────────────────
@@ -269,6 +308,10 @@ model Facility {
   @@index([lat, lng])
   @@index([isActive, isVerified])
   @@index([kind, isActive])
+  // One-facility-per-operator cap for real operators is a PARTIAL unique index defined
+  // in the migration (WHERE operatorId <> the synthetic unclaimed-import operator),
+  // mirroring the TariffPlan.isDefault partial-unique convention. Not expressible as a
+  // schema @@unique, so this stays a plain index here; the DB enforces the cap.
   @@index([operatorId])
   @@index([geog], type: Gist)
 }

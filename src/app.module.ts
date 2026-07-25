@@ -11,9 +11,11 @@ import { DomainExceptionFilter } from './common/filters/domain-exception.filter'
 import { FacilitiesModule } from './facilities/facilities.module'
 import { IngestionModule } from './ingestion/ingestion.module'
 import { InventoryModule } from './inventory/inventory.module'
+import { InviteModule } from './invite/invite.module'
 import { JobsModule } from './jobs/jobs.module'
 import { MapsModule } from './maps/maps.module'
 import { NotificationsModule } from './notifications/notifications.module'
+import { OperatorsModule } from './operators/operators.module'
 import { PaymentsModule } from './payments/payments.module'
 import { PrismaModule } from './prisma/prisma.module'
 import { TariffModule } from './tariff/tariff.module'
@@ -31,6 +33,8 @@ import { TariffModule } from './tariff/tariff.module'
     InventoryModule,
     FacilitiesModule,
     BookingModule,
+    InviteModule,
+    OperatorsModule,
     JobsModule,
     IngestionModule,
     AuditModule,

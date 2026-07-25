@@ -5,6 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
+import { OperatorStatusService } from '../../common/authz/operator-status.service'
 import type { AuthenticatedRequest } from '../../common/types/request'
 import { AuthService } from '../auth.service'
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator'
@@ -14,6 +15,7 @@ export class AuthGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly authService: AuthService,
+    private readonly operatorStatus: OperatorStatusService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -38,6 +40,10 @@ export class AuthGuard implements CanActivate {
     }
 
     request.user = result.user
+    // Suspension takes effect on the very next request, not at the next login: an
+    // already-issued, still-valid token must stop working the moment its operator is
+    // suspended.
+    await this.operatorStatus.assertOperatorActive(result.user)
     return true
   }
 

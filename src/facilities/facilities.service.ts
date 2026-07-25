@@ -6,6 +6,7 @@ import type { AuthUser } from '@spark/types'
 import { OperatorScopeService, type OperatorScope } from '../common/authz/operator-scope.service'
 import {
   DomainError,
+  FacilityAlreadyExistsError,
   FacilityFieldForbiddenError,
   FacilityNotFoundError,
   TariffAssignmentMismatchError,
@@ -477,43 +478,59 @@ export class FacilitiesService {
     })
     if (!operator) throw new DomainError('operatorId required')
 
-    const created = await this.prisma.$transaction(async (tx) => {
-      // `geog` is a GENERATED ALWAYS column; the database derives it from lat/lng,
-      // so no raw write is needed (and one would be rejected by Postgres).
-      const facility = await tx.facility.create({
-        data: {
-          operatorId,
-          name: dto.name,
-          address: dto.address,
-          lat: new Prisma.Decimal(dto.lat),
-          lng: new Prisma.Decimal(dto.lng),
-          totalCapacity: dto.totalCapacity,
-          onlineQuota: dto.onlineQuota,
-          vehicleTypes: dto.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v]),
-          heightRestrictionCm: dto.heightRestrictionCm ?? null,
-          openingHoursJson: dto.openingHours as unknown as Prisma.InputJsonValue,
-          amenities: dto.amenities,
-          cancellationPolicy: dto.cancellationPolicy,
-          isActive: false,
-          isVerified: false,
-          rank: 0,
-        },
+    try {
+      const created = await this.prisma.$transaction(async (tx) => {
+        // Lock the operator row so two concurrent creates serialize on the same
+        // operator, then enforce the one-facility-per-operator cap under that lock.
+        await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${operatorId} FOR UPDATE`
+
+        const existing = await tx.facility.count({ where: { operatorId } })
+        if (existing >= 1) throw new FacilityAlreadyExistsError(operatorId)
+
+        // `geog` is a GENERATED ALWAYS column; the database derives it from lat/lng,
+        // so no raw write is needed (and one would be rejected by Postgres).
+        const facility = await tx.facility.create({
+          data: {
+            operatorId,
+            name: dto.name,
+            address: dto.address,
+            lat: new Prisma.Decimal(dto.lat),
+            lng: new Prisma.Decimal(dto.lng),
+            totalCapacity: dto.totalCapacity,
+            onlineQuota: dto.onlineQuota,
+            vehicleTypes: dto.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v]),
+            heightRestrictionCm: dto.heightRestrictionCm ?? null,
+            openingHoursJson: dto.openingHours as unknown as Prisma.InputJsonValue,
+            amenities: dto.amenities,
+            cancellationPolicy: dto.cancellationPolicy,
+            isActive: false,
+            isVerified: false,
+            rank: 0,
+          },
+        })
+
+        await tx.auditLog.create({
+          data: {
+            actorId: user.id,
+            actorRole: user.role,
+            action: 'facility.created',
+            entityType: 'Facility',
+            entityId: facility.id,
+          },
+        })
+
+        return facility
       })
 
-      await tx.auditLog.create({
-        data: {
-          actorId: user.id,
-          actorRole: user.role,
-          action: 'facility.created',
-          entityType: 'Facility',
-          entityId: facility.id,
-        },
-      })
-
-      return facility
-    })
-
-    return this.toAdminFacility(created)
+      return this.toAdminFacility(created)
+    } catch (error) {
+      // Belt-and-suspenders: if two requests both pass the count check before either
+      // commits, the unique index on Facility.operatorId rejects the loser with P2002.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new FacilityAlreadyExistsError(operatorId)
+      }
+      throw error
+    }
   }
 
   async update(user: AuthUser, id: string, dto: UpdateFacilityDto): Promise<AdminFacility> {

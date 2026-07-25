@@ -13,100 +13,93 @@ const prisma = new PrismaClient()
 
 const DEV_PASSWORD = 'sPark!Dev2026'
 
+// Facility.operatorId is unique (one facility per operator), so every demo facility
+// owns its own ParkingOperator. Each entry carries the operator that will own it.
+const facilities = [
+  {
+    operatorName: 'Syntagma Parking Ops',
+    operatorTaxId: '100000001',
+    name: 'Syntagma Underground Parking',
+    address: 'Πλατεία Συντάγματος, Αθήνα 105 57',
+    lat: 37.9754,
+    lng: 23.7348,
+    totalCapacity: 250,
+    onlineQuota: 180,
+    vehicleTypes: [VehicleType.CAR, VehicleType.MOTORCYCLE],
+    amenities: ['24h_access', 'cctv', 'disabled_spaces'],
+  },
+  {
+    operatorName: 'Monastiraki Parking Ops',
+    operatorTaxId: '100000002',
+    name: 'Monastiraki Parking',
+    address: 'Μοναστηράκι, Αθήνα 105 55',
+    lat: 37.9756,
+    lng: 23.7257,
+    totalCapacity: 120,
+    onlineQuota: 80,
+    vehicleTypes: [VehicleType.CAR, VehicleType.MOTORCYCLE, VehicleType.VAN],
+    heightRestrictionCm: 210,
+    amenities: ['cctv', 'covered'],
+  },
+  {
+    operatorName: 'Athens Airport Parking Ops',
+    operatorTaxId: '100000003',
+    name: 'Athens Airport Express Park',
+    address: 'Αερολιμένας Αθηνών, Σπάτα 190 04',
+    lat: 37.9364,
+    lng: 23.9445,
+    totalCapacity: 500,
+    onlineQuota: 400,
+    vehicleTypes: [VehicleType.CAR, VehicleType.VAN, VehicleType.TRUCK],
+    amenities: ['24h_access', 'cctv', 'shuttle', 'ev_charging'],
+  },
+  {
+    operatorName: 'Aristotelous Parking Ops',
+    operatorTaxId: '100000004',
+    name: 'Aristotelous Square Parking',
+    address: 'Πλατεία Αριστοτέλους, Θεσσαλονίκη 546 24',
+    lat: 40.6333,
+    lng: 22.9425,
+    totalCapacity: 200,
+    onlineQuota: 140,
+    vehicleTypes: [VehicleType.CAR, VehicleType.MOTORCYCLE],
+    amenities: ['cctv', 'covered', 'disabled_spaces'],
+  },
+  {
+    operatorName: 'Thessaloniki Port Parking Ops',
+    operatorTaxId: '100000005',
+    name: 'Thessaloniki Port Parking',
+    address: 'Λιμάνι Θεσσαλονίκης, Θεσσαλονίκη 546 26',
+    lat: 40.6366,
+    lng: 22.9375,
+    totalCapacity: 300,
+    onlineQuota: 220,
+    vehicleTypes: [VehicleType.CAR, VehicleType.VAN, VehicleType.TRUCK],
+    heightRestrictionCm: 300,
+    amenities: ['24h_access', 'cctv'],
+  },
+] as const
+
 async function main() {
-  // ── Operators ──────────────────────────────────────────────────────────────
+  // ── Operators + Facilities ───────────────────────────────────────────────────
+  // One operator per facility, keyed on the operator's taxId for idempotency.
 
-  const opAthens = await prisma.parkingOperator.upsert({
-    where: { taxId: '123456789' },
-    update: {},
-    create: {
-      name: 'Athens Central Parking',
-      legalName: 'Athens Central Parking SA',
-      taxId: '123456789',
-      status: OperatorStatus.VERIFIED,
-      verifiedAt: new Date(),
-    },
-  })
-
-  const opThess = await prisma.parkingOperator.upsert({
-    where: { taxId: '987654321' },
-    update: {},
-    create: {
-      name: 'Thessaloniki Smart Park',
-      legalName: 'Thessaloniki Smart Park IKE',
-      taxId: '987654321',
-      status: OperatorStatus.VERIFIED,
-      verifiedAt: new Date(),
-    },
-  })
-
-  // ── Users ────────────────────────────────────────────────────────────────────
-
-  await seedUsers(opAthens.id, opThess.id)
-
-  // ── Facilities ─────────────────────────────────────────────────────────────
-
-  const facilities = [
-    {
-      operatorId: opAthens.id,
-      name: 'Syntagma Underground Parking',
-      address: 'Πλατεία Συντάγματος, Αθήνα 105 57',
-      lat: 37.9754,
-      lng: 23.7348,
-      totalCapacity: 250,
-      onlineQuota: 180,
-      vehicleTypes: [VehicleType.CAR, VehicleType.MOTORCYCLE],
-      amenities: ['24h_access', 'cctv', 'disabled_spaces'],
-    },
-    {
-      operatorId: opAthens.id,
-      name: 'Monastiraki Parking',
-      address: 'Μοναστηράκι, Αθήνα 105 55',
-      lat: 37.9756,
-      lng: 23.7257,
-      totalCapacity: 120,
-      onlineQuota: 80,
-      vehicleTypes: [VehicleType.CAR, VehicleType.MOTORCYCLE, VehicleType.VAN],
-      heightRestrictionCm: 210,
-      amenities: ['cctv', 'covered'],
-    },
-    {
-      operatorId: opAthens.id,
-      name: 'Athens Airport Express Park',
-      address: 'Αερολιμένας Αθηνών, Σπάτα 190 04',
-      lat: 37.9364,
-      lng: 23.9445,
-      totalCapacity: 500,
-      onlineQuota: 400,
-      vehicleTypes: [VehicleType.CAR, VehicleType.VAN, VehicleType.TRUCK],
-      amenities: ['24h_access', 'cctv', 'shuttle', 'ev_charging'],
-    },
-    {
-      operatorId: opThess.id,
-      name: 'Aristotelous Square Parking',
-      address: 'Πλατεία Αριστοτέλους, Θεσσαλονίκη 546 24',
-      lat: 40.6333,
-      lng: 22.9425,
-      totalCapacity: 200,
-      onlineQuota: 140,
-      vehicleTypes: [VehicleType.CAR, VehicleType.MOTORCYCLE],
-      amenities: ['cctv', 'covered', 'disabled_spaces'],
-    },
-    {
-      operatorId: opThess.id,
-      name: 'Thessaloniki Port Parking',
-      address: 'Λιμάνι Θεσσαλονίκης, Θεσσαλονίκη 546 26',
-      lat: 40.6366,
-      lng: 22.9375,
-      totalCapacity: 300,
-      onlineQuota: 220,
-      vehicleTypes: [VehicleType.CAR, VehicleType.VAN, VehicleType.TRUCK],
-      heightRestrictionCm: 300,
-      amenities: ['24h_access', 'cctv'],
-    },
-  ]
+  const operatorIdByFacility = new Map<string, string>()
 
   for (const data of facilities) {
+    const operator = await prisma.parkingOperator.upsert({
+      where: { taxId: data.operatorTaxId },
+      update: {},
+      create: {
+        name: data.operatorName,
+        legalName: `${data.operatorName} SA`,
+        taxId: data.operatorTaxId,
+        status: OperatorStatus.VERIFIED,
+        verifiedAt: new Date(),
+      },
+    })
+    operatorIdByFacility.set(data.name, operator.id)
+
     const facility = await prisma.facility.upsert({
       where: {
         id: `seed-${data.name.toLowerCase().replace(/\s+/g, '-')}`,
@@ -114,27 +107,36 @@ async function main() {
       update: {},
       create: {
         id: `seed-${data.name.toLowerCase().replace(/\s+/g, '-')}`,
-        operatorId: data.operatorId,
+        operatorId: operator.id,
         name: data.name,
         address: data.address,
         lat: data.lat,
         lng: data.lng,
         totalCapacity: data.totalCapacity,
         onlineQuota: data.onlineQuota,
-        vehicleTypes: data.vehicleTypes,
-        heightRestrictionCm: data.heightRestrictionCm,
+        vehicleTypes: [...data.vehicleTypes],
+        heightRestrictionCm: 'heightRestrictionCm' in data ? data.heightRestrictionCm : null,
         openingHoursJson: { is24h: true },
-        amenities: data.amenities,
+        amenities: [...data.amenities],
         cancellationPolicy: 'Free cancellation up to 1 hour before arrival.',
         isActive: true,
         isVerified: true,
       },
     })
 
-    await seedTariff(facility.id, data.operatorId, data.name)
+    await seedTariff(facility.id, operator.id, data.name)
   }
 
-  console.warn(`Seed complete: ${facilities.length} facilities across Athens and Thessaloniki.`)
+  // Demo dashboard users attach to two of the new operators (Syntagma in Athens,
+  // Aristotelous in Thessaloniki) so the operator-scoped dashboard has data to show.
+  await seedUsers(
+    operatorIdByFacility.get('Syntagma Underground Parking')!,
+    operatorIdByFacility.get('Aristotelous Square Parking')!,
+  )
+
+  console.warn(
+    `Seed complete: ${facilities.length} facilities, one per operator, across Athens and Thessaloniki.`,
+  )
 }
 
 async function seedUsers(athensOperatorId: string, thessOperatorId: string): Promise<void> {

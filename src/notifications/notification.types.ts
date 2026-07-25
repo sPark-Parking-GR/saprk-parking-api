@@ -8,9 +8,3 @@ export interface BookingNotificationData {
   currency: string
   recipientEmail: string
 }
-
-export interface INotificationProvider {
-  readonly providerName: string
-  sendBookingConfirmation(data: BookingNotificationData): Promise<void>
-  sendBookingCancellation(data: BookingNotificationData): Promise<void>
-}

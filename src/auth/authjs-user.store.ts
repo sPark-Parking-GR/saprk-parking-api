@@ -26,6 +26,7 @@ interface UserRow {
   displayName: string | null
   avatarUrl: string | null
   passwordHash: string | null
+  firebaseUid: string | null
 }
 
 export class PrismaAuthJsUserStore implements AuthJsUserStore {
@@ -48,6 +49,7 @@ export class PrismaAuthJsUserStore implements AuthJsUserStore {
         passwordHash: input.passwordHash,
         role: TO_PRISMA[input.role],
         displayName: input.displayName ?? null,
+        firebaseUid: input.firebaseUid ?? null,
       },
     })
     return this.toRecord(user)
@@ -66,6 +68,7 @@ export class PrismaAuthJsUserStore implements AuthJsUserStore {
       displayName: user.displayName,
       avatarUrl: user.avatarUrl,
       passwordHash: user.passwordHash ?? '',
+      firebaseUid: user.firebaseUid,
     }
   }
 }

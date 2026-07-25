@@ -18,15 +18,28 @@ import {
   BookingStatusTransitionError,
   DefaultTariffRequiredError,
   DomainError,
+  FacilityAlreadyExistsError,
   FacilityFieldForbiddenError,
   FacilityNotFoundError,
   IdempotencyConflictError,
   NoApplicableTariffError,
   NoAvailabilityError,
   OperatorContextRequiredError,
+  OperatorSuspendedError,
   QuoteExpiredError,
   TariffPlanNotFoundError,
 } from '../errors/domain.errors'
+import {
+  InviteAlreadyAcceptedError,
+  InviteExpiredError,
+  InviteNotFoundError,
+  InviteNotRevocableError,
+} from '../../invite/invite.types'
+import {
+  OperatorNotFoundError,
+  OperatorNotReactivatableError,
+  OperatorNotSuspendableError,
+} from '../../operators/operators.types'
 
 @Catch()
 export class DomainExceptionFilter implements ExceptionFilter {
@@ -75,22 +88,33 @@ export class DomainExceptionFilter implements ExceptionFilter {
     if (
       exception instanceof FacilityNotFoundError ||
       exception instanceof BookingNotFoundError ||
-      exception instanceof TariffPlanNotFoundError
+      exception instanceof TariffPlanNotFoundError ||
+      exception instanceof InviteNotFoundError ||
+      exception instanceof OperatorNotFoundError
     ) {
       return HttpStatus.NOT_FOUND
     }
     if (
       exception instanceof OperatorContextRequiredError ||
-      exception instanceof FacilityFieldForbiddenError
+      exception instanceof FacilityFieldForbiddenError ||
+      exception instanceof OperatorSuspendedError
     ) {
       return HttpStatus.FORBIDDEN
+    }
+    if (exception instanceof InviteExpiredError) {
+      return HttpStatus.GONE
     }
     if (
       exception instanceof NoAvailabilityError ||
       exception instanceof QuoteExpiredError ||
       exception instanceof BookingStatusTransitionError ||
       exception instanceof IdempotencyConflictError ||
-      exception instanceof DefaultTariffRequiredError
+      exception instanceof DefaultTariffRequiredError ||
+      exception instanceof FacilityAlreadyExistsError ||
+      exception instanceof InviteAlreadyAcceptedError ||
+      exception instanceof InviteNotRevocableError ||
+      exception instanceof OperatorNotSuspendableError ||
+      exception instanceof OperatorNotReactivatableError
     ) {
       return HttpStatus.CONFLICT
     }

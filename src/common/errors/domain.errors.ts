@@ -79,8 +79,20 @@ export class OperatorContextRequiredError extends DomainError {
   }
 }
 
+export class OperatorSuspendedError extends DomainError {
+  constructor() {
+    super('This operator account is suspended. Contact sPark support.')
+  }
+}
+
 export class FacilityFieldForbiddenError extends DomainError {
   constructor(field: string) {
     super(`Field ${field} cannot be set by this role`)
+  }
+}
+
+export class FacilityAlreadyExistsError extends DomainError {
+  constructor(operatorId: string) {
+    super(`Operator ${operatorId} already has a facility. Each operator may own only one.`)
   }
 }
