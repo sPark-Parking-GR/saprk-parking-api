@@ -14,7 +14,11 @@ function resolveEmailConfig(config: ConfigService): EmailProviderConfig {
     case 'sendgrid':
       return {
         provider: 'sendgrid',
-        config: { apiKey: config.getOrThrow('SENDGRID_API_KEY') },
+        config: {
+          apiKey: config.getOrThrow('SENDGRID_API_KEY'),
+          fromEmail: config.getOrThrow('EMAIL_FROM_ADDRESS'),
+          fromName: config.getOrThrow('EMAIL_FROM_NAME'),
+        },
       }
     case 'postmark':
       return {
