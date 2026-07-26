@@ -131,6 +131,7 @@ export class FacilitiesService {
         id: facility.id,
         name: facility.name,
         address: facility.address,
+        kind: facility.kind,
         lat: coords.lat,
         lng: coords.lng,
         distanceMeters: Math.round(distanceMeters),
@@ -162,6 +163,7 @@ export class FacilitiesService {
       ? await this.prisma.$queryRaw<Array<{ id: string }>>`
           SELECT id FROM "Facility"
           WHERE "isActive" AND "isVerified"
+            AND "kind" != 'RESTRICTED'
             AND ST_Intersects(
               "geog",
               ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326)::geography
@@ -170,6 +172,7 @@ export class FacilitiesService {
       : await this.prisma.$queryRaw<Array<{ id: string }>>`
           SELECT id FROM "Facility"
           WHERE "isActive" AND "isVerified"
+            AND "kind" != 'RESTRICTED'
             AND ST_DWithin(
               "geog",
               ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography,
@@ -194,6 +197,7 @@ export class FacilitiesService {
       ? await this.prisma.$queryRaw<Array<{ count: number }>>`
           SELECT count(*)::int AS count FROM "Facility"
           WHERE "isActive" AND "isVerified"
+            AND "kind" != 'RESTRICTED'
             AND ST_Intersects(
               "geog",
               ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326)::geography
@@ -201,6 +205,7 @@ export class FacilitiesService {
       : await this.prisma.$queryRaw<Array<{ count: number }>>`
           SELECT count(*)::int AS count FROM "Facility"
           WHERE "isActive" AND "isVerified"
+            AND "kind" != 'RESTRICTED'
             AND ST_DWithin(
               "geog",
               ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography,
@@ -231,6 +236,7 @@ export class FacilitiesService {
       FROM (
         SELECT "geog"::geometry AS g FROM "Facility"
         WHERE "isActive" AND "isVerified"
+          AND "kind" != 'RESTRICTED'
           AND ST_Intersects(
             "geog",
             ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326)::geography
@@ -248,7 +254,7 @@ export class FacilitiesService {
 
   async getDetail(id: string) {
     const facility = await this.prisma.facility.findFirst({
-      where: { id, isActive: true, isVerified: true },
+      where: { id, isActive: true, isVerified: true, kind: { not: FacilityKind.RESTRICTED } },
       include: {
         images: { orderBy: { sortOrder: 'asc' } },
         rules: true,
@@ -891,6 +897,7 @@ export class FacilitiesService {
   private toAdminFacility(facility: {
     id: string
     operatorId: string
+    kind: FacilityKind
     name: string
     address: string
     lat: Prisma.Decimal
@@ -911,6 +918,7 @@ export class FacilitiesService {
     return {
       id: facility.id,
       operatorId: facility.operatorId,
+      kind: facility.kind,
       name: facility.name,
       address: facility.address,
       lat: facility.lat.toNumber(),

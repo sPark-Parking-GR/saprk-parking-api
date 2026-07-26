@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common'
-import { Prisma } from '@prisma/client'
+import { FacilityKind, Prisma } from '@prisma/client'
 import type {
   RateCap,
   RateTier,
@@ -112,7 +112,7 @@ export class TariffService {
     }
 
     const facility = await this.prisma.facility.findFirst({
-      where: { id: facilityId, isActive: true, isVerified: true },
+      where: { id: facilityId, isActive: true, isVerified: true, kind: FacilityKind.BUSINESS },
       include: {
         tariffAssignments: {
           where: { vehicleType },

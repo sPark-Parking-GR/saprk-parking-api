@@ -6,6 +6,7 @@ import {
   CapScope,
   UserRole,
   OperatorMemberRole,
+  FacilityKind,
 } from '@prisma/client'
 import { hashPassword } from '@spark/auth'
 
@@ -121,6 +122,7 @@ async function main() {
         cancellationPolicy: 'Free cancellation up to 1 hour before arrival.',
         isActive: true,
         isVerified: true,
+        kind: FacilityKind.BUSINESS,
       },
     })
 

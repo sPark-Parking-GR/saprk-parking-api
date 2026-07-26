@@ -35,6 +35,7 @@ export interface FacilityTariffAssignments {
 export interface AdminFacility {
   id: string
   operatorId: string
+  kind: FacilityKind
   name: string
   address: string
   lat: number
@@ -119,6 +120,7 @@ export interface FacilitySearchResult {
   id: string
   name: string
   address: string
+  kind: FacilityKind
   lat: number
   lng: number
   distanceMeters: number
