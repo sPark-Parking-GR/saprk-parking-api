@@ -102,7 +102,14 @@ export interface AdminMapResponse {
   total: number
 }
 
-export type BulkFacilityAction = 'enable' | 'disable' | 'deploy' | 'delete' | 'assignTariff'
+export type BulkFacilityAction =
+  | 'enable'
+  | 'disable'
+  | 'deploy'
+  | 'publish'
+  | 'unpublish'
+  | 'delete'
+  | 'assignTariff'
 
 export interface BulkFacilityResult {
   affected: number

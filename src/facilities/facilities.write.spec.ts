@@ -401,6 +401,36 @@ describe('FacilitiesService admin writes', () => {
     })
   })
 
+  it('operator can bulk publish own facilities (unlike deploy, this does not require platform verification)', async () => {
+    setScope({ kind: 'operator', operatorId: 'op1' })
+    prisma.facility.updateMany.mockResolvedValue({ count: 2 })
+
+    const res = await service.bulkUpdate(operatorUser, { ids: ['a', 'b'], action: 'publish' })
+
+    expect(res).toEqual({ affected: 2 })
+    expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['a', 'b'] }, operatorId: 'op1' },
+      data: { isVerified: true },
+    })
+    expect(prisma.auditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'facility.bulk.publish' }),
+      }),
+    )
+  })
+
+  it('operator can bulk unpublish own facilities', async () => {
+    setScope({ kind: 'operator', operatorId: 'op1' })
+    prisma.facility.updateMany.mockResolvedValue({ count: 1 })
+
+    await service.bulkUpdate(operatorUser, { ids: ['a'], action: 'unpublish' })
+
+    expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['a'] }, operatorId: 'op1' },
+      data: { isVerified: false },
+    })
+  })
+
   describe('assignTariff (single facility, one slot)', () => {
     it('sets a concrete-vehicleType row after verifying facility + plan in scope, then audits', async () => {
       setScope({ kind: 'operator', operatorId: 'op1' })

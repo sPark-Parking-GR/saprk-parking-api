@@ -165,6 +165,8 @@ export const bulkFacilitySchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('enable'), ids: bulkIds }),
   z.object({ action: z.literal('disable'), ids: bulkIds }),
   z.object({ action: z.literal('deploy'), ids: bulkIds }),
+  z.object({ action: z.literal('publish'), ids: bulkIds }),
+  z.object({ action: z.literal('unpublish'), ids: bulkIds }),
   z.object({ action: z.literal('delete'), ids: bulkIds }),
   z.object({
     action: z.literal('assignTariff'),

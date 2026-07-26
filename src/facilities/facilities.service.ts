@@ -757,6 +757,10 @@ export class FacilitiesService {
       case 'disable':
       case 'delete':
         return { isActive: false }
+      case 'publish':
+        return { isVerified: true }
+      case 'unpublish':
+        return { isVerified: false }
     }
   }
 
