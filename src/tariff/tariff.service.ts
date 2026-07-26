@@ -266,14 +266,24 @@ export class TariffService {
     })
     if (!operator) throw new DomainError('operatorId required')
 
-    if (draft.isDefault && !canBeDefault(draft.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v]))) {
+    const vehicleTypes = draft.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v])
+
+    if (draft.isDefault && !canBeDefault(vehicleTypes)) {
       throw new DomainError('A default plan must price every vehicle type (leave vehicleTypes empty).')
     }
 
     const created = await this.prisma.$transaction(async (tx) => {
+      // An operator's very first active plan needs no manual "make it default" step — with
+      // nothing else to route to, an eligible (all-vehicle-types) plan should just work.
+      // Once they have any active plan already, later creates go back to requiring an
+      // explicit ask. Filtered to isActive: deletePlan() soft-deletes (never removes the
+      // row), so a deactivated plan must not block auto-default for its replacement.
+      const existingCount = await tx.tariffPlan.count({ where: { operatorId, isActive: true } })
+      const isDefault = draft.isDefault || (existingCount === 0 && canBeDefault(vehicleTypes))
+
       // Creation can only add or replace a default, never remove the operator's last one,
       // so no replacement guard is needed here: swap the flag off any current default.
-      if (draft.isDefault) {
+      if (isDefault) {
         await tx.tariffPlan.updateMany({
           where: { operatorId, isDefault: true },
           data: { isDefault: false },
@@ -285,13 +295,13 @@ export class TariffService {
           operatorId,
           name: draft.name,
           isActive: draft.isActive,
-          isDefault: draft.isDefault,
+          isDefault,
           validFrom: draft.validFrom ? new Date(draft.validFrom) : null,
           validTo: draft.validTo ? new Date(draft.validTo) : null,
           timezone: draft.timezone,
           graceMinutes: draft.graceMinutes,
           incrementMinutes: draft.incrementMinutes,
-          vehicleTypes: draft.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v]),
+          vehicleTypes,
           version: 1,
         },
       })

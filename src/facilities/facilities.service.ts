@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common'
 import { computeDistanceMeters } from '@spark/maps'
 import type { OpeningHours, VehicleType as ContractVehicleType } from '@spark/types'
-import { Prisma, PromotionType, VehicleType } from '@prisma/client'
+import { FacilityKind, Prisma, PromotionType, VehicleType } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
 import { OperatorScopeService, type OperatorScope } from '../common/authz/operator-scope.service'
 import {
@@ -492,6 +492,7 @@ export class FacilitiesService {
         const facility = await tx.facility.create({
           data: {
             operatorId,
+            kind: FacilityKind.BUSINESS,
             name: dto.name,
             address: dto.address,
             lat: new Prisma.Decimal(dto.lat),

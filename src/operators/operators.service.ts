@@ -7,6 +7,7 @@ import {
   OperatorNotFoundError,
   OperatorNotReactivatableError,
   OperatorNotSuspendableError,
+  type OperatorDetail,
   type OperatorSummary,
 } from './operators.types'
 
@@ -33,6 +34,49 @@ export class OperatorsService {
       memberCount: operator._count.memberships,
       createdAt: operator.createdAt,
     }))
+  }
+
+  async getDetail(actor: AuthUser, id: string): Promise<OperatorDetail> {
+    this.assertPlatformAdmin(actor, 'view operator detail')
+
+    // The synthetic unclaimed-import operator (see list()) has no real detail page.
+    if (id === UNCLAIMED_OPERATOR_ID) throw new OperatorNotFoundError(id)
+
+    const operator = await this.prisma.parkingOperator.findUnique({
+      where: { id },
+      include: {
+        facilities: {
+          select: { id: true, name: true, address: true, isActive: true, isVerified: true, kind: true },
+          orderBy: { createdAt: 'desc' },
+        },
+        tariffPlans: {
+          select: { id: true, name: true, isActive: true, isDefault: true },
+          orderBy: { createdAt: 'desc' },
+        },
+        memberships: {
+          select: { userId: true, role: true, createdAt: true, user: { select: { email: true } } },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+    })
+    if (!operator) throw new OperatorNotFoundError(id)
+
+    return {
+      id: operator.id,
+      name: operator.name,
+      status: operator.status,
+      facilityCount: operator.facilities.length,
+      memberCount: operator.memberships.length,
+      createdAt: operator.createdAt,
+      facilities: operator.facilities,
+      plans: operator.tariffPlans,
+      members: operator.memberships.map((m) => ({
+        userId: m.userId,
+        email: m.user.email,
+        role: m.role,
+        createdAt: m.createdAt,
+      })),
+    }
   }
 
   async suspend(actor: AuthUser, id: string): Promise<void> {

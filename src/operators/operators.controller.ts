@@ -15,6 +15,12 @@ export class OperatorsController {
   }
 
   @Roles('platform_admin')
+  @Get(':id')
+  getDetail(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.operators.getDetail(user, id)
+  }
+
+  @Roles('platform_admin')
   @HttpCode(204)
   @Post(':id/suspend')
   suspend(@Param('id') id: string, @CurrentUser() user: AuthUser) {

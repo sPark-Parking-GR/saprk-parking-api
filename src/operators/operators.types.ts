@@ -26,3 +26,32 @@ export interface OperatorSummary {
   memberCount: number
   createdAt: Date
 }
+
+export interface OperatorFacilitySummary {
+  id: string
+  name: string
+  address: string
+  isActive: boolean
+  isVerified: boolean
+  kind: string
+}
+
+export interface OperatorPlanSummary {
+  id: string
+  name: string
+  isActive: boolean
+  isDefault: boolean
+}
+
+export interface OperatorMemberSummary {
+  userId: string
+  email: string
+  role: string
+  createdAt: Date
+}
+
+export interface OperatorDetail extends OperatorSummary {
+  facilities: OperatorFacilitySummary[]
+  plans: OperatorPlanSummary[]
+  members: OperatorMemberSummary[]
+}

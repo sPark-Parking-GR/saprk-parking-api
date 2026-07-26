@@ -26,7 +26,11 @@ const operatorUser: AuthUser = {
 
 describe('OperatorsService', () => {
   let prisma: {
-    parkingOperator: { findMany: jest.Mock; findUnique: jest.Mock; updateMany: jest.Mock }
+    parkingOperator: {
+      findMany: jest.Mock
+      findUnique: jest.Mock
+      updateMany: jest.Mock
+    }
   }
   let service: OperatorsService
 
@@ -71,6 +75,70 @@ describe('OperatorsService', () => {
     it('rejects a non-platform-admin actor (service-layer re-check)', async () => {
       await expect(service.list(operatorUser)).rejects.toBeInstanceOf(ForbiddenException)
       expect(prisma.parkingOperator.findMany).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('getDetail', () => {
+    it('maps operator, facilities, plans and members into one detail object', async () => {
+      prisma.parkingOperator.findUnique.mockResolvedValue({
+        id: 'op-a',
+        name: 'Biz A',
+        status: OperatorStatus.VERIFIED,
+        createdAt: new Date('2026-01-02'),
+        facilities: [
+          { id: 'f-1', name: 'Lot 1', address: 'Odos 1', isActive: true, isVerified: true, kind: 'BUSINESS' },
+        ],
+        tariffPlans: [{ id: 'p-1', name: 'Standard', isActive: true, isDefault: true }],
+        memberships: [
+          {
+            userId: 'u-1',
+            role: 'ADMIN',
+            createdAt: new Date('2026-01-03'),
+            user: { email: 'admin@biz-a.gr' },
+          },
+        ],
+      })
+
+      const result = await service.getDetail(platformUser, 'op-a')
+
+      expect(prisma.parkingOperator.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'op-a' } }),
+      )
+      expect(result).toEqual({
+        id: 'op-a',
+        name: 'Biz A',
+        status: OperatorStatus.VERIFIED,
+        facilityCount: 1,
+        memberCount: 1,
+        createdAt: new Date('2026-01-02'),
+        facilities: [
+          { id: 'f-1', name: 'Lot 1', address: 'Odos 1', isActive: true, isVerified: true, kind: 'BUSINESS' },
+        ],
+        plans: [{ id: 'p-1', name: 'Standard', isActive: true, isDefault: true }],
+        members: [{ userId: 'u-1', email: 'admin@biz-a.gr', role: 'ADMIN', createdAt: new Date('2026-01-03') }],
+      })
+    })
+
+    it('throws OperatorNotFoundError when the operator does not exist', async () => {
+      prisma.parkingOperator.findUnique.mockResolvedValue(null)
+
+      await expect(service.getDetail(platformUser, 'nope')).rejects.toBeInstanceOf(
+        OperatorNotFoundError,
+      )
+    })
+
+    it('throws OperatorNotFoundError for the synthetic unclaimed-import operator without querying', async () => {
+      await expect(service.getDetail(platformUser, UNCLAIMED_OPERATOR_ID)).rejects.toBeInstanceOf(
+        OperatorNotFoundError,
+      )
+      expect(prisma.parkingOperator.findUnique).not.toHaveBeenCalled()
+    })
+
+    it('rejects a non-platform-admin actor (service-layer re-check)', async () => {
+      await expect(service.getDetail(operatorUser, 'op-a')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      )
+      expect(prisma.parkingOperator.findUnique).not.toHaveBeenCalled()
     })
   })
 

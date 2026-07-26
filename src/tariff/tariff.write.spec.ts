@@ -138,6 +138,7 @@ describe('TariffService admin writes', () => {
       findFirst: jest.Mock
       findMany: jest.Mock
       findFirstOrThrow: jest.Mock
+      count: jest.Mock
     }
     rateTier: { create: jest.Mock; deleteMany: jest.Mock }
     rateWindow: { create: jest.Mock; deleteMany: jest.Mock }
@@ -212,6 +213,9 @@ describe('TariffService admin writes', () => {
         findFirst: planFindFirst,
         findMany: jest.fn().mockResolvedValue([]),
         findFirstOrThrow: jest.fn(),
+        // Non-zero by default: most tests exercise an operator that already has a plan.
+        // Tests for the auto-default-on-first-plan behavior override this to 0.
+        count: jest.fn().mockResolvedValue(1),
       },
       rateTier: {
         create: jest.fn().mockImplementation(() => {
@@ -509,6 +513,36 @@ describe('TariffService admin writes', () => {
       await service.createPlan(operatorUser, dayNightDraft())
 
       expect(tx.tariffPlan.updateMany).not.toHaveBeenCalled()
+      expect(tx.tariffPlan.create.mock.calls[0]![0].data.isDefault).toBe(false)
+    })
+
+    it('auto-defaults an eligible plan when it is the operator\'s first (isDefault not requested)', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      tx.tariffPlan.count.mockResolvedValue(0)
+      prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan({ isDefault: true }))
+
+      await service.createPlan(operatorUser, dayNightDraft({ isDefault: false, vehicleTypes: [] }))
+
+      expect(tx.tariffPlan.create.mock.calls[0]![0].data.isDefault).toBe(true)
+    })
+
+    it('does not auto-default a restricted-vehicleTypes first plan', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      tx.tariffPlan.count.mockResolvedValue(0)
+      prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan())
+
+      await service.createPlan(operatorUser, dayNightDraft({ isDefault: false, vehicleTypes: ['car'] }))
+
+      expect(tx.tariffPlan.create.mock.calls[0]![0].data.isDefault).toBe(false)
+    })
+
+    it('does not auto-default when the operator already has a plan', async () => {
+      setScope({ kind: 'operator', operatorId: 'op1' })
+      tx.tariffPlan.count.mockResolvedValue(1)
+      prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan())
+
+      await service.createPlan(operatorUser, dayNightDraft({ isDefault: false, vehicleTypes: [] }))
+
       expect(tx.tariffPlan.create.mock.calls[0]![0].data.isDefault).toBe(false)
     })
   })
