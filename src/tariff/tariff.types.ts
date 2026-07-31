@@ -29,8 +29,29 @@ export interface PriceQuote {
   planVersion: number
 }
 
+export interface PinnedPriceRequest {
+  planId: string
+  planVersion: number
+  startsAt: Date
+  endsAt: Date
+}
+
+export interface PinnedPriceResult {
+  totalCents: number
+  currency: string
+  billableMinutes: number
+}
+
 export const QUOTE_TTL_MINUTES = 10
 export const BOOKING_HOLD_MINUTES = 10
+
+// Well under pricing-engine's 366-day MAX_BILLABLE_MINUTES cap: a booking limit needs
+// its own, tighter ceiling so a single hold can't pin inventory for near a year while
+// still covering legitimate long-stay (e.g. monthly) parking.
+export const MAX_BOOKING_DURATION_MINUTES = 30 * 24 * 60
+// Absorbs clock skew and slow checkout flows without allowing meaningfully backdated
+// bookings (which would create un-honourable history).
+export const BOOKING_BACKDATE_GRACE_MINUTES = 5
 
 export interface CompiledTier {
   id: string

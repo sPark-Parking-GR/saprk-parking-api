@@ -6,12 +6,13 @@ import { PaymentsModule } from '../payments/payments.module'
 import { TariffModule } from '../tariff/tariff.module'
 import { BookingController } from './booking.controller'
 import { BookingService } from './booking.service'
+import { PaymentEventsService } from './payment-events.service'
 import { PaymentsWebhookController } from './payments-webhook.controller'
 
 @Module({
   imports: [TariffModule, InventoryModule, PaymentsModule, NotificationsModule],
   controllers: [BookingController, PaymentsWebhookController],
-  providers: [BookingService, OperatorScopeService],
+  providers: [BookingService, PaymentEventsService, OperatorScopeService],
   exports: [BookingService],
 })
 export class BookingModule {}

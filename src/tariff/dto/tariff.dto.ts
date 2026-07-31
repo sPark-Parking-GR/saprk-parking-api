@@ -117,7 +117,11 @@ export const tariffDraftSchema = z
     const tierKeys = new Set<string>()
     for (const tier of data.tiers) {
       if (tierKeys.has(tier.key)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate tier key ${tier.key}`, path: ['tiers'] })
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate tier key ${tier.key}`,
+          path: ['tiers'],
+        })
       }
       tierKeys.add(tier.key)
     }
@@ -125,7 +129,11 @@ export const tariffDraftSchema = z
     const windowKeys = new Set<string>()
     for (const window of data.windows) {
       if (windowKeys.has(window.key)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate window key ${window.key}`, path: ['windows'] })
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate window key ${window.key}`,
+          path: ['windows'],
+        })
       }
       windowKeys.add(window.key)
     }
@@ -133,14 +141,26 @@ export const tariffDraftSchema = z
     const rateCells = new Set<string>()
     for (const rate of data.rates) {
       if (!tierKeys.has(rate.tierKey)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `rate references unknown tier ${rate.tierKey}`, path: ['rates'] })
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `rate references unknown tier ${rate.tierKey}`,
+          path: ['rates'],
+        })
       }
       if (!windowKeys.has(rate.windowKey)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `rate references unknown window ${rate.windowKey}`, path: ['rates'] })
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `rate references unknown window ${rate.windowKey}`,
+          path: ['rates'],
+        })
       }
       const cell = `${rate.tierKey}|${rate.windowKey}`
       if (rateCells.has(cell)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate rate for ${cell}`, path: ['rates'] })
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate rate for ${cell}`,
+          path: ['rates'],
+        })
       }
       rateCells.add(cell)
     }

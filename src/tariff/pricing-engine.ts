@@ -22,9 +22,7 @@ export function ceilToIncrement(minutes: number, increment: number): number {
 }
 
 function tierAt(tiers: CompiledTier[], cursor: number): CompiledTier | undefined {
-  return tiers.find(
-    (t) => cursor >= t.fromMinute && (t.toMinute === null || cursor < t.toMinute),
-  )
+  return tiers.find((t) => cursor >= t.fromMinute && (t.toMinute === null || cursor < t.toMinute))
 }
 
 // A wall-clock minute falls in a window when its weekday bit is set in dayMask and
@@ -55,11 +53,7 @@ interface RawCharge {
 
 // Block-straddling rule: a PER_BLOCK / FLAT charge is priced by the window active at
 // its START instant; only PER_MINUTE tiers re-evaluate the window every minute (exact).
-export function priceStay(
-  startsAt: Date,
-  endsAt: Date,
-  plan: CompiledPlan,
-): PriceResult {
+export function priceStay(startsAt: Date, endsAt: Date, plan: CompiledPlan): PriceResult {
   const rawMinutes = Math.max(0, ceilDiv(endsAt.getTime() - startsAt.getTime(), 60_000))
   const billable = ceilToIncrement(
     Math.max(0, rawMinutes - plan.graceMinutes),

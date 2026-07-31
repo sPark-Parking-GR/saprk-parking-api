@@ -94,10 +94,7 @@ export class PromotionService {
       }
     }
 
-    this.logger.log(
-      `Promotion drained: ${stats.created} created, ${stats.merged} merged, ${stats.updated} updated, ` +
-        `${stats.duplicate} duplicate, ${stats.rejected} rejected`,
-    )
+    this.logger.log(stats, 'Promotion drained')
     return stats
   }
 
@@ -127,7 +124,10 @@ export class PromotionService {
           where: { source_sourceRef: { source: IngestSource.OSM, sourceRef: facility.sourceRef! } },
           select: { raw: true },
         })
-        const tags = ((raw?.raw as { tags?: Record<string, string> })?.tags ?? {}) as Record<string, string>
+        const tags = ((raw?.raw as { tags?: Record<string, string> })?.tags ?? {}) as Record<
+          string,
+          string
+        >
         const kind = classifyOsm(tags)
         if (kind === FacilityKind.UNKNOWN) continue
         await this.prisma.facility.update({ where: { id: facility.id }, data: { kind } })
@@ -135,7 +135,7 @@ export class PromotionService {
       }
     }
 
-    this.logger.log(`Reclassify: ${reclassified}/${scanned} UNKNOWN OSM facilities reclassified`)
+    this.logger.log({ scanned, reclassified }, 'Reclassify UNKNOWN OSM facilities')
     return { scanned, reclassified }
   }
 
@@ -155,7 +155,10 @@ export class PromotionService {
         amenities: canonical.amenities,
       })
       if (!parsed.success) {
-        this.logger.warn(`Rejected ${row.sourceRef}: ${parsed.error.issues[0]?.message ?? 'invalid'}`)
+        this.logger.warn(
+          { sourceRef: row.sourceRef, reason: parsed.error.issues[0]?.message ?? 'invalid' },
+          'Rejected raw place',
+        )
         await this.markRawPlace(row.id, RawPlaceStatus.REJECTED, null)
         return 'rejected'
       }
@@ -173,8 +176,8 @@ export class PromotionService {
       return resolution.self ? 'updated' : 'merged'
     } catch (error) {
       this.logger.error(
-        `Failed promoting ${row.sourceRef}`,
-        error instanceof Error ? error.message : String(error),
+        { sourceRef: row.sourceRef, error: error instanceof Error ? error.message : String(error) },
+        'Failed promoting raw place',
       )
       await this.markRawPlace(row.id, RawPlaceStatus.REJECTED, null)
       return 'rejected'
@@ -185,8 +188,16 @@ export class PromotionService {
     if (row.source === IngestSource.GOOGLE) {
       return normalizeGoogle(row.raw as unknown as Place)
     }
-    const tags = ((row.raw as { tags?: Record<string, string> })?.tags ?? {}) as Record<string, string>
-    return normalizeOsm({ sourceRef: row.sourceRef, lat: row.lat.toNumber(), lng: row.lng.toNumber(), tags })
+    const tags = ((row.raw as { tags?: Record<string, string> })?.tags ?? {}) as Record<
+      string,
+      string
+    >
+    return normalizeOsm({
+      sourceRef: row.sourceRef,
+      lat: row.lat.toNumber(),
+      lng: row.lng.toNumber(),
+      tags,
+    })
   }
 
   // Existing facility this raw row should land on: its own prior promotion (idempotent
@@ -267,7 +278,19 @@ export class PromotionService {
           contentHash: row.contentHash,
           ...(isGoogle ? { googlePlaceId: canonical.sourceRef, googleSyncedAt: new Date() } : {}),
         },
-        select: { id: true },
+        select: { id: true, createdAt: true },
+      })
+
+      // Every facility owns an open ownership period from birth — see FacilitiesService.create.
+      // An import takes no money while unclaimed, but the period is what makes it countable the
+      // moment it is.
+      await tx.facilityOwnershipPeriod.create({
+        data: {
+          facilityId: facility.id,
+          operatorId: UNCLAIMED_OPERATOR_ID,
+          from: facility.createdAt,
+          to: null,
+        },
       })
 
       if (canonical.rules.length > 0) {
@@ -307,10 +330,15 @@ export class PromotionService {
       }
     } else {
       if (canonical.totalCapacity > 0) data.totalCapacity = canonical.totalCapacity
-      if (canonical.heightRestrictionCm !== null) data.heightRestrictionCm = canonical.heightRestrictionCm
+      if (canonical.heightRestrictionCm !== null)
+        data.heightRestrictionCm = canonical.heightRestrictionCm
       // Never downgrade a Google-confirmed business; otherwise let OSM fill an
       // unclassified row but not overwrite an existing, more specific classification.
-      if (!target.googlePlaceId && target.kind === FacilityKind.UNKNOWN && canonical.kind !== FacilityKind.UNKNOWN) {
+      if (
+        !target.googlePlaceId &&
+        target.kind === FacilityKind.UNKNOWN &&
+        canonical.kind !== FacilityKind.UNKNOWN
+      ) {
         data.kind = canonical.kind
       }
       if (!target.googlePlaceId) {
@@ -339,14 +367,22 @@ export class PromotionService {
     })
   }
 
-  private linkRaw(tx: Prisma.TransactionClient, rawId: string, facilityId: string): Promise<unknown> {
+  private linkRaw(
+    tx: Prisma.TransactionClient,
+    rawId: string,
+    facilityId: string,
+  ): Promise<unknown> {
     return tx.rawPlace.update({
       where: { id: rawId },
       data: { status: RawPlaceStatus.PROCESSED, facilityId, processedAt: new Date() },
     })
   }
 
-  private async markRawPlace(id: string, status: RawPlaceStatus, facilityId: string | null): Promise<void> {
+  private async markRawPlace(
+    id: string,
+    status: RawPlaceStatus,
+    facilityId: string | null,
+  ): Promise<void> {
     await this.prisma.rawPlace.update({
       where: { id },
       data: { status, facilityId, processedAt: new Date() },

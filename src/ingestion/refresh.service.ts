@@ -69,7 +69,8 @@ export class RefreshService {
 
     const remaining = await this.countStale(cutoff)
     this.logger.log(
-      `Google refresh: ${stats.refreshed} refreshed, ${stats.notFound} not found, ${remaining} still stale`,
+      { refreshed: stats.refreshed, notFound: stats.notFound, stillStale: remaining },
+      'Google refresh complete',
     )
     return stats
   }

@@ -9,7 +9,7 @@ import type {
   VehicleType,
 } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
-import { OperatorScopeService } from '../common/authz/operator-scope.service'
+import { OperatorScopeService, targetOperatorId } from '../common/authz/operator-scope.service'
 import {
   DefaultTariffRequiredError,
   DomainError,
@@ -35,6 +35,8 @@ import {
 import {
   QUOTE_TTL_MINUTES,
   type CompiledPlan,
+  type PinnedPriceRequest,
+  type PinnedPriceResult,
   type PlanAssignments,
   type PriceQuote,
   type QuoteRequest,
@@ -60,11 +62,7 @@ const scheduleInclude = {
  * instant sits inside the plan's validity window, and the plan prices the requested
  * vehicle class (empty vehicleTypes = all classes).
  */
-export function isPlanApplicable(
-  plan: TariffPlan,
-  at: Date,
-  vehicleType: VehicleType,
-): boolean {
+export function isPlanApplicable(plan: TariffPlan, at: Date, vehicleType: VehicleType): boolean {
   if (!plan.isActive) return false
   if (plan.validFrom && plan.validFrom > at) return false
   if (plan.validTo && plan.validTo < at) return false
@@ -108,7 +106,7 @@ export class TariffService {
     const { facilityId, startsAt, endsAt, vehicleType } = request
 
     if (endsAt <= startsAt) {
-      throw new Error('endsAt must be after startsAt')
+      throw new DomainError('endsAt must be after startsAt')
     }
 
     const facility = await this.prisma.facility.findFirst({
@@ -152,6 +150,42 @@ export class TariffService {
       expiresAt,
       planId: compiled.id,
       planVersion: compiled.version,
+    }
+  }
+
+  /**
+   * Prices a stay against an exact (planId, version) pin instead of whatever plan a
+   * facility resolves to today. This is the check-out side of the pin a quote takes:
+   * both ends of a stay must be priced by the same schedule.
+   *
+   * Returns null when the pin no longer resolves — the plan row is gone, or it has been
+   * edited since (updatePlan REPLACES tiers/windows/rates and bumps version, so the
+   * priced schedule of the old version no longer exists anywhere). Pricing against the
+   * current revision instead would silently bill rates the customer never agreed to, so
+   * the caller is told the pin is stale rather than handed a plausible wrong number.
+   *
+   * Plan applicability (isActive, validity window, vehicle classes) is deliberately not
+   * re-checked: those gate whether a plan may price a NEW booking, and an operator
+   * retiring a plan must not change what an already-priced stay costs.
+   */
+  async priceWithPinnedPlan(request: PinnedPriceRequest): Promise<PinnedPriceResult | null> {
+    const { planId, planVersion, startsAt, endsAt } = request
+
+    if (endsAt <= startsAt) throw new DomainError('endsAt must be after startsAt')
+
+    const plan = await this.prisma.tariffPlan.findFirst({
+      where: { id: planId, version: planVersion },
+      include: scheduleInclude,
+    })
+    if (!plan) return null
+
+    const compiled = compilePlan(plan)
+    const result = priceStay(startsAt, endsAt, compiled)
+
+    return {
+      totalCents: result.totalCents,
+      currency: compiled.currency,
+      billableMinutes: result.billableMinutes,
     }
   }
 
@@ -257,8 +291,7 @@ export class TariffService {
     const scope = await this.operatorScope.resolve(user)
     this.validateDraft(draft)
 
-    const operatorId = scope.kind === 'platform' ? draft.operatorId : scope.operatorId
-    if (!operatorId) throw new DomainError('operatorId required')
+    const operatorId = targetOperatorId(scope, draft.operatorId)
 
     const operator = await this.prisma.parkingOperator.findUnique({
       where: { id: operatorId },
@@ -269,7 +302,9 @@ export class TariffService {
     const vehicleTypes = draft.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v])
 
     if (draft.isDefault && !canBeDefault(vehicleTypes)) {
-      throw new DomainError('A default plan must price every vehicle type (leave vehicleTypes empty).')
+      throw new DomainError(
+        'A default plan must price every vehicle type (leave vehicleTypes empty).',
+      )
     }
 
     const created = await this.prisma.$transaction(async (tx) => {
@@ -338,7 +373,9 @@ export class TariffService {
     // A default plan must always price every vehicle type; leaving it default with a
     // restricted vehicleTypes list is an invalid combination, not a swap situation.
     if (draft.isDefault && !canBeDefault(draftVehicleTypes)) {
-      throw new DomainError('A default plan must price every vehicle type (leave vehicleTypes empty).')
+      throw new DomainError(
+        'A default plan must price every vehicle type (leave vehicleTypes empty).',
+      )
     }
 
     const updated = await this.prisma.$transaction(async (tx) => {
@@ -584,10 +621,7 @@ export class TariffService {
         },
       }
     } catch (error) {
-      if (
-        error instanceof InvalidTariffScheduleError ||
-        error instanceof NoApplicableTariffError
-      ) {
+      if (error instanceof InvalidTariffScheduleError || error instanceof NoApplicableTariffError) {
         return { ok: false, error: error.message }
       }
       throw error
@@ -625,7 +659,9 @@ export class TariffService {
     const candidate = others.find((o) => o.id === newDefaultPlanId)
     if (!candidate) throw new TariffPlanNotFoundError(newDefaultPlanId)
     if (!canBeDefault(candidate.vehicleTypes)) {
-      throw new DomainError('Candidate plan cannot price all vehicle types, so it cannot become the default.')
+      throw new DomainError(
+        'Candidate plan cannot price all vehicle types, so it cannot become the default.',
+      )
     }
 
     // Clear this plan's own default flag first — the caller's own update (later in the

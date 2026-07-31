@@ -9,9 +9,12 @@ import {
   FacilityKind,
 } from '@prisma/client'
 import { hashPassword } from '@spark/auth'
+import { assertDevSeedAllowed } from '../src/scripts/dev-seed-guard'
 
 const prisma = new PrismaClient()
 
+// Shared, repository-committed password. Safe only because assertDevSeedAllowed() below
+// stops this file ever reaching a production database.
 const DEV_PASSWORD = 'sPark!Dev2026'
 
 // Facility.operatorId is unique (one facility per operator), so every demo facility
@@ -126,6 +129,21 @@ async function main() {
       },
     })
 
+    // Without an open ownership period the dashboard reports zero revenue for this
+    // facility. Deterministic id keeps the re-run idempotent under the one-open-period-per-
+    // facility partial unique index.
+    await prisma.facilityOwnershipPeriod.upsert({
+      where: { id: `fop-${facility.id}` },
+      update: {},
+      create: {
+        id: `fop-${facility.id}`,
+        facilityId: facility.id,
+        operatorId: operator.id,
+        from: facility.createdAt,
+        to: null,
+      },
+    })
+
     await seedTariff(facility.id, operator.id, data.name)
   }
 
@@ -137,12 +155,12 @@ async function main() {
   )
 
   console.warn(
-    `Seed complete: ${facilities.length} facilities, one per operator, across Athens and Thessaloniki.`,
+    `Dev seed complete: ${facilities.length} demo facilities, one per operator, across Athens and Thessaloniki.`,
   )
 }
 
 async function seedUsers(athensOperatorId: string, thessOperatorId: string): Promise<void> {
-  const passwordHash = hashPassword(DEV_PASSWORD)
+  const passwordHash = await hashPassword(DEV_PASSWORD)
 
   const accounts: Array<{
     email: string
@@ -150,7 +168,11 @@ async function seedUsers(athensOperatorId: string, thessOperatorId: string): Pro
     displayName: string
     membership?: { operatorId: string; role: OperatorMemberRole }
   }> = [
-    { email: 'superadmin@spark.gr', role: UserRole.PLATFORM_ADMIN, displayName: 'Platform Super Admin' },
+    {
+      email: 'superadmin@spark.gr',
+      role: UserRole.PLATFORM_ADMIN,
+      displayName: 'Platform Super Admin',
+    },
     {
       email: 'admin.athens@spark.gr',
       role: UserRole.OPERATOR_ADMIN,
@@ -174,7 +196,12 @@ async function seedUsers(athensOperatorId: string, thessOperatorId: string): Pro
   for (const account of accounts) {
     const user = await prisma.user.upsert({
       where: { email: account.email },
-      update: { passwordHash, role: account.role, displayName: account.displayName, emailVerified: true },
+      update: {
+        passwordHash,
+        role: account.role,
+        displayName: account.displayName,
+        emailVerified: true,
+      },
       create: {
         email: account.email,
         passwordHash,
@@ -200,12 +227,18 @@ async function seedUsers(athensOperatorId: string, thessOperatorId: string): Pro
   }
 
   console.warn(
-    `Seeded ${accounts.length} dashboard users (password: "${DEV_PASSWORD}"):\n` +
+    `Seeded ${accounts.length} DEVELOPMENT-ONLY dashboard users. They all share the ` +
+      `hardcoded password "${DEV_PASSWORD}", which is committed to this repository — ` +
+      `never create these accounts anywhere reachable from the internet:\n` +
       accounts.map((a) => `  - ${a.email} [${a.role}]`).join('\n'),
   )
 }
 
-async function seedTariff(facilityId: string, operatorId: string, facilityName: string): Promise<void> {
+async function seedTariff(
+  facilityId: string,
+  operatorId: string,
+  facilityName: string,
+): Promise<void> {
   if (facilityName === 'Syntagma Underground Parking') {
     await seedSyntagma(facilityId, operatorId)
   } else if (facilityName === 'Monastiraki Parking') {
@@ -315,17 +348,43 @@ async function seedSyntagma(facilityId: string, operatorId: string): Promise<str
   })
 
   const rates = [
-    { id: `seed-rate-${tier1Id}-${winDayId}`, tierId: tier1Id, windowId: winDayId, priceCents: 200 },
-    { id: `seed-rate-${tier1Id}-${winNightId}`, tierId: tier1Id, windowId: winNightId, priceCents: 100 },
-    { id: `seed-rate-${tier2Id}-${winDayId}`, tierId: tier2Id, windowId: winDayId, priceCents: 250 },
-    { id: `seed-rate-${tier2Id}-${winNightId}`, tierId: tier2Id, windowId: winNightId, priceCents: 120 },
+    {
+      id: `seed-rate-${tier1Id}-${winDayId}`,
+      tierId: tier1Id,
+      windowId: winDayId,
+      priceCents: 200,
+    },
+    {
+      id: `seed-rate-${tier1Id}-${winNightId}`,
+      tierId: tier1Id,
+      windowId: winNightId,
+      priceCents: 100,
+    },
+    {
+      id: `seed-rate-${tier2Id}-${winDayId}`,
+      tierId: tier2Id,
+      windowId: winDayId,
+      priceCents: 250,
+    },
+    {
+      id: `seed-rate-${tier2Id}-${winNightId}`,
+      tierId: tier2Id,
+      windowId: winNightId,
+      priceCents: 120,
+    },
   ]
 
   for (const rate of rates) {
     await prisma.tariffRate.upsert({
       where: { id: rate.id },
       update: {},
-      create: { id: rate.id, tierId: rate.tierId, windowId: rate.windowId, priceCents: rate.priceCents, currency: 'EUR' },
+      create: {
+        id: rate.id,
+        tierId: rate.tierId,
+        windowId: rate.windowId,
+        priceCents: rate.priceCents,
+        currency: 'EUR',
+      },
     })
   }
 
@@ -526,15 +585,31 @@ async function seedAirport(facilityId: string, operatorId: string): Promise<stri
   })
 
   const carRates = [
-    { id: `seed-rate-${carTier1Id}-${winAllDayCarId}`, tierId: carTier1Id, windowId: winAllDayCarId, priceCents: 150 },
-    { id: `seed-rate-${carTier2Id}-${winAllDayCarId}`, tierId: carTier2Id, windowId: winAllDayCarId, priceCents: 300 },
+    {
+      id: `seed-rate-${carTier1Id}-${winAllDayCarId}`,
+      tierId: carTier1Id,
+      windowId: winAllDayCarId,
+      priceCents: 150,
+    },
+    {
+      id: `seed-rate-${carTier2Id}-${winAllDayCarId}`,
+      tierId: carTier2Id,
+      windowId: winAllDayCarId,
+      priceCents: 300,
+    },
   ]
 
   for (const rate of carRates) {
     await prisma.tariffRate.upsert({
       where: { id: rate.id },
       update: {},
-      create: { id: rate.id, tierId: rate.tierId, windowId: rate.windowId, priceCents: rate.priceCents, currency: 'EUR' },
+      create: {
+        id: rate.id,
+        tierId: rate.tierId,
+        windowId: rate.windowId,
+        priceCents: rate.priceCents,
+        currency: 'EUR',
+      },
     })
   }
 
@@ -717,6 +792,8 @@ async function seedPort(facilityId: string, operatorId: string): Promise<string>
 
   return planId
 }
+
+assertDevSeedAllowed(process.env.NODE_ENV)
 
 main()
   .catch((e) => {

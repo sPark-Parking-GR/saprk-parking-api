@@ -1,19 +1,31 @@
 import { Module } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
-import { AuthContext, CompositeAuthProvider, FirebaseAuthProvider, createAuthProvider } from '@spark/auth'
+import {
+  AuthContext,
+  CompositeAuthProvider,
+  FirebaseAuthProvider,
+  createAuthProvider,
+} from '@spark/auth'
 import type { AuthProviderConfig } from '@spark/auth'
 import { OperatorStatusService } from '../common/authz/operator-status.service'
+import { NotificationsModule } from '../notifications/notifications.module'
 import { PrismaService } from '../prisma/prisma.service'
+import { AccountDeletionService } from './account-deletion.service'
 import { AUTH_CONTEXT_TOKEN, FIREBASE_AUTH_PROVIDER_TOKEN } from './auth.constants'
 import { AuthController } from './auth.controller'
 import { AuthService } from './auth.service'
 import { PrismaAuthJsUserStore } from './authjs-user.store'
+import { PasswordResetService } from './password-reset.service'
+import { SessionRevocationService } from './session-revocation.service'
 
 // The concrete strategy the global AUTH_PROVIDER env var resolves to; it becomes the
 // composite router's `default` provider (Firebase handles per-user routed accounts).
 type DefaultAuthProviderConfig = Exclude<AuthProviderConfig, { provider: 'composite' }>
 
-function firebaseProvider(config: ConfigService, store: PrismaAuthJsUserStore): FirebaseAuthProvider {
+function firebaseProvider(
+  config: ConfigService,
+  store: PrismaAuthJsUserStore,
+): FirebaseAuthProvider {
   return new FirebaseAuthProvider({
     projectId: config.getOrThrow('FIREBASE_PROJECT_ID'),
     clientEmail: config.getOrThrow('FIREBASE_CLIENT_EMAIL'),
@@ -27,7 +39,8 @@ function resolveDefaultConfig(
   config: ConfigService,
   store: PrismaAuthJsUserStore,
 ): DefaultAuthProviderConfig {
-  const provider = (config.get<string>('AUTH_PROVIDER') ?? 'authjs') as DefaultAuthProviderConfig['provider']
+  const provider = (config.get<string>('AUTH_PROVIDER') ??
+    'authjs') as DefaultAuthProviderConfig['provider']
 
   switch (provider) {
     case 'authjs':
@@ -71,6 +84,7 @@ function resolveDefaultConfig(
 }
 
 @Module({
+  imports: [NotificationsModule],
   controllers: [AuthController],
   providers: [
     {
@@ -101,10 +115,18 @@ function resolveDefaultConfig(
         firebaseProvider(config, new PrismaAuthJsUserStore(prisma)),
     },
     AuthService,
+    PasswordResetService,
+    AccountDeletionService,
     OperatorStatusService,
+    SessionRevocationService,
   ],
-  // OperatorStatusService is exported because the globally-registered AuthGuard resolves
-  // its dependencies from the root module context.
-  exports: [AuthService, OperatorStatusService, FIREBASE_AUTH_PROVIDER_TOKEN],
+  // OperatorStatusService and SessionRevocationService are exported because the
+  // globally-registered AuthGuard resolves its dependencies from the root module context.
+  exports: [
+    AuthService,
+    OperatorStatusService,
+    SessionRevocationService,
+    FIREBASE_AUTH_PROVIDER_TOKEN,
+  ],
 })
 export class AuthModule {}

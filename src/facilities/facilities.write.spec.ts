@@ -1,11 +1,19 @@
 import type { AuthUser } from '@spark/types'
-import { Prisma } from '@prisma/client'
+import { Prisma, type FacilityKind } from '@prisma/client'
 import { FacilitiesService } from './facilities.service'
-import { OperatorScopeService, type OperatorScope } from '../common/authz/operator-scope.service'
+import type { BookingService } from '../booking/booking.service'
+import {
+  OperatorScopeService,
+  targetOperatorId,
+  type OperatorScope,
+} from '../common/authz/operator-scope.service'
 import {
   FacilityAlreadyExistsError,
+  FacilityDeactivationFailedError,
   FacilityFieldForbiddenError,
+  FacilityHasActiveBookingsError,
   FacilityNotFoundError,
+  OperatorTargetRequiredError,
   TariffAssignmentMismatchError,
   TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
@@ -20,6 +28,11 @@ import {
 } from './dto/facility.dto'
 
 const decimal = (n: number) => ({ toNumber: () => n }) as never
+
+// Rebuilds the Sql the tagged template would have produced, so a test can inspect the
+// placeholder text and the bound values separately.
+const sqlOf = (call: unknown[]): Prisma.Sql =>
+  Prisma.sql(call[0] as readonly string[], ...call.slice(1))
 
 const operatorUser: AuthUser = {
   id: 'u-op',
@@ -88,18 +101,24 @@ describe('FacilitiesService admin writes', () => {
       create: jest.Mock
       createMany: jest.Mock
     }
+    facilityOwnershipPeriod: { create: jest.Mock }
     tariffPlan: { findFirst: jest.Mock; findMany: jest.Mock }
+    booking: { findMany: jest.Mock; count: jest.Mock; groupBy: jest.Mock }
     parkingOperator: { findUnique: jest.Mock }
     auditLog: { create: jest.Mock }
     operatorMembership: { findFirst: jest.Mock }
     $transaction: jest.Mock
+    $queryRaw: jest.Mock
   }
   let scope: { resolve: jest.Mock; scopeWhere: jest.Mock }
+  let bookings: { cancelBooking: jest.Mock }
   let service: FacilitiesService
 
   function setScope(s: OperatorScope) {
     scope.resolve.mockResolvedValue(s)
-    scope.scopeWhere.mockReturnValue(s.kind === 'platform' ? {} : { operatorId: s.operatorId })
+    scope.scopeWhere.mockReturnValue(
+      s.kind === 'platform' ? {} : { operatorId: { in: s.operatorIds } },
+    )
   }
 
   let tx: {
@@ -111,6 +130,7 @@ describe('FacilitiesService admin writes', () => {
       count: jest.Mock
     }
     facilityTariffAssignment: { deleteMany: jest.Mock; create: jest.Mock; createMany: jest.Mock }
+    facilityOwnershipPeriod: { create: jest.Mock }
     auditLog: { create: jest.Mock }
     $executeRaw: jest.Mock
   }
@@ -129,6 +149,7 @@ describe('FacilitiesService admin writes', () => {
         create: jest.fn(),
         createMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
+      facilityOwnershipPeriod: { create: jest.fn() },
       auditLog: { create: jest.fn() },
       $executeRaw: jest.fn().mockResolvedValue(0),
     }
@@ -151,22 +172,31 @@ describe('FacilitiesService admin writes', () => {
         findFirst: jest.fn().mockResolvedValue({ id: 'plan1', vehicleTypes: [] }),
         findMany: jest.fn().mockResolvedValue([{ id: 'plan1', vehicleTypes: [] }]),
       },
+      booking: {
+        findMany: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(0),
+        groupBy: jest.fn().mockResolvedValue([]),
+      },
+      facilityOwnershipPeriod: { create: tx.facilityOwnershipPeriod.create },
       parkingOperator: { findUnique: jest.fn().mockResolvedValue({ id: 'op1' }) },
       auditLog: { create: tx.auditLog.create },
       operatorMembership: { findFirst: jest.fn() },
       $transaction: jest.fn(async (cb: (t: typeof tx) => unknown) => cb(tx)),
+      $queryRaw: jest.fn().mockResolvedValue([{ count: 0 }]),
     }
     scope = { resolve: jest.fn(), scopeWhere: jest.fn() }
+    bookings = { cancelBooking: jest.fn() }
     service = new FacilitiesService(
       prisma as unknown as PrismaService,
       {} as unknown as InventoryService,
       {} as unknown as TariffService,
       scope as unknown as OperatorScopeService,
+      bookings as unknown as BookingService,
     )
   })
 
   it('operator_admin create forces isActive/isVerified false and audits', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.create.mockResolvedValue(makeRow())
 
     await service.create(operatorUser, { ...validCreate })
@@ -182,8 +212,20 @@ describe('FacilitiesService admin writes', () => {
     )
   })
 
+  it('opens an ownership period in the same transaction, or analytics never sees the money', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
+    const row = makeRow()
+    prisma.facility.create.mockResolvedValue(row)
+
+    await service.create(operatorUser, { ...validCreate })
+
+    expect(tx.facilityOwnershipPeriod.create).toHaveBeenCalledWith({
+      data: { facilityId: row.id, operatorId: 'op1', from: row.createdAt, to: null },
+    })
+  })
+
   it('operator create ignores a dto.operatorId and uses membership scope', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.create.mockResolvedValue(makeRow())
 
     await service.create(operatorUser, { ...validCreate, operatorId: 'other-op' })
@@ -199,9 +241,36 @@ describe('FacilitiesService admin writes', () => {
     )
   })
 
+  it('multi-operator create without operatorId is refused, not guessed', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
+
+    await expect(service.create(operatorUser, { ...validCreate })).rejects.toBeInstanceOf(
+      OperatorTargetRequiredError,
+    )
+    expect(prisma.facility.create).not.toHaveBeenCalled()
+  })
+
+  it('multi-operator create uses an operatorId the caller belongs to', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
+    prisma.facility.create.mockResolvedValue(makeRow({ operatorId: 'op2' }))
+
+    await service.create(operatorUser, { ...validCreate, operatorId: 'op2' })
+
+    expect(prisma.facility.create.mock.calls[0]![0].data.operatorId).toBe('op2')
+  })
+
+  it('multi-operator create rejects an operatorId outside the caller memberships', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
+
+    await expect(
+      service.create(operatorUser, { ...validCreate, operatorId: 'op3' }),
+    ).rejects.toBeInstanceOf(OperatorTargetRequiredError)
+    expect(prisma.facility.create).not.toHaveBeenCalled()
+  })
+
   describe('one-facility-per-operator cap', () => {
     it('rejects a second create when the operator already owns a facility', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.facility.count.mockResolvedValue(1)
 
       await expect(service.create(operatorUser, { ...validCreate })).rejects.toBeInstanceOf(
@@ -211,7 +280,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('locks the operator row (FOR UPDATE) before the cap count', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.create.mockResolvedValue(makeRow())
 
       await service.create(operatorUser, { ...validCreate })
@@ -223,7 +292,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('translates a P2002 unique-violation race into FacilityAlreadyExistsError', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.facility.create.mockRejectedValue(
         new Prisma.PrismaClientKnownRequestError('unique', {
           code: 'P2002',
@@ -238,7 +307,7 @@ describe('FacilitiesService admin writes', () => {
   })
 
   it('operator update cannot set isVerified', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
 
     await expect(service.update(operatorUser, 'f1', { isVerified: true })).rejects.toBeInstanceOf(
@@ -247,7 +316,7 @@ describe('FacilitiesService admin writes', () => {
   })
 
   it('operator update cannot set rank', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
 
     await expect(service.update(operatorUser, 'f1', { rank: 9 })).rejects.toBeInstanceOf(
@@ -267,7 +336,7 @@ describe('FacilitiesService admin writes', () => {
   })
 
   it('cross-operator access returns FacilityNotFoundError (no leak)', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.findFirst.mockResolvedValue(null)
 
     await expect(service.adminGetById(operatorUser, 'f-other')).rejects.toBeInstanceOf(
@@ -275,7 +344,7 @@ describe('FacilitiesService admin writes', () => {
     )
     expect(prisma.facility.findFirst.mock.calls[0]![0].where).toEqual({
       id: 'f-other',
-      operatorId: 'op1',
+      operatorId: { in: ['op1'] },
     })
   })
 
@@ -292,18 +361,190 @@ describe('FacilitiesService admin writes', () => {
   })
 
   it('operator list ignores query.operatorId and forces its own scope', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.findMany.mockResolvedValue([])
 
     await service.adminList(operatorUser, { skip: 0, take: 20, operatorId: 'op9' })
 
     const where = prisma.facility.findMany.mock.calls[0]![0].where
-    expect(where.operatorId).toBe('op1')
+    expect(where.operatorId).toEqual({ in: ['op1'] })
     expect(where.AND).toBeUndefined()
   })
 
+  it('multi-operator list spans every membership and excludes any other operator', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
+
+    await service.adminList(operatorUser, { skip: 0, take: 20 })
+
+    const where = prisma.facility.findMany.mock.calls[0]![0].where
+    expect(where.operatorId).toEqual({ in: ['op1', 'op2'] })
+    expect((where.operatorId as { in: string[] }).in).not.toContain('op3')
+    expect(prisma.facility.count.mock.calls[0]![0].where).toEqual(where)
+  })
+
+  describe('admin map', () => {
+    const bounds = { north: 38, south: 37, east: 24, west: 23 }
+
+    it('multi-operator map spans every membership in both the SQL and the Prisma path', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
+      prisma.$queryRaw.mockResolvedValue([{ count: 2 }])
+
+      await service.adminMap(operatorUser, { bounds })
+
+      const sql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
+      expect(sql.text).toContain('"operatorId" IN ($5,$6)')
+      expect(sql.values.slice(4)).toEqual(['op1', 'op2'])
+
+      const where = prisma.facility.findMany.mock.calls[0]![0].where
+      expect(where.AND).toContainEqual({ operatorId: { in: ['op1', 'op2'] } })
+      expect(JSON.stringify(where)).not.toContain('op3')
+    })
+
+    it('ignores a requested operatorId for an operator caller', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+
+      await service.adminMap(operatorUser, { bounds, operatorId: 'op9' })
+
+      expect(sqlOf(prisma.$queryRaw.mock.calls[0]!).values).toEqual([23, 37, 24, 38, 'op1'])
+    })
+
+    it('binds `q` as a parameter instead of inlining it into the SQL', async () => {
+      setScope({ kind: 'platform' })
+      const q = `x'); DROP TABLE "Facility"; --`
+
+      await service.adminMap(platformUser, { bounds, q })
+
+      const sql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
+      expect(sql.text).toContain('("name" ILIKE $5 OR "address" ILIKE $6)')
+      expect(sql.text).not.toContain('DROP TABLE')
+      expect(sql.values).toEqual([23, 37, 24, 38, `%${q}%`, `%${q}%`])
+    })
+
+    it('binds kind, the boolean filters and a platform-selected operatorId', async () => {
+      setScope({ kind: 'platform' })
+
+      await service.adminMap(platformUser, {
+        bounds,
+        isActive: true,
+        isVerified: false,
+        kind: 'BUSINESS' as FacilityKind,
+        operatorId: 'op9',
+      })
+
+      const sql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
+      expect(sql.text).toContain('"isActive" = $5')
+      expect(sql.text).toContain('"isVerified" = $6')
+      expect(sql.text).toContain('"kind" = $7::"FacilityKind"')
+      expect(sql.text).toContain('"operatorId" IN ($8)')
+      expect(sql.text).not.toContain('BUSINESS')
+      expect(sql.values).toEqual([23, 37, 24, 38, true, false, 'BUSINESS', 'op9'])
+    })
+
+    it('matches bounds on the indexed geog column with longitude-first envelope args', async () => {
+      setScope({ kind: 'platform' })
+
+      await service.adminMap(platformUser, { bounds })
+
+      const sql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
+      expect(sql.text).toContain(
+        'ST_Intersects("geog", ST_MakeEnvelope($1, $2, $3, $4, 4326)::geography)',
+      )
+      expect(sql.values).toEqual([bounds.west, bounds.south, bounds.east, bounds.north])
+    })
+
+    it('returns an empty response without a second query when nothing matches', async () => {
+      setScope({ kind: 'platform' })
+
+      const res = await service.adminMap(platformUser, { bounds })
+
+      expect(res).toEqual({ mode: 'points', points: [], clusters: [], total: 0 })
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1)
+      expect(prisma.facility.findMany).not.toHaveBeenCalled()
+    })
+
+    it('buckets clusters in SQL without hydrating rows, keeping the 12x12 grid shape', async () => {
+      setScope({ kind: 'platform' })
+      prisma.$queryRaw.mockResolvedValueOnce([{ count: 900 }]).mockResolvedValueOnce([
+        { gx: 0, gy: 0, count: 500, lat: 37.1, lng: 23.1 },
+        { gx: 3, gy: 7, count: 400, lat: 37.9, lng: 23.8 },
+      ])
+
+      const res = await service.adminMap(platformUser, { bounds })
+
+      expect(res.mode).toBe('clusters')
+      expect(res.total).toBe(900)
+      expect(res.clusters).toEqual([
+        { id: 'c_0_0', lat: 37.1, lng: 23.1, count: 500 },
+        { id: 'c_3_7', lat: 37.9, lng: 23.8, count: 400 },
+      ])
+      expect(prisma.facility.findMany).not.toHaveBeenCalled()
+
+      const sql = sqlOf(prisma.$queryRaw.mock.calls[1]!)
+      expect(sql.values.slice(0, 4)).toEqual([bounds.west, 1 / 12, bounds.south, 1 / 12])
+    })
+
+    it('counts and clusters through the identical predicate', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
+      prisma.$queryRaw.mockResolvedValueOnce([{ count: 900 }]).mockResolvedValueOnce([])
+
+      await service.adminMap(operatorUser, {
+        bounds,
+        q: 'kolonaki',
+        isActive: true,
+        kind: 'BUSINESS' as FacilityKind,
+      })
+
+      const countSql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
+      const clusterSql = sqlOf(prisma.$queryRaw.mock.calls[1]!)
+      expect(clusterSql.values.slice(4)).toEqual(countSql.values)
+    })
+
+    it('feeds the Prisma points path the same filter set as the SQL predicate', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.$queryRaw.mockResolvedValue([{ count: 2 }])
+
+      await service.adminMap(operatorUser, {
+        bounds,
+        q: 'kolonaki',
+        isActive: true,
+        isVerified: false,
+        kind: 'BUSINESS' as FacilityKind,
+      })
+
+      const call = prisma.facility.findMany.mock.calls[0]![0]
+      expect(call.take).toBe(250)
+      expect(call.where).toEqual({
+        AND: [
+          { lat: { gte: 37, lte: 38 }, lng: { gte: 23, lte: 24 } },
+          {
+            OR: [
+              { name: { contains: 'kolonaki', mode: 'insensitive' } },
+              { address: { contains: 'kolonaki', mode: 'insensitive' } },
+            ],
+          },
+          { isActive: true },
+          { isVerified: false },
+          { kind: 'BUSINESS' },
+          { operatorId: { in: ['op1'] } },
+        ],
+      })
+      expect(sqlOf(prisma.$queryRaw.mock.calls[0]!).values).toEqual([
+        23,
+        37,
+        24,
+        38,
+        '%kolonaki%',
+        '%kolonaki%',
+        true,
+        false,
+        'BUSINESS',
+        'op1',
+      ])
+    })
+  })
+
   it('soft delete sets isActive false and audits', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
     prisma.facility.update.mockResolvedValue(makeRow())
 
@@ -314,8 +555,89 @@ describe('FacilitiesService admin writes', () => {
       data: { isActive: false },
     })
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ action: 'facility.deactivated' }) }),
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'facility.deactivated' }),
+      }),
     )
+  })
+
+  describe('deactivation with unhonoured bookings', () => {
+    const unhonoured = (...ids: string[]) =>
+      prisma.booking.findMany.mockResolvedValue(ids.map((id) => ({ id })))
+
+    beforeEach(() => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
+      prisma.facility.update.mockResolvedValue(makeRow())
+    })
+
+    it('refuses to deactivate while future confirmed bookings exist, naming the count', async () => {
+      unhonoured('b1', 'b2', 'b3')
+
+      const error = await service.softDelete(operatorUser, 'f1').catch((e: Error) => e)
+
+      expect(error).toBeInstanceOf(FacilityHasActiveBookingsError)
+      expect((error as Error).message).toContain('3 booking(s)')
+      expect(prisma.facility.update).not.toHaveBeenCalled()
+      expect(bookings.cancelBooking).not.toHaveBeenCalled()
+    })
+
+    it('counts only unfinished CONFIRMED/CHECKED_IN bookings as blocking', async () => {
+      unhonoured('b1')
+
+      await service.softDelete(operatorUser, 'f1').catch(() => undefined)
+
+      const where = prisma.booking.findMany.mock.calls[0]![0].where
+      expect(where.facilityId).toBe('f1')
+      expect(where.status).toEqual({ in: ['CONFIRMED', 'CHECKED_IN'] })
+      expect(where.endsAt.gt).toBeInstanceOf(Date)
+    })
+
+    it('force cancels and refunds each blocking booking through the existing refund path', async () => {
+      unhonoured('b1', 'b2')
+
+      await service.softDelete(operatorUser, 'f1', true)
+
+      expect(bookings.cancelBooking.mock.calls.map((c) => c[0])).toEqual(['b1', 'b2'])
+      expect(bookings.cancelBooking).toHaveBeenCalledWith('b1', operatorUser)
+      expect(prisma.facility.update).toHaveBeenCalledWith({
+        where: { id: 'f1' },
+        data: { isActive: false },
+      })
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'facility.deactivated',
+            payload: { forced: true, cancelledBookings: 2 },
+          }),
+        }),
+      )
+    })
+
+    it('keeps the facility active when a forced refund fails, reporting the real split', async () => {
+      unhonoured('b1', 'b2', 'b3')
+      bookings.cancelBooking
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('provider down'))
+
+      const error = await service.softDelete(operatorUser, 'f1', true).catch((e: Error) => e)
+
+      expect(error).toBeInstanceOf(FacilityDeactivationFailedError)
+      expect((error as Error).message).toContain('2 booking(s) cancelled')
+      expect((error as Error).message).toContain('1 failed')
+      // Every booking is attempted, so the caller learns the whole picture at once.
+      expect(bookings.cancelBooking).toHaveBeenCalledTimes(3)
+      expect(prisma.facility.update).not.toHaveBeenCalled()
+    })
+
+    it('blocks the update path from deactivating around the guard', async () => {
+      prisma.booking.count.mockResolvedValue(2)
+
+      await expect(service.update(operatorUser, 'f1', { isActive: false })).rejects.toBeInstanceOf(
+        FacilityHasActiveBookingsError,
+      )
+      expect(prisma.facility.update).not.toHaveBeenCalled()
+    })
   })
 
   it('admin list exposes kind and operator name', async () => {
@@ -368,20 +690,108 @@ describe('FacilitiesService admin writes', () => {
     )
   })
 
-  it('bulk delete soft-deletes (isActive false)', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
-    prisma.facility.updateMany.mockResolvedValue({ count: 2 })
+  describe('bulk deactivation', () => {
+    beforeEach(() => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+    })
 
-    await service.bulkUpdate(operatorUser, { ids: ['a', 'b'], action: 'delete' })
+    it('bulk delete soft-deletes the scoped facilities that owe nothing', async () => {
+      prisma.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
+      prisma.facility.updateMany.mockResolvedValue({ count: 2 })
 
-    expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['a', 'b'] }, operatorId: 'op1' },
-      data: { isActive: false },
+      const res = await service.bulkUpdate(operatorUser, {
+        ids: ['a', 'b'],
+        action: 'delete',
+        force: false,
+      })
+
+      expect(res).toEqual({ affected: 2 })
+      expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a', 'b'] }, operatorId: { in: ['op1'] } },
+        data: { isActive: false },
+      })
+    })
+
+    it('leaves a facility with unhonoured bookings active and reports it', async () => {
+      prisma.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
+      prisma.booking.groupBy.mockResolvedValue([{ facilityId: 'b', _count: { _all: 4 } }])
+      prisma.facility.updateMany.mockResolvedValue({ count: 1 })
+
+      const res = await service.bulkUpdate(operatorUser, {
+        ids: ['a', 'b'],
+        action: 'disable',
+        force: false,
+      })
+
+      expect(res).toEqual({
+        affected: 1,
+        skipped: [{ facilityId: 'b', reason: 'unhonoured_bookings', unhonoured: 4, cancelled: 0 }],
+      })
+      expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a'] }, operatorId: { in: ['op1'] } },
+        data: { isActive: false },
+      })
+      expect(bookings.cancelBooking).not.toHaveBeenCalled()
+    })
+
+    it('reports honestly when one facility refund fails inside a bulk force', async () => {
+      prisma.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
+      prisma.booking.groupBy.mockResolvedValue([
+        { facilityId: 'a', _count: { _all: 1 } },
+        { facilityId: 'b', _count: { _all: 2 } },
+      ])
+      prisma.booking.findMany
+        .mockResolvedValueOnce([{ id: 'a1' }])
+        .mockResolvedValueOnce([{ id: 'b1' }, { id: 'b2' }])
+      bookings.cancelBooking
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('provider down'))
+      prisma.facility.updateMany.mockResolvedValue({ count: 1 })
+
+      const res = await service.bulkUpdate(operatorUser, {
+        ids: ['a', 'b'],
+        action: 'delete',
+        force: true,
+      })
+
+      // 'a' cleared; 'b' stays ACTIVE and admits that one of its two refunds went
+      // through — the money already moved must not be hidden behind a bare count.
+      expect(res).toEqual({
+        affected: 1,
+        skipped: [{ facilityId: 'b', reason: 'refund_failed', unhonoured: 2, cancelled: 1 }],
+      })
+      expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a'] }, operatorId: { in: ['op1'] } },
+        data: { isActive: false },
+      })
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'facility.bulk.delete',
+            entityId: '1 of 2',
+          }),
+        }),
+      )
+    })
+
+    it('touches nothing when no id is in scope', async () => {
+      prisma.facility.findMany.mockResolvedValue([])
+
+      const res = await service.bulkUpdate(operatorUser, {
+        ids: ['foreign'],
+        action: 'disable',
+        force: true,
+      })
+
+      expect(res).toEqual({ affected: 0 })
+      expect(prisma.facility.updateMany).not.toHaveBeenCalled()
+      expect(bookings.cancelBooking).not.toHaveBeenCalled()
     })
   })
 
   it('operator cannot bulk deploy (self-verify forbidden)', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
 
     await expect(
       service.bulkUpdate(operatorUser, { ids: ['a'], action: 'deploy' }),
@@ -390,26 +800,26 @@ describe('FacilitiesService admin writes', () => {
   })
 
   it('bulk enable is scoped to the operator (foreign ids cannot be touched)', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.updateMany.mockResolvedValue({ count: 1 })
 
     await service.bulkUpdate(operatorUser, { ids: ['mine', 'foreign'], action: 'enable' })
 
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['mine', 'foreign'] }, operatorId: 'op1' },
+      where: { id: { in: ['mine', 'foreign'] }, operatorId: { in: ['op1'] } },
       data: { isActive: true },
     })
   })
 
   it('operator can bulk publish own facilities (unlike deploy, this does not require platform verification)', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.updateMany.mockResolvedValue({ count: 2 })
 
     const res = await service.bulkUpdate(operatorUser, { ids: ['a', 'b'], action: 'publish' })
 
     expect(res).toEqual({ affected: 2 })
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['a', 'b'] }, operatorId: 'op1' },
+      where: { id: { in: ['a', 'b'] }, operatorId: { in: ['op1'] } },
       data: { isVerified: true },
     })
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
@@ -420,20 +830,20 @@ describe('FacilitiesService admin writes', () => {
   })
 
   it('operator can bulk unpublish own facilities', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.updateMany.mockResolvedValue({ count: 1 })
 
     await service.bulkUpdate(operatorUser, { ids: ['a'], action: 'unpublish' })
 
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['a'] }, operatorId: 'op1' },
+      where: { id: { in: ['a'] }, operatorId: { in: ['op1'] } },
       data: { isVerified: false },
     })
   })
 
   describe('assignTariff (single facility, one slot)', () => {
     it('sets a concrete-vehicleType row after verifying facility + plan in scope, then audits', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
       prisma.tariffPlan.findFirst.mockResolvedValue({ id: 'plan1', vehicleTypes: [] })
 
@@ -441,11 +851,11 @@ describe('FacilitiesService admin writes', () => {
 
       expect(prisma.facility.findFirst.mock.calls[0]![0].where).toEqual({
         id: 'f1',
-        operatorId: 'op1',
+        operatorId: { in: ['op1'] },
       })
       expect(prisma.tariffPlan.findFirst.mock.calls[0]![0].where).toEqual({
         id: 'plan1',
-        operatorId: 'op1',
+        operatorId: { in: ['op1'] },
       })
       expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
         where: { facilityId: 'f1', vehicleType: 'CAR' },
@@ -465,7 +875,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('rejects a concrete slot the plan does not price (consistency guardrail)', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
       prisma.tariffPlan.findFirst.mockResolvedValue({ id: 'plan1', vehicleTypes: ['TRUCK'] })
 
@@ -477,7 +887,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('rejects when the facility is not in the caller scope (no write)', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue(null)
 
       await expect(
@@ -488,7 +898,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('rejects when the plan is not in the caller scope (cross-operator leak blocked)', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
       prisma.tariffPlan.findFirst.mockResolvedValue(null)
 
@@ -499,7 +909,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('clears a slot when tariffPlanId is null without a plan lookup or create', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
 
       await service.assignTariff(operatorUser, 'f1', 'CAR' as never, null)
@@ -519,7 +929,7 @@ describe('FacilitiesService admin writes', () => {
 
   describe('bulkUpdate assignTariff', () => {
     it('assigns multiple slots across scoped facilities after validating every plan', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.tariffPlan.findMany.mockResolvedValue([
         { id: 'planCar', vehicleTypes: ['CAR'] },
         { id: 'planTruck', vehicleTypes: [] },
@@ -538,7 +948,7 @@ describe('FacilitiesService admin writes', () => {
       // Every distinct plan id was ownership-checked in one query.
       expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where).toEqual({
         id: { in: ['planCar', 'planTruck'] },
-        operatorId: 'op1',
+        operatorId: { in: ['op1'] },
       })
       // One deleteMany clearing both targeted concrete slots on both scoped facilities.
       expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
@@ -565,7 +975,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('only in-scope facilities are affected; foreign ids are silently excluded', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.tariffPlan.findMany.mockResolvedValue([{ id: 'plan1', vehicleTypes: [] }])
       // Only 'mine' matches id IN (...) AND operatorId = op1.
       tx.facility.findMany.mockResolvedValue([{ id: 'mine' }])
@@ -578,7 +988,7 @@ describe('FacilitiesService admin writes', () => {
 
       expect(tx.facility.findMany.mock.calls[0]![0].where).toEqual({
         id: { in: ['mine', 'foreign'] },
-        operatorId: 'op1',
+        operatorId: { in: ['op1'] },
       })
       expect(tx.facilityTariffAssignment.createMany).toHaveBeenCalledWith({
         data: [{ facilityId: 'mine', tariffPlanId: 'plan1', vehicleType: 'CAR' }],
@@ -587,7 +997,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('rejects the whole call when ANY plan id in the array is out of scope (no writes)', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       // Caller owns planMine but not planOther; findMany returns only the owned one.
       prisma.tariffPlan.findMany.mockResolvedValue([{ id: 'planMine', vehicleTypes: [] }])
 
@@ -607,7 +1017,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('bulk clear (all null plans) deletes the targeted slots and inserts nothing', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
 
       await service.bulkUpdate(operatorUser, {
@@ -649,7 +1059,7 @@ describe('FacilitiesService admin writes', () => {
     const ALL_TYPES = ['CAR', 'MOTORCYCLE', 'VAN', 'TRUCK']
 
     it('sources all 4 rows from the operator default when there are no explicit rows', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue({ id: 'f1', operatorId: 'op1' })
       prisma.facilityTariffAssignment.findMany.mockResolvedValue([])
       prisma.tariffPlan.findFirst.mockResolvedValue({ id: 'def', name: 'Default' })
@@ -667,7 +1077,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('sources all 4 rows as none (null ids) when there is neither explicit rows nor a default', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue({ id: 'f1', operatorId: 'op1' })
       prisma.facilityTariffAssignment.findMany.mockResolvedValue([])
       prisma.tariffPlan.findFirst.mockResolvedValue(null)
@@ -684,7 +1094,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('mixes explicit rows with default-covered rows', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue({ id: 'f1', operatorId: 'op1' })
       prisma.facilityTariffAssignment.findMany.mockResolvedValue([
         { vehicleType: 'CAR', tariffPlanId: 'planCar', tariffPlan: { name: 'Car Plan' } },
@@ -705,7 +1115,7 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('rejects a facility outside the caller scope', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue(null)
 
       await expect(service.getTariffAssignments(operatorUser, 'f-other')).rejects.toBeInstanceOf(
@@ -749,11 +1159,14 @@ describe('facility DTO validation', () => {
 })
 
 describe('OperatorScopeService', () => {
-  let prisma: { operatorMembership: { findFirst: jest.Mock } }
+  let prisma: { operatorMembership: { findMany: jest.Mock } }
   let svc: OperatorScopeService
 
+  const memberships = (...ids: string[]) =>
+    prisma.operatorMembership.findMany.mockResolvedValue(ids.map((operatorId) => ({ operatorId })))
+
   beforeEach(() => {
-    prisma = { operatorMembership: { findFirst: jest.fn() } }
+    prisma = { operatorMembership: { findMany: jest.fn().mockResolvedValue([]) } }
     svc = new OperatorScopeService(prisma as unknown as PrismaService)
   })
 
@@ -762,17 +1175,69 @@ describe('OperatorScopeService', () => {
   })
 
   it('operator with membership resolves to operator scope', async () => {
-    prisma.operatorMembership.findFirst.mockResolvedValue({ operatorId: 'op1' })
-    await expect(svc.resolve(operatorUser)).resolves.toEqual({ kind: 'operator', operatorId: 'op1' })
+    memberships('op1')
+    await expect(svc.resolve(operatorUser)).resolves.toEqual({
+      kind: 'operator',
+      operatorIds: ['op1'],
+    })
+  })
+
+  it('operator with several memberships resolves to all of them', async () => {
+    memberships('op1', 'op2')
+    await expect(svc.resolve(operatorUser)).resolves.toEqual({
+      kind: 'operator',
+      operatorIds: ['op1', 'op2'],
+    })
+    expect(prisma.operatorMembership.findMany.mock.calls[0]![0].where).toEqual({ userId: 'u-op' })
   })
 
   it('operator without membership is denied (403 domain error)', async () => {
-    prisma.operatorMembership.findFirst.mockResolvedValue(null)
     await expect(svc.resolve(operatorUser)).rejects.toThrow('No operator context for this user')
   })
 
   it('plain user is denied', async () => {
     const u: AuthUser = { id: 'u', email: 'u@x.gr', role: 'user', emailVerified: true }
     await expect(svc.resolve(u)).rejects.toThrow('No operator context for this user')
+  })
+
+  describe('scopeWhere', () => {
+    it('filters on every operator the caller belongs to, and no other', () => {
+      expect(svc.scopeWhere({ kind: 'operator', operatorIds: ['op1', 'op2'] })).toEqual({
+        operatorId: { in: ['op1', 'op2'] },
+      })
+    })
+
+    it('is unfiltered for platform scope', () => {
+      expect(svc.scopeWhere({ kind: 'platform' })).toEqual({})
+    })
+  })
+})
+
+describe('targetOperatorId (create-path tenant choice)', () => {
+  const multi: OperatorScope = { kind: 'operator', operatorIds: ['op1', 'op2'] }
+
+  it('uses the single membership implicitly', () => {
+    expect(targetOperatorId({ kind: 'operator', operatorIds: ['op1'] }, undefined)).toBe('op1')
+  })
+
+  it('ignores a foreign operatorId for a single-membership caller', () => {
+    expect(targetOperatorId({ kind: 'operator', operatorIds: ['op1'] }, 'other-op')).toBe('op1')
+  })
+
+  it('refuses to guess for a multi-membership caller with no operatorId', () => {
+    expect(() => targetOperatorId(multi, undefined)).toThrow(OperatorTargetRequiredError)
+  })
+
+  it('honours an explicit operatorId the caller belongs to', () => {
+    expect(targetOperatorId(multi, 'op2')).toBe('op2')
+  })
+
+  it('refuses an operatorId the multi-membership caller does not belong to', () => {
+    expect(() => targetOperatorId(multi, 'op3')).toThrow(OperatorTargetRequiredError)
+  })
+
+  it('requires platform admins to name the operator', () => {
+    expect(() => targetOperatorId({ kind: 'platform' }, undefined)).toThrow('operatorId required')
+    expect(targetOperatorId({ kind: 'platform' }, 'op9')).toBe('op9')
   })
 })

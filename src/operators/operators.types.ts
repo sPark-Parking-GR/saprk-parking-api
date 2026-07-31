@@ -18,6 +18,34 @@ export class OperatorNotReactivatableError extends DomainError {
   }
 }
 
+export class OperatorMemberNotFoundError extends DomainError {
+  constructor(userId: string) {
+    super(`User ${userId} is not a member of this operator`)
+  }
+}
+
+// Names what breaks rather than just refusing: an operator with no admin cannot invite
+// anyone, so the state is unrecoverable without platform intervention.
+export class LastOperatorAdminError extends DomainError {
+  constructor(operatorId: string) {
+    super(
+      `Operator ${operatorId} would be left with no administrator: nobody could manage its facilities, tariffs, staff or invites, and no one inside the business could restore access. Promote another member to admin first.`,
+    )
+  }
+}
+
+export class SelfRoleChangeError extends DomainError {
+  constructor() {
+    super('You cannot change your own operator role. Ask another admin of this operator.')
+  }
+}
+
+export class SelfMembershipRemovalError extends DomainError {
+  constructor() {
+    super('You cannot remove your own operator membership. Ask another admin of this operator.')
+  }
+}
+
 export interface OperatorSummary {
   id: string
   name: string

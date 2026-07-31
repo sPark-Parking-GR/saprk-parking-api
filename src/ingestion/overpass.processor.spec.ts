@@ -80,7 +80,9 @@ describe('OverpassProcessor', () => {
   })
 
   it('marks the tile FAILED and rethrows on a fetch error', async () => {
-    overpass.fetchParkingTile.mockRejectedValue(new Error('Overpass responded 429 Too Many Requests'))
+    overpass.fetchParkingTile.mockRejectedValue(
+      new Error('Overpass responded 429 Too Many Requests'),
+    )
 
     await expect(processor.process(makeJob({ tileId: 't1', tile }))).rejects.toThrow('429')
 

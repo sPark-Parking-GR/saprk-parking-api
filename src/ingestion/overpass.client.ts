@@ -1,6 +1,10 @@
 import { Injectable } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
-import { DEFAULT_OVERPASS_URL, OVERPASS_TIMEOUT_MS, OVERPASS_USER_AGENT } from './ingestion.constants'
+import {
+  DEFAULT_OVERPASS_URL,
+  OVERPASS_TIMEOUT_MS,
+  OVERPASS_USER_AGENT,
+} from './ingestion.constants'
 import type { OverpassResponse } from './overpass.types'
 import type { Tile } from './tiling'
 

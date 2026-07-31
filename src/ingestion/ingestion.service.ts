@@ -52,7 +52,7 @@ export class IngestionService {
       removeOnComplete: true,
       removeOnFail: true,
     })
-    this.logger.log(`Enqueued sweep: ${dto.cities.length} city(ies), ${dto.regions.length} region(s)`)
+    this.logger.log({ cities: dto.cities.length, regions: dto.regions.length }, 'Enqueued sweep')
     return { queued: true }
   }
 
@@ -112,9 +112,16 @@ export class IngestionService {
   // cap. Same landing/dedup path as a top-level tile, tagged with the deeper depth.
   async enqueueGoogleSubtiles(tiles: Tile[], depth: number): Promise<void> {
     for (const tile of tiles) {
-      await this.enqueueTile(IngestSource.GOOGLE, tile, this.googleQueue, GOOGLE_FETCH_JOB, 'google', depth)
+      await this.enqueueTile(
+        IngestSource.GOOGLE,
+        tile,
+        this.googleQueue,
+        GOOGLE_FETCH_JOB,
+        'google',
+        depth,
+      )
     }
-    this.logger.log(`Enqueued ${tiles.length} Google subtile(s) at depth ${depth}`)
+    this.logger.log({ count: tiles.length, depth }, 'Enqueued Google subtiles')
   }
 
   private async enqueueTiles(params: EnqueueParams): Promise<string[]> {
@@ -126,7 +133,7 @@ export class IngestionService {
       tileIds.push(await this.enqueueTile(source, tile, queue, jobName, jobPrefix))
     }
 
-    this.logger.log(`Enqueued ${tiles.length} ${source} tile(s) for region`)
+    this.logger.log({ count: tiles.length, source }, 'Enqueued tiles for region')
     return tileIds
   }
 
@@ -152,20 +159,16 @@ export class IngestionService {
       update: { status: TileStatus.PENDING, lastError: null },
     })
 
-    await queue.add(
-      jobName,
-      { tileId: record.id, tile, depth } satisfies TileFetchJobData,
-      {
-        jobId: `${jobPrefix}-${record.id}`,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5_000 },
-        // Remove on finish so the deterministic jobId frees up and a later
-        // re-ingest of the same tile actually re-runs. Outcomes are persisted
-        // on IngestTile, so the BullMQ record is not the source of truth.
-        removeOnComplete: true,
-        removeOnFail: true,
-      },
-    )
+    await queue.add(jobName, { tileId: record.id, tile, depth } satisfies TileFetchJobData, {
+      jobId: `${jobPrefix}-${record.id}`,
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 5_000 },
+      // Remove on finish so the deterministic jobId frees up and a later
+      // re-ingest of the same tile actually re-runs. Outcomes are persisted
+      // on IngestTile, so the BullMQ record is not the source of truth.
+      removeOnComplete: true,
+      removeOnFail: true,
+    })
     return record.id
   }
 }

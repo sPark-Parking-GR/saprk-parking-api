@@ -1,4 +1,6 @@
 import { Controller, Get, Query } from '@nestjs/common'
+import type { AuthUser } from '@spark/types'
+import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { AuditService } from './audit.service'
@@ -10,7 +12,10 @@ export class AuditController {
 
   @Roles('platform_admin')
   @Get()
-  list(@Query(new ZodValidationPipe(listAuditLogSchema)) query: ListAuditLogDto) {
-    return this.audit.list(query)
+  list(
+    @Query(new ZodValidationPipe(listAuditLogSchema)) query: ListAuditLogDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.audit.list(user, query)
   }
 }

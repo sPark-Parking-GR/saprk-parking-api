@@ -52,10 +52,11 @@ export class GoogleFetchProcessor extends WorkerHost {
       if (places.length >= GOOGLE_MAX_RESULTS) {
         if (depth < GOOGLE_MAX_SUBDIVIDE_DEPTH) {
           await this.ingestion.enqueueGoogleSubtiles(quadrants(tile), depth + 1)
-          this.logger.log(`Tile ${tileId} hit the cap — subdividing at depth ${depth + 1}`)
+          this.logger.log({ tileId, depth: depth + 1 }, 'Tile hit result cap — subdividing')
         } else {
           this.logger.warn(
-            `Tile ${tileId} hit the ${GOOGLE_MAX_RESULTS}-result cap at max depth — truncation accepted`,
+            { tileId, maxResults: GOOGLE_MAX_RESULTS, depth },
+            'Tile hit result cap at max depth — truncation accepted',
           )
         }
       }
@@ -69,7 +70,7 @@ export class GoogleFetchProcessor extends WorkerHost {
           lastError: null,
         },
       })
-      this.logger.log(`Tile ${tileId}: stored ${stored}/${places.length} Google place(s)`)
+      this.logger.log({ tileId, stored, total: places.length }, 'Stored Google places')
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await this.prisma.ingestTile.update({

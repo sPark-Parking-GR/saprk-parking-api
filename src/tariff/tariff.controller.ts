@@ -1,14 +1,4 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  HttpCode,
-  Param,
-  Patch,
-  Post,
-  Query,
-} from '@nestjs/common'
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common'
 import { Throttle } from '@nestjs/throttler'
 import type { AuthUser } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'

@@ -1,14 +1,4 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  HttpCode,
-  Param,
-  Patch,
-  Post,
-  Query,
-} from '@nestjs/common'
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common'
 import { Throttle } from '@nestjs/throttler'
 import type { AuthUser } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
@@ -21,6 +11,7 @@ import {
   assignTariffSchema,
   bulkFacilitySchema,
   createFacilitySchema,
+  deactivateFacilitySchema,
   listFacilitiesSchema,
   quoteSchema,
   searchFacilitiesSchema,
@@ -29,6 +20,7 @@ import {
   type AssignTariffDto,
   type BulkFacilityDto,
   type CreateFacilityDto,
+  type DeactivateFacilityDto,
   type ListFacilitiesDto,
   type QuoteDto,
   type SearchFacilitiesDto,
@@ -39,7 +31,12 @@ import {
 export class FacilitiesController {
   constructor(private readonly facilities: FacilitiesService) {}
 
+  // Anonymous + heaviest public route (PostGIS + set-based availability/price computation),
+  // so it gets its own budget below the untuned global 120/min rather than inheriting it.
+  // 60/min (~1 req/sec) mirrors the admin `map` route's bounding-box query below and still
+  // covers a user actively panning/zooming the map, which typically debounces well under 1/sec.
   @Public()
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @Get('search')
   search(@Query(new ZodValidationPipe(searchFacilitiesSchema)) query: SearchFacilitiesDto) {
     const bounds =
@@ -138,8 +135,12 @@ export class FacilitiesController {
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Delete(':id')
   @HttpCode(204)
-  remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
-    return this.facilities.softDelete(user, id)
+  remove(
+    @Param('id') id: string,
+    @Query(new ZodValidationPipe(deactivateFacilitySchema)) query: DeactivateFacilityDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.facilities.softDelete(user, id, query.force)
   }
 
   @Public()
@@ -148,12 +149,13 @@ export class FacilitiesController {
     return this.facilities.getDetail(id)
   }
 
+  // Runs per user action (picking a facility, then re-quoting a few times while adjusting
+  // start/end time or vehicle type) rather than per map gesture, so it warrants a lower
+  // ceiling than search while still leaving room for that back-and-forth before booking.
   @Public()
+  @Throttle({ default: { limit: 40, ttl: 60_000 } })
   @Get(':id/quote')
-  getQuote(
-    @Param('id') id: string,
-    @Query(new ZodValidationPipe(quoteSchema)) query: QuoteDto,
-  ) {
+  getQuote(@Param('id') id: string, @Query(new ZodValidationPipe(quoteSchema)) query: QuoteDto) {
     return this.facilities.getQuote(id, query.startsAt, query.endsAt, query.vehicleType)
   }
 }

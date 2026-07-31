@@ -9,9 +9,8 @@ import {
   Post,
   Query,
 } from '@nestjs/common'
-import type { AuthUser } from '@spark/types'
+import type { AuthUser, UserRole } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
-import { Public } from '../auth/decorators/public.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { BookingService } from './booking.service'
@@ -21,6 +20,16 @@ import {
   type CreateBookingDto,
   type ListBookingsDto,
 } from './dto/booking.dto'
+
+// Controller-layer gate for the owner-or-staff endpoints. Every booking belongs to an
+// account, so these are closed to anonymous callers; the ownership predicate itself needs
+// a database read and lives in the service.
+const BOOKING_ACTOR_ROLES: UserRole[] = [
+  'user',
+  'operator_staff',
+  'operator_admin',
+  'platform_admin',
+]
 
 @Controller('bookings')
 export class BookingController {
@@ -35,18 +44,15 @@ export class BookingController {
     return this.bookings.adminList(user, query)
   }
 
-  @Public()
+  @Roles(...BOOKING_ACTOR_ROLES)
   @Post()
   create(
     @Body(new ZodValidationPipe(createBookingSchema)) body: CreateBookingDto,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @CurrentUser() user?: AuthUser,
+    @CurrentUser() user: AuthUser,
   ) {
     if (!idempotencyKey) {
       throw new BadRequestException('Idempotency-Key header is required')
-    }
-    if (!user && !body.guestEmail) {
-      throw new BadRequestException('guestEmail is required for guest bookings')
     }
 
     return this.bookings.createBooking({
@@ -56,30 +62,28 @@ export class BookingController {
       vehicleType: body.vehicleType,
       vehiclePlate: body.vehiclePlate,
       vehicleId: body.vehicleId,
-      guestEmail: body.guestEmail,
-      guestPhone: body.guestPhone,
       sourceChannel: body.sourceChannel,
-      userId: user?.id,
+      userId: user.id,
       idempotencyKey,
     })
   }
 
-  @Public()
+  @Roles(...BOOKING_ACTOR_ROLES)
   @Post(':id/confirm')
-  confirm(@Param('id') id: string) {
-    return this.bookings.confirmBooking(id)
+  confirm(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.bookings.confirmBooking(id, user)
   }
 
-  @Public()
+  @Roles(...BOOKING_ACTOR_ROLES)
   @Get(':id')
-  get(@Param('id') id: string) {
-    return this.bookings.getBooking(id)
+  get(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.bookings.getBooking(id, user)
   }
 
-  @Public()
+  @Roles(...BOOKING_ACTOR_ROLES)
   @Delete(':id')
-  cancel(@Param('id') id: string, @CurrentUser() user?: AuthUser) {
-    return this.bookings.cancelBooking(id, user?.id)
+  cancel(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.bookings.cancelBooking(id, user)
   }
 
   @Roles('operator_staff', 'operator_admin')

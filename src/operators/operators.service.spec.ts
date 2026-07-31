@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common'
 import { OperatorStatus } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
+import { RequestContext } from '../common/context/request-context'
 import { UNCLAIMED_OPERATOR_ID } from '../ingestion/ingestion.constants'
 import type { PrismaService } from '../prisma/prisma.service'
 import { OperatorsService } from './operators.service'
@@ -31,12 +32,16 @@ describe('OperatorsService', () => {
       findUnique: jest.Mock
       updateMany: jest.Mock
     }
+    auditLog: { create: jest.Mock }
+    $transaction: jest.Mock
   }
   let service: OperatorsService
 
   beforeEach(() => {
     prisma = {
       parkingOperator: { findMany: jest.fn(), findUnique: jest.fn(), updateMany: jest.fn() },
+      auditLog: { create: jest.fn() },
+      $transaction: jest.fn(async (cb: (tx: typeof prisma) => unknown) => cb(prisma)),
     }
     service = new OperatorsService(prisma as unknown as PrismaService)
   })
@@ -86,7 +91,14 @@ describe('OperatorsService', () => {
         status: OperatorStatus.VERIFIED,
         createdAt: new Date('2026-01-02'),
         facilities: [
-          { id: 'f-1', name: 'Lot 1', address: 'Odos 1', isActive: true, isVerified: true, kind: 'BUSINESS' },
+          {
+            id: 'f-1',
+            name: 'Lot 1',
+            address: 'Odos 1',
+            isActive: true,
+            isVerified: true,
+            kind: 'BUSINESS',
+          },
         ],
         tariffPlans: [{ id: 'p-1', name: 'Standard', isActive: true, isDefault: true }],
         memberships: [
@@ -112,10 +124,24 @@ describe('OperatorsService', () => {
         memberCount: 1,
         createdAt: new Date('2026-01-02'),
         facilities: [
-          { id: 'f-1', name: 'Lot 1', address: 'Odos 1', isActive: true, isVerified: true, kind: 'BUSINESS' },
+          {
+            id: 'f-1',
+            name: 'Lot 1',
+            address: 'Odos 1',
+            isActive: true,
+            isVerified: true,
+            kind: 'BUSINESS',
+          },
         ],
         plans: [{ id: 'p-1', name: 'Standard', isActive: true, isDefault: true }],
-        members: [{ userId: 'u-1', email: 'admin@biz-a.gr', role: 'ADMIN', createdAt: new Date('2026-01-03') }],
+        members: [
+          {
+            userId: 'u-1',
+            email: 'admin@biz-a.gr',
+            role: 'ADMIN',
+            createdAt: new Date('2026-01-03'),
+          },
+        ],
       })
     })
 
@@ -177,6 +203,34 @@ describe('OperatorsService', () => {
       await expect(service.suspend(operatorUser, 'op-a')).rejects.toBeInstanceOf(ForbiddenException)
       expect(prisma.parkingOperator.updateMany).not.toHaveBeenCalled()
     })
+
+    it('writes exactly one operator.suspended audit row for the actor on success', async () => {
+      prisma.parkingOperator.updateMany.mockResolvedValue({ count: 1 })
+
+      await RequestContext.run({ ip: '203.0.113.9' }, () => service.suspend(platformUser, 'op-a'))
+
+      expect(prisma.auditLog.create).toHaveBeenCalledTimes(1)
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actorId: 'admin-1',
+          actorRole: 'platform_admin',
+          action: 'operator.suspended',
+          entityType: 'ParkingOperator',
+          entityId: 'op-a',
+          ipAddress: '203.0.113.9',
+        },
+      })
+    })
+
+    it('writes no audit row when the transition is rejected', async () => {
+      prisma.parkingOperator.updateMany.mockResolvedValue({ count: 0 })
+      prisma.parkingOperator.findUnique.mockResolvedValue({ status: OperatorStatus.PENDING })
+
+      await expect(service.suspend(platformUser, 'op-a')).rejects.toBeInstanceOf(
+        OperatorNotSuspendableError,
+      )
+      expect(prisma.auditLog.create).not.toHaveBeenCalled()
+    })
   })
 
   describe('reactivate', () => {
@@ -217,6 +271,34 @@ describe('OperatorsService', () => {
         ForbiddenException,
       )
       expect(prisma.parkingOperator.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('writes exactly one operator.reactivated audit row for the actor on success', async () => {
+      prisma.parkingOperator.updateMany.mockResolvedValue({ count: 1 })
+
+      await service.reactivate(platformUser, 'op-a')
+
+      expect(prisma.auditLog.create).toHaveBeenCalledTimes(1)
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actorId: 'admin-1',
+          actorRole: 'platform_admin',
+          action: 'operator.reactivated',
+          entityType: 'ParkingOperator',
+          entityId: 'op-a',
+          ipAddress: null,
+        },
+      })
+    })
+
+    it('writes no audit row when the transition is rejected', async () => {
+      prisma.parkingOperator.updateMany.mockResolvedValue({ count: 0 })
+      prisma.parkingOperator.findUnique.mockResolvedValue({ status: OperatorStatus.VERIFIED })
+
+      await expect(service.reactivate(platformUser, 'op-a')).rejects.toBeInstanceOf(
+        OperatorNotReactivatableError,
+      )
+      expect(prisma.auditLog.create).not.toHaveBeenCalled()
     })
   })
 })

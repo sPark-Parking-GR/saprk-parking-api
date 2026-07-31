@@ -43,6 +43,15 @@ export class FacilityNotFoundError extends DomainError {
   }
 }
 
+// Facility exists but fails a hold-time eligibility check (inactive, unverified, or
+// not a bookable kind) — a state conflict on a real resource, grouped with
+// NoAvailabilityError rather than FacilityNotFoundError which means "no such id".
+export class FacilityNotBookableError extends DomainError {
+  constructor(facilityId: string) {
+    super(`Facility ${facilityId} is not available for booking`)
+  }
+}
+
 export class TariffPlanNotFoundError extends DomainError {
   constructor(id: string) {
     super(`Tariff plan ${id} not found`)
@@ -67,6 +76,16 @@ export class DefaultTariffRequiredError extends DomainError {
   }
 }
 
+// Thrown only after the refund intent (REFUND_PENDING + Refund row) is durably
+// recorded, so the caller can safely retry cancelBooking to resume the refund.
+export class RefundFailedError extends DomainError {
+  constructor(bookingId: string) {
+    super(
+      `Refund for booking ${bookingId} could not be completed. The request is recorded and can be retried.`,
+    )
+  }
+}
+
 export class IdempotencyConflictError extends DomainError {
   constructor(key: string) {
     super(`A booking with idempotency key ${key} already exists`)
@@ -76,6 +95,12 @@ export class IdempotencyConflictError extends DomainError {
 export class OperatorContextRequiredError extends DomainError {
   constructor() {
     super('No operator context for this user')
+  }
+}
+
+export class OperatorTargetRequiredError extends DomainError {
+  constructor() {
+    super('This account belongs to several operators. Set operatorId to choose one.')
   }
 }
 
@@ -94,5 +119,54 @@ export class FacilityFieldForbiddenError extends DomainError {
 export class FacilityAlreadyExistsError extends DomainError {
   constructor(operatorId: string) {
     super(`Operator ${operatorId} already has a facility. Each operator may own only one.`)
+  }
+}
+
+// Access codes carry 128 bits of entropy, so repeated collisions are not bad luck —
+// they mean the generator or the uniqueness constraint is broken. Surfaced as a
+// transient failure rather than a raw P2002 on a column no caller knows about.
+export class AccessCodeGenerationError extends DomainError {
+  constructor(attempts: number) {
+    super(`Could not allocate a unique access code after ${attempts} attempts. Retry shortly.`)
+  }
+}
+
+export class FacilityHasActiveBookingsError extends DomainError {
+  constructor(facilityId: string, count: number) {
+    super(
+      `Facility ${facilityId} has ${count} booking(s) still to be honoured. Deactivate with force to cancel and refund them.`,
+    )
+  }
+}
+
+// A caller asked for a report on an operator they do not belong to. The message names no
+// operator and reads the same whether or not the id exists, so the endpoint cannot be used
+// to enumerate tenants.
+export class AnalyticsScopeForbiddenError extends DomainError {
+  constructor() {
+    super('This account cannot report on the requested operator.')
+  }
+}
+
+// Amounts are integer minor units of a currency, so summing across currencies produces a
+// number that means nothing. The set is refused rather than silently added up; the caller
+// has to narrow the range or the operator until one currency remains.
+export class MixedCurrencyAnalyticsError extends DomainError {
+  constructor(currencies: string[]) {
+    super(
+      `Cannot aggregate across currencies (${currencies.join(', ')}). Narrow the range or the operator.`,
+    )
+  }
+}
+
+// Some bookings were cancelled and refunded before another one failed, so the facility
+// stays active on purpose: the caller must see that the shutdown is incomplete rather
+// than find a deactivated facility with a booking nobody refunded. Retrying resumes —
+// the bookings already cancelled no longer block.
+export class FacilityDeactivationFailedError extends DomainError {
+  constructor(facilityId: string, cancelled: number, failed: number) {
+    super(
+      `Facility ${facilityId} was not deactivated: ${cancelled} booking(s) cancelled and refunded, ${failed} failed. The facility stays active; retry to resume.`,
+    )
   }
 }

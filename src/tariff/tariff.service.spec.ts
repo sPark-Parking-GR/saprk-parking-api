@@ -3,6 +3,7 @@ import { TariffService } from './tariff.service'
 import { priceStay } from './pricing-engine'
 import type { CompiledPlan, CompiledCap } from './tariff.types'
 import type { OperatorScopeService } from '../common/authz/operator-scope.service'
+import { DomainError } from '../common/errors/domain.errors'
 import type { PrismaService } from '../prisma/prisma.service'
 
 const CAR = 'CAR' as VehicleType
@@ -62,15 +63,13 @@ const ALL_DAY: WindowInput = { id: 'wAll', label: 'All day', startMinute: 0, end
 describe('pricing-engine.priceStay', () => {
   it('prices a fixed hourly rate (PER_BLOCK 60)', () => {
     const p = plan({
-      tiers: [{ id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 }],
+      tiers: [
+        { id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 },
+      ],
       windows: [ALL_DAY],
       prices: { 't|wAll': 200 },
     })
-    const r = priceStay(
-      new Date('2026-06-18T10:00:00Z'),
-      new Date('2026-06-18T12:00:00Z'),
-      p,
-    )
+    const r = priceStay(new Date('2026-06-18T10:00:00Z'), new Date('2026-06-18T12:00:00Z'), p)
     expect(r.totalCents).toBe(400)
     expect(r.lineItems).toHaveLength(1)
     expect(r.lineItems[0]).toMatchObject({ unitPriceCents: 200, quantity: 2, subtotalCents: 400 })
@@ -78,15 +77,13 @@ describe('pricing-engine.priceStay', () => {
 
   it('partial hour rounds up to a full block', () => {
     const p = plan({
-      tiers: [{ id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 }],
+      tiers: [
+        { id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 },
+      ],
       windows: [ALL_DAY],
       prices: { 't|wAll': 200 },
     })
-    const r = priceStay(
-      new Date('2026-06-18T10:00:00Z'),
-      new Date('2026-06-18T11:01:00Z'),
-      p,
-    )
+    const r = priceStay(new Date('2026-06-18T10:00:00Z'), new Date('2026-06-18T11:01:00Z'), p)
     expect(r.totalCents).toBe(400)
     expect(r.lineItems[0]!.quantity).toBe(2)
   })
@@ -100,11 +97,7 @@ describe('pricing-engine.priceStay', () => {
       windows: [ALL_DAY],
       prices: { 'flat|wAll': 150, 'hour|wAll': 200 },
     })
-    const r = priceStay(
-      new Date('2026-06-18T10:00:00Z'),
-      new Date('2026-06-18T11:30:00Z'),
-      p,
-    )
+    const r = priceStay(new Date('2026-06-18T10:00:00Z'), new Date('2026-06-18T11:30:00Z'), p)
     expect(r.totalCents).toBe(150 + 200)
     expect(r.lineItems).toHaveLength(2)
     expect(r.lineItems[0]).toMatchObject({ quantity: 1, subtotalCents: 150 })
@@ -115,23 +108,17 @@ describe('pricing-engine.priceStay', () => {
     const p = plan({
       graceMinutes: 15,
       incrementMinutes: 60,
-      tiers: [{ id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 }],
+      tiers: [
+        { id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 },
+      ],
       windows: [ALL_DAY],
       prices: { 't|wAll': 200 },
     })
-    const within = priceStay(
-      new Date('2026-06-18T10:00:00Z'),
-      new Date('2026-06-18T10:15:00Z'),
-      p,
-    )
+    const within = priceStay(new Date('2026-06-18T10:00:00Z'), new Date('2026-06-18T10:15:00Z'), p)
     expect(within.totalCents).toBe(0)
     expect(within.lineItems).toHaveLength(0)
 
-    const over = priceStay(
-      new Date('2026-06-18T10:00:00Z'),
-      new Date('2026-06-18T10:30:00Z'),
-      p,
-    )
+    const over = priceStay(new Date('2026-06-18T10:00:00Z'), new Date('2026-06-18T10:30:00Z'), p)
     expect(over.totalCents).toBe(200)
   })
 
@@ -142,27 +129,21 @@ describe('pricing-engine.priceStay', () => {
       windows: [ALL_DAY],
       prices: { 't|wAll': 5 },
     })
-    const r = priceStay(
-      new Date('2026-06-18T10:00:00Z'),
-      new Date('2026-06-18T10:07:00Z'),
-      p,
-    )
+    const r = priceStay(new Date('2026-06-18T10:00:00Z'), new Date('2026-06-18T10:07:00Z'), p)
     expect(r.billableMinutes).toBe(15)
     expect(r.totalCents).toBe(75)
   })
 
   it('clamps to a daily cap (STAY scope) and appends a negative cap adjustment', () => {
     const p = plan({
-      tiers: [{ id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 }],
+      tiers: [
+        { id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 },
+      ],
       windows: [ALL_DAY],
       prices: { 't|wAll': 200 },
       caps: [{ windowMinutes: 1440, capCents: 1500, scope: CapScope.STAY }],
     })
-    const r = priceStay(
-      new Date('2026-06-18T08:00:00Z'),
-      new Date('2026-06-18T20:00:00Z'),
-      p,
-    )
+    const r = priceStay(new Date('2026-06-18T08:00:00Z'), new Date('2026-06-18T20:00:00Z'), p)
     expect(r.totalCents).toBe(1500)
     const adj = r.lineItems[r.lineItems.length - 1]!
     expect(adj.label).toBe('Cap adjustment')
@@ -174,7 +155,9 @@ describe('pricing-engine.priceStay', () => {
     // Day window 06:00-22:00, Night 22:00-06:00 (wrap). Athens summer = UTC+3.
     const p = plan({
       timezone: 'Europe/Athens',
-      tiers: [{ id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 }],
+      tiers: [
+        { id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 },
+      ],
       windows: [
         { id: 'day', label: 'Day', startMinute: 360, endMinute: 1320 },
         { id: 'night', label: 'Night', startMinute: 1320, endMinute: 360 },
@@ -182,11 +165,7 @@ describe('pricing-engine.priceStay', () => {
       prices: { 't|day': 300, 't|night': 100 },
     })
     // 20:00 -> 24:00 local (UTC 17:00 -> 21:00): 2h day (20-22) + 2h night (22-24).
-    const r = priceStay(
-      new Date('2026-06-18T17:00:00Z'),
-      new Date('2026-06-18T21:00:00Z'),
-      p,
-    )
+    const r = priceStay(new Date('2026-06-18T17:00:00Z'), new Date('2026-06-18T21:00:00Z'), p)
     expect(r.totalCents).toBe(2 * 300 + 2 * 100)
     expect(r.lineItems).toHaveLength(2)
     expect(r.lineItems[0]).toMatchObject({ label: 'Day', quantity: 2, subtotalCents: 600 })
@@ -197,7 +176,9 @@ describe('pricing-engine.priceStay', () => {
     // Day 06:00-22:00, Night otherwise. 90-min blocks. Stay 21:00-00:00 local.
     const p = plan({
       timezone: 'Europe/Athens',
-      tiers: [{ id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 90 }],
+      tiers: [
+        { id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 90 },
+      ],
       windows: [
         { id: 'day', label: 'Day', startMinute: 360, endMinute: 1320 },
         { id: 'night', label: 'Night', startMinute: 1320, endMinute: 360 },
@@ -206,11 +187,7 @@ describe('pricing-engine.priceStay', () => {
     })
     // UTC 18:00 -> 21:00 = local 21:00 -> 00:00. Block1 starts 21:00 (day, straddles
     // 22:00 but priced day), block2 starts 22:30 (night).
-    const r = priceStay(
-      new Date('2026-06-18T18:00:00Z'),
-      new Date('2026-06-18T21:00:00Z'),
-      p,
-    )
+    const r = priceStay(new Date('2026-06-18T18:00:00Z'), new Date('2026-06-18T21:00:00Z'), p)
     expect(r.totalCents).toBe(300 + 100)
     expect(r.lineItems[0]).toMatchObject({ label: 'Day', subtotalCents: 300 })
     expect(r.lineItems[1]).toMatchObject({ label: 'Night', subtotalCents: 100 })
@@ -263,7 +240,9 @@ describe('pricing-engine.priceStay', () => {
 
   it('throws when no window matches (incomplete schedule)', () => {
     const p = plan({
-      tiers: [{ id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 }],
+      tiers: [
+        { id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 },
+      ],
       windows: [{ id: 'day', label: 'Day', startMinute: 360, endMinute: 1320 }],
       prices: { 't|day': 200 },
     })
@@ -275,7 +254,9 @@ describe('pricing-engine.priceStay', () => {
 
   it('throws when a (tier,window) rate is missing', () => {
     const p = plan({
-      tiers: [{ id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 }],
+      tiers: [
+        { id: 't', fromMinute: 0, toMinute: null, unit: RateUnit.PER_BLOCK, blockMinutes: 60 },
+      ],
       windows: [ALL_DAY],
       prices: {},
     })
@@ -339,7 +320,11 @@ describe('TariffService.computeTotalsByFacility', () => {
   }
 
   function facilityNoRow(id: string, operatorId = 'op1') {
-    return { id, operatorId, tariffAssignments: [] as { vehicleType: VehicleType; tariffPlan: unknown }[] }
+    return {
+      id,
+      operatorId,
+      tariffAssignments: [] as { vehicleType: VehicleType; tariffPlan: unknown }[],
+    }
   }
 
   beforeEach(() => {
@@ -474,5 +459,127 @@ describe('TariffService.computeTotalsByFacility', () => {
     expect(totals.get('f1')).toBe(800)
     expect(totals.get('f2')).toBe(800)
     expect(totals.get('f3')).toBe(1200)
+  })
+})
+
+describe('TariffService.computeQuote', () => {
+  it('rejects endsAt not after startsAt with a DomainError (400), not a raw Error', async () => {
+    const prisma = { facility: { findFirst: jest.fn() } }
+    const service = new TariffService(
+      prisma as unknown as PrismaService,
+      {} as unknown as OperatorScopeService,
+    )
+
+    const badStartsAt = new Date('2026-06-18T10:00:00Z')
+    const badEndsAt = new Date('2026-06-18T09:00:00Z')
+
+    await expect(
+      service.computeQuote({
+        facilityId: 'f1',
+        startsAt: badStartsAt,
+        endsAt: badEndsAt,
+        vehicleType: CAR,
+      }),
+    ).rejects.toBeInstanceOf(DomainError)
+    expect(prisma.facility.findFirst).not.toHaveBeenCalled()
+  })
+})
+
+describe('TariffService.priceWithPinnedPlan', () => {
+  let prisma: { tariffPlan: { findFirst: jest.Mock } }
+  let service: TariffService
+
+  const startsAt = new Date('2026-06-18T10:00:00Z')
+  const endsAt = new Date('2026-06-18T13:00:00Z')
+
+  function pinnedPlan(hourlyCents: number, version: number) {
+    return {
+      id: 'p',
+      operatorId: 'op1',
+      isActive: true,
+      validFrom: null,
+      validTo: null,
+      vehicleTypes: [] as VehicleType[],
+      version,
+      timezone: 'Europe/Athens',
+      graceMinutes: 0,
+      incrementMinutes: 60,
+      tiers: [
+        {
+          id: 't',
+          fromMinute: 0,
+          toMinute: null,
+          unit: RateUnit.PER_BLOCK,
+          blockMinutes: 60,
+          rates: [{ tierId: 't', windowId: 'w', priceCents: hourlyCents, currency: 'EUR' }],
+        },
+      ],
+      windows: [
+        {
+          id: 'w',
+          label: 'All day',
+          dayMask: 127,
+          startMinute: 0,
+          endMinute: 1440,
+          rates: [{ tierId: 't', windowId: 'w', priceCents: hourlyCents, currency: 'EUR' }],
+        },
+      ],
+      caps: [],
+    }
+  }
+
+  beforeEach(() => {
+    prisma = { tariffPlan: { findFirst: jest.fn() } }
+    service = new TariffService(
+      prisma as unknown as PrismaService,
+      {} as unknown as OperatorScopeService,
+    )
+  })
+
+  it('queries the exact (id, version) pin and prices the span against it', async () => {
+    prisma.tariffPlan.findFirst.mockResolvedValue(pinnedPlan(400, 3))
+
+    const result = await service.priceWithPinnedPlan({
+      planId: 'p',
+      planVersion: 3,
+      startsAt,
+      endsAt,
+    })
+
+    expect(prisma.tariffPlan.findFirst.mock.calls[0]![0].where).toEqual({ id: 'p', version: 3 })
+    expect(result).toEqual({ totalCents: 1200, currency: 'EUR', billableMinutes: 180 })
+  })
+
+  it('returns null for a pin the live plan no longer matches', async () => {
+    // findFirst filters on version, so a bumped plan simply does not match the pin.
+    prisma.tariffPlan.findFirst.mockResolvedValue(null)
+
+    await expect(
+      service.priceWithPinnedPlan({ planId: 'p', planVersion: 3, startsAt, endsAt }),
+    ).resolves.toBeNull()
+  })
+
+  it('prices a retired plan: applicability gates new quotes, not settled ones', async () => {
+    prisma.tariffPlan.findFirst.mockResolvedValue({
+      ...pinnedPlan(400, 3),
+      isActive: false,
+      validTo: new Date('2026-06-01T00:00:00Z'),
+    })
+
+    const result = await service.priceWithPinnedPlan({
+      planId: 'p',
+      planVersion: 3,
+      startsAt,
+      endsAt,
+    })
+
+    expect(result?.totalCents).toBe(1200)
+  })
+
+  it('rejects a non-positive span with a DomainError before touching the database', async () => {
+    await expect(
+      service.priceWithPinnedPlan({ planId: 'p', planVersion: 3, startsAt: endsAt, endsAt }),
+    ).rejects.toBeInstanceOf(DomainError)
+    expect(prisma.tariffPlan.findFirst).not.toHaveBeenCalled()
   })
 })

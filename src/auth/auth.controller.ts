@@ -1,20 +1,35 @@
 import { Body, Controller, Headers, HttpCode, Post, UnauthorizedException } from '@nestjs/common'
 import { Throttle } from '@nestjs/throttler'
+import type { AuthUser } from '@spark/types'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
+import { AccountDeletionService } from './account-deletion.service'
 import { AuthService } from './auth.service'
+import { PasswordResetService } from './password-reset.service'
+import { CurrentUser } from './decorators/current-user.decorator'
 import { Public } from './decorators/public.decorator'
+import { Roles } from './decorators/roles.decorator'
 import {
+  deleteAccountSchema,
+  forgotPasswordSchema,
   refreshSchema,
+  resetPasswordSchema,
   signInSchema,
   signUpSchema,
+  type DeleteAccountDto,
+  type ForgotPasswordDto,
   type RefreshDto,
+  type ResetPasswordDto,
   type SignInDto,
   type SignUpDto,
 } from './dto/auth.dto'
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly passwordReset: PasswordResetService,
+    private readonly accountDeletion: AccountDeletionService,
+  ) {}
 
   @Public()
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
@@ -39,6 +54,28 @@ export class AuthController {
     return this.auth.refreshToken(body.refreshToken)
   }
 
+  // 204 unconditionally, and never the token: whether the address has an account is not
+  // something an unauthenticated caller gets to learn from status, body or timing.
+  @Public()
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @HttpCode(204)
+  @Post('forgot-password')
+  async forgotPassword(
+    @Body(new ZodValidationPipe(forgotPasswordSchema)) body: ForgotPasswordDto,
+  ): Promise<void> {
+    await this.passwordReset.request(body.email)
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @HttpCode(204)
+  @Post('reset-password')
+  async resetPassword(
+    @Body(new ZodValidationPipe(resetPasswordSchema)) body: ResetPasswordDto,
+  ): Promise<void> {
+    await this.passwordReset.reset(body.token, body.password)
+  }
+
   @Public()
   @HttpCode(204)
   @Post('sign-out')
@@ -46,5 +83,25 @@ export class AuthController {
     const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined
     if (!token) throw new UnauthorizedException('Missing authentication token')
     await this.auth.signOut(token)
+  }
+
+  // Self-service account deletion, required in-app by App Store Review Guideline 5.1.1(v).
+  // Not @Public: the guard must resolve the caller, because the account deleted is always
+  // the caller's own — there is no id in the request for anyone to tamper with. POST
+  // rather than DELETE so the password travels in a body; a URL or query string is the one
+  // place a credential must never be. Throttled to the same 3/min as forgot-password: a
+  // wrong password here is an authentication attempt like any other.
+  @Roles('user')
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @HttpCode(204)
+  @Post('delete-account')
+  async deleteAccount(
+    @CurrentUser() user: AuthUser,
+    @Headers('authorization') authorization: string | undefined,
+    @Body(new ZodValidationPipe(deleteAccountSchema)) body: DeleteAccountDto,
+  ): Promise<void> {
+    const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined
+    if (!token) throw new UnauthorizedException('Missing authentication token')
+    await this.accountDeletion.deleteOwnAccount(user, body.password, token)
   }
 }

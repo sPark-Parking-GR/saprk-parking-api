@@ -30,7 +30,7 @@ export class SweepProcessor extends WorkerHost {
 
   async process(job: Job<SweepDto>): Promise<void> {
     const regions = this.resolveRegions(job.data)
-    this.logger.log(`Sweep start: ${regions.length} region(s)`)
+    this.logger.log({ regions: regions.length }, 'Sweep start')
 
     for (const region of regions) {
       await this.ingestion.enqueueOsmTiles(region)
@@ -43,10 +43,7 @@ export class SweepProcessor extends WorkerHost {
     }
 
     const stats = await this.promotion.drainPending()
-    this.logger.log(
-      `Sweep done: ${stats.created} created, ${stats.merged} merged, ${stats.updated} updated, ` +
-        `${stats.duplicate} duplicate, ${stats.rejected} rejected`,
-    )
+    this.logger.log(stats, 'Sweep done')
   }
 
   // City names map to known bboxes; explicit regions pass through. Duplicate cities

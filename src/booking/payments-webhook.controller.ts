@@ -1,15 +1,9 @@
-import {
-  BadRequestException,
-  Controller,
-  Headers,
-  HttpCode,
-  Post,
-  Req,
-} from '@nestjs/common'
+import { BadRequestException, Controller, Headers, HttpCode, Post, Req } from '@nestjs/common'
 import type { FastifyRequest } from 'fastify'
+import type { PaymentWebhookEvent } from '@spark/types'
 import { Public } from '../auth/decorators/public.decorator'
 import { PaymentsService } from '../payments/payments.service'
-import { BookingService } from './booking.service'
+import { PaymentEventsService } from './payment-events.service'
 
 type RawBodyRequest = FastifyRequest & { rawBody?: Buffer }
 
@@ -17,7 +11,7 @@ type RawBodyRequest = FastifyRequest & { rawBody?: Buffer }
 export class PaymentsWebhookController {
   constructor(
     private readonly payments: PaymentsService,
-    private readonly bookings: BookingService,
+    private readonly paymentEvents: PaymentEventsService,
   ) {}
 
   @Public()
@@ -30,11 +24,16 @@ export class PaymentsWebhookController {
     const payload = request.rawBody
     if (!payload) throw new BadRequestException('Missing raw request body')
 
-    const event = this.payments.verifyWebhook(payload, signature ?? '')
-
-    if (event.status === 'succeeded' && event.providerPaymentId) {
-      await this.bookings.confirmByProviderPaymentId(event.providerPaymentId)
+    let event: PaymentWebhookEvent
+    try {
+      event = this.payments.verifyWebhook(payload, signature ?? '')
+    } catch {
+      // 400, not 500: an unverifiable payload will never verify on redelivery either,
+      // so asking the provider to retry it would loop forever.
+      throw new BadRequestException('Webhook signature verification failed')
     }
+
+    await this.paymentEvents.process(event)
 
     return { received: true }
   }

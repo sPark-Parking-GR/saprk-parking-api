@@ -30,9 +30,10 @@ describe('RefreshService.refreshStale', () => {
     }
     prisma = {
       facility: {
-        findMany: jest.fn().mockResolvedValueOnce([
-          { id: 'f1', googlePlaceId: 'P1', amenities: ['covered'] },
-        ]).mockResolvedValue([]),
+        findMany: jest
+          .fn()
+          .mockResolvedValueOnce([{ id: 'f1', googlePlaceId: 'P1', amenities: ['covered'] }])
+          .mockResolvedValue([]),
         update: jest.fn().mockResolvedValue({}),
         count: jest.fn().mockResolvedValue(0),
       },

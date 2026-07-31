@@ -11,11 +11,15 @@ import { PaymentsService } from './payments.service'
       provide: PAYMENT_CONTEXT_TOKEN,
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
-        const provider = (config.get<string>('PAYMENT_PROVIDER') ?? 'mock') as PaymentProviderConfig['provider']
+        const provider = (config.get<string>('PAYMENT_PROVIDER') ??
+          'mock') as PaymentProviderConfig['provider']
 
         switch (provider) {
           case 'mock':
-            return createPaymentContext({ provider: 'mock', config: {} })
+            return createPaymentContext({
+              provider: 'mock',
+              config: { webhookSecret: config.getOrThrow('MOCK_WEBHOOK_SECRET') },
+            })
           case 'stripe':
             return createPaymentContext({
               provider: 'stripe',

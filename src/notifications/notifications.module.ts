@@ -6,7 +6,8 @@ import { NOTIFICATIONS_EMAIL_CONTEXT_TOKEN } from './notifications.constants'
 import { NotificationsService } from './notifications.service'
 
 function resolveEmailConfig(config: ConfigService): EmailProviderConfig {
-  const provider = (config.get<string>('EMAIL_PROVIDER') ?? 'console') as EmailProviderConfig['provider']
+  const provider = (config.get<string>('EMAIL_PROVIDER') ??
+    'console') as EmailProviderConfig['provider']
 
   switch (provider) {
     case 'console':

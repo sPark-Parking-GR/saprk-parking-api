@@ -1,6 +1,7 @@
 import { ForbiddenException, Injectable } from '@nestjs/common'
-import { OperatorStatus } from '@prisma/client'
+import { OperatorStatus, type Prisma } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
+import { RequestContext } from '../common/context/request-context'
 import { UNCLAIMED_OPERATOR_ID } from '../ingestion/ingestion.constants'
 import { PrismaService } from '../prisma/prisma.service'
 import {
@@ -46,7 +47,14 @@ export class OperatorsService {
       where: { id },
       include: {
         facilities: {
-          select: { id: true, name: true, address: true, isActive: true, isVerified: true, kind: true },
+          select: {
+            id: true,
+            name: true,
+            address: true,
+            isActive: true,
+            isVerified: true,
+            kind: true,
+          },
           orderBy: { createdAt: 'desc' },
         },
         tariffPlans: {
@@ -82,9 +90,13 @@ export class OperatorsService {
   async suspend(actor: AuthUser, id: string): Promise<void> {
     this.assertPlatformAdmin(actor, 'suspend operators')
 
-    const { count } = await this.prisma.parkingOperator.updateMany({
-      where: { id, status: OperatorStatus.VERIFIED },
-      data: { status: OperatorStatus.SUSPENDED },
+    const count = await this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.parkingOperator.updateMany({
+        where: { id, status: OperatorStatus.VERIFIED },
+        data: { status: OperatorStatus.SUSPENDED },
+      })
+      if (count > 0) await this.recordAudit(tx, actor, 'operator.suspended', id)
+      return count
     })
     if (count === 0) await this.explainFailedTransition(id, OperatorStatus.VERIFIED)
   }
@@ -94,9 +106,13 @@ export class OperatorsService {
 
     // verifiedAt is left untouched: it records the original verification, not this
     // restoration of access.
-    const { count } = await this.prisma.parkingOperator.updateMany({
-      where: { id, status: OperatorStatus.SUSPENDED },
-      data: { status: OperatorStatus.VERIFIED },
+    const count = await this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.parkingOperator.updateMany({
+        where: { id, status: OperatorStatus.SUSPENDED },
+        data: { status: OperatorStatus.VERIFIED },
+      })
+      if (count > 0) await this.recordAudit(tx, actor, 'operator.reactivated', id)
+      return count
     })
     if (count === 0) await this.explainFailedTransition(id, OperatorStatus.SUSPENDED)
   }
@@ -107,6 +123,24 @@ export class OperatorsService {
     if (actor.role !== 'platform_admin') {
       throw new ForbiddenException(`Only platform admins may ${action}`)
     }
+  }
+
+  private async recordAudit(
+    tx: Prisma.TransactionClient,
+    actor: AuthUser,
+    action: string,
+    operatorId: string,
+  ): Promise<void> {
+    await tx.auditLog.create({
+      data: {
+        actorId: actor.id,
+        actorRole: actor.role,
+        action,
+        entityType: 'ParkingOperator',
+        entityId: operatorId,
+        ipAddress: RequestContext.getIp(),
+      },
+    })
   }
 
   private async explainFailedTransition(id: string, required: OperatorStatus): Promise<never> {

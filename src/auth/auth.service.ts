@@ -1,8 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common'
 import type { AuthContext } from '@spark/auth'
-import type { AuthResult, SignInCredentials, SignUpData, TokenVerificationResult } from '@spark/types'
+import type { AuthResult, SignInCredentials, TokenVerificationResult } from '@spark/types'
 import { OperatorStatusService } from '../common/authz/operator-status.service'
 import { AUTH_CONTEXT_TOKEN } from './auth.constants'
+import type { SignUpDto } from './dto/auth.dto'
 
 @Injectable()
 export class AuthService {
@@ -21,8 +22,11 @@ export class AuthService {
     return result
   }
 
-  signUp(data: SignUpData): Promise<AuthResult> {
-    return this.auth.signUp(data)
+  // Role is pinned here rather than passed through, so no caller of this method can ever
+  // elevate. The provider-level SignUpData still allows 'operator_admin' because the
+  // invite flow legitimately needs it — that path calls the provider directly.
+  signUp(data: SignUpDto): Promise<AuthResult> {
+    return this.auth.signUp({ ...data, role: 'user' })
   }
 
   signOut(accessToken: string): Promise<void> {

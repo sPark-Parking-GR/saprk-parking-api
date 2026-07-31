@@ -43,6 +43,13 @@ enum InviteStatus {
   REVOKED
 }
 
+// The two flows OperatorInvite serves. ONBOARDING mints a brand-new operator; MEMBER
+// attaches a person to one that already exists. See the model for why they share a table.
+enum OperatorInviteKind {
+  ONBOARDING
+  MEMBER
+}
+
 enum RateUnit {
   PER_MINUTE
   PER_BLOCK
@@ -142,14 +149,45 @@ model User {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
+  // Session revocation watermark: any token whose `iat` is not strictly newer than this
+  // is rejected. A timestamp rather than a version claim because Firebase ID tokens are
+  // minted by Google and we cannot add claims to them — but every JWT carries `iat`.
+  // Null means never revoked.
+  sessionsValidFrom DateTime?
+
+  // Self-service account deletion tombstone. Booking.userId is NOT NULL and deliberately
+  // not cascading, so removing the row would either fail or take the financial record with
+  // it; instead the row survives stripped of every identifying field (see
+  // AccountDeletionService) and this column records when. A tombstone never authenticates
+  // again, and its email is rewritten so the address is free to sign up afresh.
+  deletedAt DateTime?
+
   vehicles            Vehicle[]
   wallet              Wallet?
   bookings            Booking[]
   reviews             Review[]
   operatorMemberships OperatorMembership[]
   invitesSent         OperatorInvite[]
+  passwordResetTokens PasswordResetToken[]
 
   @@index([email])
+}
+
+// Single-use, short-lived password reset grant. Only the sha256 hash of the raw token is
+// stored, so a database leak yields nothing usable: the raw token exists solely inside the
+// email that was sent. Issued for both authjs- and Firebase-backed accounts — the reset is
+// completed by this API in either case, which is what lets it bump User.sessionsValidFrom.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Vehicle {
@@ -207,18 +245,22 @@ model ParkingOperator {
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
-  facilities     Facility[]
-  memberships    OperatorMembership[]
-  promotionPlans PromotionPlan[]
-  tariffPlans    TariffPlan[]
-  invites        OperatorInvite[]
+  facilities       Facility[]
+  memberships      OperatorMembership[]
+  promotionPlans   PromotionPlan[]
+  tariffPlans      TariffPlan[]
+  invites          OperatorInvite[]
+  ownershipPeriods FacilityOwnershipPeriod[]
 
   @@index([status])
 }
 
-// Platform-admin-issued B2B onboarding invite. Created alongside a PENDING operator;
-// accepting the single-use, expiring link provisions the operator's admin identity and
-// flips the operator to VERIFIED. Only the sha256 hash of the raw token is stored.
+// A single-use, expiring grant that provisions an identity and an OperatorMembership.
+// Only the sha256 hash of the raw token is stored; the raw token exists solely in the
+// email. Two flows share this table because they share everything that matters — token
+// issuance and rotation, the unique-hash lookup, the status lifecycle, expiry, revoke,
+// resend and accept-time provisioning — and splitting them would force validate()/accept()
+// to probe two tables by an opaque token. What differs is captured by `kind`.
 model OperatorInvite {
   id           String       @id @default(cuid())
   email        String
@@ -227,6 +269,17 @@ model OperatorInvite {
   // its REVOKED status) for audit visibility in the invites list, rather than cascading it
   // away with the operator.
   operatorId   String?
+  // ONBOARDING is platform-admin-issued and creates the PENDING shell operator alongside
+  // the invite; accepting it flips that operator to VERIFIED. MEMBER is issued by an
+  // operator's own admins and attaches to an operator that already exists, leaving its
+  // status alone. Explicit rather than inferred from the operator's status, because
+  // revoke() deletes an unclaimed shell operator and that destructive branch must key off
+  // a recorded fact, not a heuristic that a future PENDING-operator state could break.
+  kind         OperatorInviteKind @default(ONBOARDING)
+  // The membership role accept() provisions, and the User.role it signs the invitee up
+  // with. ONBOARDING is always ADMIN — a new operator's first member has to be able to
+  // administer it.
+  role         OperatorMemberRole @default(ADMIN)
   tokenHash    String       @unique
   status       InviteStatus @default(PENDING)
   invitedById  String
@@ -240,6 +293,7 @@ model OperatorInvite {
 
   @@index([email])
   @@index([status])
+  @@index([operatorId])
 }
 
 model OperatorMembership {
@@ -299,6 +353,7 @@ model Facility {
   bookings         Booking[]
   reviews          Review[]
   promotionPlan    PromotionPlan?
+  ownershipPeriods FacilityOwnershipPeriod[]
 
   // Generated geography point (kept in sync with lat/lng by the database). Managed
   // via raw SQL in the migration; Prisma treats it as an opaque column.
@@ -314,6 +369,28 @@ model Facility {
   // schema @@unique, so this stays a plain index here; the DB enforces the cap.
   @@index([operatorId])
   @@index([geog], type: Gist)
+}
+
+// Who owned a facility, and when. `Facility.operatorId` answers only "who owns it NOW",
+// so attributing historical money through it would silently rewrite every past payout the
+// moment a facility is reassigned. Revenue is therefore attributed through the period that
+// contains the payment's settlement instant, never through the facility's current owner.
+//
+// Half-open interval [from, to): `to` NULL means "still the owner". One open period per
+// facility is enforced by a partial unique index (see the migration).
+model FacilityOwnershipPeriod {
+  id         String    @id @default(cuid())
+  facilityId String
+  operatorId String
+  from       DateTime
+  to         DateTime?
+  createdAt  DateTime  @default(now())
+
+  facility Facility        @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  operator ParkingOperator @relation(fields: [operatorId], references: [id])
+
+  @@index([facilityId, from])
+  @@index([operatorId, from])
 }
 
 model FacilityImage {
@@ -465,30 +542,46 @@ model RateCap {
 // ─── Booking ──────────────────────────────────────────────────────────────────
 
 model Booking {
-  id               String        @id @default(cuid())
-  facilityId       String
-  userId           String?
-  vehicleId        String?
-  guestEmail       String?
-  guestPhone       String?
-  vehiclePlate     String
-  vehicleType      VehicleType
-  startsAt         DateTime
-  endsAt           DateTime
-  quotedPriceCents Int
-  finalPriceCents  Int?
-  currency         String        @default("EUR")
-  status           BookingStatus @default(PENDING_PAYMENT)
-  accessCode       String        @unique
-  qrTokenHash      String?       @unique
-  sourceChannel    SourceChannel @default(WEB)
-  idempotencyKey   String?       @unique
-  expiresAt        DateTime?
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  id                   String        @id @default(cuid())
+  facilityId           String
+  userId               String
+  vehicleId            String?
+  vehiclePlate         String
+  vehicleType          VehicleType
+  startsAt             DateTime
+  endsAt               DateTime
+  quotedPriceCents     Int
+  finalPriceCents      Int?
+  // Signed difference recorded when check-out reprices the stay
+  // (finalPriceCents - quotedPriceCents); null until a check-out reprices. No money
+  // moves with it: the original intent was captured at confirm, so an overstay needs a
+  // new intent and an early departure is a refund-policy decision. This column is the
+  // settlement queue for that explicit follow-up.
+  priceAdjustmentCents Int?
+  currency             String        @default("EUR")
+  status               BookingStatus @default(PENDING_PAYMENT)
+  // Human-dictatable identifier, not a secret: base32 over 16 random bytes using an
+  // alphabet with no visually ambiguous characters (see BookingService).
+  accessCode           String        @unique
+  // Independent 32-byte secret minted at confirm and NEVER derived from accessCode —
+  // that code is printed, read aloud and searchable, so anything derived from it would
+  // be forgeable by everyone who has ever seen it. Held in full rather than hashed
+  // because rotating QR codes are computed from it server-side.
+  qrSecret             String?       @unique
+  // The (plan, version) the quote was priced with, pinned so check-out reprices the stay
+  // against the same schedule that priced it instead of whatever is current. Deliberately
+  // not a foreign key: it records a historical pricing fact, and a FK would couple plan
+  // and operator lifecycle to every booking ever made.
+  tariffPlanId         String?
+  tariffPlanVersion    Int?
+  sourceChannel        SourceChannel @default(WEB)
+  idempotencyKey       String?       @unique
+  expiresAt            DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
 
   facility      Facility               @relation(fields: [facilityId], references: [id])
-  user          User?                  @relation(fields: [userId], references: [id])
+  user          User                   @relation(fields: [userId], references: [id])
   vehicle       Vehicle?               @relation(fields: [vehicleId], references: [id])
   statusHistory BookingStatusHistory[]
   payment       Payment?
@@ -531,6 +624,10 @@ model Payment {
 
   booking Booking @relation(fields: [bookingId], references: [id])
   refund  Refund?
+
+  // Every analytics read starts here: settled statuses over a settlement-instant range.
+  // Without it the aggregates are a sequential scan of every payment ever taken.
+  @@index([status, createdAt])
 }
 
 model Refund {
@@ -547,6 +644,22 @@ model Refund {
 
   booking Booking @relation(fields: [bookingId], references: [id])
   payment Payment @relation(fields: [paymentId], references: [id])
+}
+
+// Webhook delivery ledger. Providers redeliver events (retries on non-200, duplicates,
+// out-of-order); providerEventId's UNIQUE is the replay gate. The handler inserts this
+// row first, inside the same transaction as the state change it applies, so a redelivery
+// hits P2002 and is acknowledged without touching state, while a failed attempt rolls
+// the insert back and the provider's retry gets a clean second run.
+model WebhookEvent {
+  id              String    @id @default(cuid())
+  provider        String
+  providerEventId String    @unique
+  type            String
+  payload         Json?
+  outcome         String?
+  receivedAt      DateTime  @default(now())
+  processedAt     DateTime?
 }
 
 // ─── Promotion ────────────────────────────────────────────────────────────────

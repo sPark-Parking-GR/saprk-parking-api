@@ -27,6 +27,7 @@ interface UserRow {
   avatarUrl: string | null
   passwordHash: string | null
   firebaseUid: string | null
+  sessionsValidFrom: Date | null
 }
 
 export class PrismaAuthJsUserStore implements AuthJsUserStore {
@@ -59,6 +60,24 @@ export class PrismaAuthJsUserStore implements AuthJsUserStore {
     await this.prisma.user.delete({ where: { id } })
   }
 
+  async updatePassword(id: string, passwordHash: string): Promise<void> {
+    await this.prisma.user.update({ where: { id }, data: { passwordHash } })
+  }
+
+  // Compare-and-set, so an opportunistic rehash can only replace the exact hash it
+  // verified against. updateMany matching nothing is a no-op, which is the wanted
+  // outcome: whatever wrote in the meantime is newer and must survive.
+  async upgradePassword(id: string, expectedHash: string, passwordHash: string): Promise<void> {
+    await this.prisma.user.updateMany({
+      where: { id, passwordHash: expectedHash },
+      data: { passwordHash },
+    })
+  }
+
+  async revokeSessions(id: string, at: Date): Promise<void> {
+    await this.prisma.user.update({ where: { id }, data: { sessionsValidFrom: at } })
+  }
+
   private toRecord(user: UserRow): AuthJsUserRecord {
     return {
       id: user.id,
@@ -69,6 +88,7 @@ export class PrismaAuthJsUserStore implements AuthJsUserStore {
       avatarUrl: user.avatarUrl,
       passwordHash: user.passwordHash ?? '',
       firebaseUid: user.firebaseUid,
+      sessionsValidFrom: user.sessionsValidFrom,
     }
   }
 }

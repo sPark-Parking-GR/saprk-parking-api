@@ -112,8 +112,20 @@ export type BulkFacilityAction =
   | 'delete'
   | 'assignTariff'
 
+// One facility a bulk deactivation deliberately left ACTIVE, with the numbers behind the
+// decision. `cancelled` is non-zero only for 'refund_failed': those bookings really were
+// cancelled and refunded before a later one failed, and pretending otherwise would hide
+// money that has already moved.
+export interface BulkFacilitySkipped {
+  facilityId: string
+  reason: 'unhonoured_bookings' | 'refund_failed'
+  unhonoured: number
+  cancelled: number
+}
+
 export interface BulkFacilityResult {
   affected: number
+  skipped?: BulkFacilitySkipped[]
 }
 
 export interface FacilitySearchResult {

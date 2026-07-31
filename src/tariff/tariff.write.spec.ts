@@ -7,6 +7,7 @@ import {
   DefaultTariffRequiredError,
   DomainError,
   InvalidTariffScheduleError,
+  OperatorTargetRequiredError,
   TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import { validateRateGrid } from './schedule-validation'
@@ -149,7 +150,9 @@ describe('TariffService admin writes', () => {
 
   function setScope(s: OperatorScope) {
     scope.resolve.mockResolvedValue(s)
-    scope.scopeWhere.mockReturnValue(s.kind === 'platform' ? {} : { operatorId: s.operatorId })
+    scope.scopeWhere.mockReturnValue(
+      s.kind === 'platform' ? {} : { operatorId: { in: s.operatorIds } },
+    )
   }
 
   function persistedPlan(over: Record<string, unknown> = {}) {
@@ -271,7 +274,7 @@ describe('TariffService admin writes', () => {
   })
 
   it('cross-operator plan returns TariffPlanNotFoundError (no leak)', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.tariffPlan.findFirst.mockResolvedValue(null)
 
     await expect(service.getPlanDetail(operatorUser, 'plan-other')).rejects.toBeInstanceOf(
@@ -279,21 +282,23 @@ describe('TariffService admin writes', () => {
     )
     expect(prisma.tariffPlan.findFirst.mock.calls[0]![0].where).toEqual({
       id: 'plan-other',
-      operatorId: 'op1',
+      operatorId: { in: ['op1'] },
     })
   })
 
   it('list scopes to the caller operator', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.tariffPlan.findMany.mockResolvedValue([])
 
     await service.listPlans(operatorUser)
 
-    expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where).toEqual({ operatorId: 'op1' })
+    expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where).toEqual({
+      operatorId: { in: ['op1'] },
+    })
   })
 
   it('operator create infers operatorId from scope, persists and audits', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan())
 
     const result = await service.createPlan(operatorUser, dayNightDraft())
@@ -310,7 +315,7 @@ describe('TariffService admin writes', () => {
   })
 
   it('operator create ignores a body operatorId and uses its scope', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan())
 
     await service.createPlan(operatorUser, dayNightDraft({ operatorId: 'other-op' }))
@@ -350,8 +355,46 @@ describe('TariffService admin writes', () => {
     expect(prisma.tariffPlan.create).not.toHaveBeenCalled()
   })
 
+  it('multi-operator create without operatorId is refused, not guessed', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
+
+    await expect(service.createPlan(operatorUser, dayNightDraft())).rejects.toBeInstanceOf(
+      OperatorTargetRequiredError,
+    )
+    expect(prisma.tariffPlan.create).not.toHaveBeenCalled()
+  })
+
+  it('multi-operator create uses an operatorId the caller belongs to', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
+    prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan({ operatorId: 'op2' }))
+
+    await service.createPlan(operatorUser, dayNightDraft({ operatorId: 'op2' }))
+
+    expect(prisma.tariffPlan.create.mock.calls[0]![0].data.operatorId).toBe('op2')
+  })
+
+  it('multi-operator create rejects an operatorId outside the caller memberships', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
+
+    await expect(
+      service.createPlan(operatorUser, dayNightDraft({ operatorId: 'op3' })),
+    ).rejects.toBeInstanceOf(OperatorTargetRequiredError)
+    expect(prisma.tariffPlan.create).not.toHaveBeenCalled()
+  })
+
+  it('multi-operator list spans every membership and excludes any other operator', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
+    prisma.tariffPlan.findMany.mockResolvedValue([])
+
+    await service.listPlans(operatorUser)
+
+    expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where).toEqual({
+      operatorId: { in: ['op1', 'op2'] },
+    })
+  })
+
   it('create rejects an incomplete rate grid with InvalidTariffScheduleError', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     const draft = dayNightDraft({
       rates: [{ tierKey: 't', windowKey: 'day', priceCents: 300, currency: 'EUR' }],
     })
@@ -363,7 +406,7 @@ describe('TariffService admin writes', () => {
   })
 
   it('update bumps version and replaces the schedule', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     // Shared findFirst returns version 3, so the bump lands on 4.
     prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan({ version: 4 }))
 
@@ -379,7 +422,7 @@ describe('TariffService admin writes', () => {
   })
 
   it('update on a cross-operator plan returns 404', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.tariffPlan.findFirst.mockResolvedValue(null)
 
     await expect(
@@ -388,7 +431,7 @@ describe('TariffService admin writes', () => {
   })
 
   it('delete removes every assignment row for the plan and deactivates in one transaction', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
 
     await service.deletePlan(operatorUser, 'plan1')
 
@@ -410,7 +453,7 @@ describe('TariffService admin writes', () => {
   })
 
   it('getAssignments dedupes facilities that back the plan via multiple rows', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.tariffPlan.findFirst.mockResolvedValue({ id: 'plan1' })
     prisma.tariffPlan.findFirstOrThrow.mockResolvedValue({ operatorId: 'op1', isDefault: false })
     // f1 appears twice (e.g. a CAR row and a TRUCK row both point at plan1).
@@ -440,7 +483,7 @@ describe('TariffService admin writes', () => {
   })
 
   it('getAssignments computes implicitFacilityCount for a default plan', async () => {
-    setScope({ kind: 'operator', operatorId: 'op1' })
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.tariffPlan.findFirst.mockResolvedValue({ id: 'plan1' })
     prisma.tariffPlan.findFirstOrThrow.mockResolvedValue({ operatorId: 'op1', isDefault: true })
     // One explicit row on f1 (also the plan's own explicit usage).
@@ -479,7 +522,7 @@ describe('TariffService admin writes', () => {
 
   describe('createPlan default handling', () => {
     it('isDefault:true unsets any prior active default atomically before creating', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan({ isDefault: true }))
 
       await service.createPlan(operatorUser, dayNightDraft({ isDefault: true, vehicleTypes: [] }))
@@ -496,7 +539,7 @@ describe('TariffService admin writes', () => {
     })
 
     it('isDefault:true with non-empty vehicleTypes rejects (plain 400, no write)', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
 
       await expect(
         service.createPlan(operatorUser, dayNightDraft({ isDefault: true, vehicleTypes: ['car'] })),
@@ -507,7 +550,7 @@ describe('TariffService admin writes', () => {
     })
 
     it('isDefault:false does not touch existing defaults', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan())
 
       await service.createPlan(operatorUser, dayNightDraft())
@@ -516,8 +559,8 @@ describe('TariffService admin writes', () => {
       expect(tx.tariffPlan.create.mock.calls[0]![0].data.isDefault).toBe(false)
     })
 
-    it('auto-defaults an eligible plan when it is the operator\'s first (isDefault not requested)', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+    it("auto-defaults an eligible plan when it is the operator's first (isDefault not requested)", async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.count.mockResolvedValue(0)
       prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan({ isDefault: true }))
 
@@ -527,17 +570,20 @@ describe('TariffService admin writes', () => {
     })
 
     it('does not auto-default a restricted-vehicleTypes first plan', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.count.mockResolvedValue(0)
       prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan())
 
-      await service.createPlan(operatorUser, dayNightDraft({ isDefault: false, vehicleTypes: ['car'] }))
+      await service.createPlan(
+        operatorUser,
+        dayNightDraft({ isDefault: false, vehicleTypes: ['car'] }),
+      )
 
       expect(tx.tariffPlan.create.mock.calls[0]![0].data.isDefault).toBe(false)
     })
 
     it('does not auto-default when the operator already has a plan', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.count.mockResolvedValue(1)
       prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan())
 
@@ -562,7 +608,7 @@ describe('TariffService admin writes', () => {
     }
 
     it('update unsetting default rejects without a replacement when 2+ others remain', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.findFirst.mockResolvedValue(makeExistingDefault())
       tx.tariffPlan.findMany.mockResolvedValue([
         { id: 'p2', vehicleTypes: [] },
@@ -570,13 +616,17 @@ describe('TariffService admin writes', () => {
       ])
 
       await expect(
-        service.updatePlan(operatorUser, 'plan1', dayNightDraft({ isDefault: false, vehicleTypes: [] })),
+        service.updatePlan(
+          operatorUser,
+          'plan1',
+          dayNightDraft({ isDefault: false, vehicleTypes: [] }),
+        ),
       ).rejects.toBeInstanceOf(DefaultTariffRequiredError)
       expect(tx.tariffPlan.update).not.toHaveBeenCalled()
     })
 
     it('update unsetting default succeeds by promoting a valid replacement', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.findFirst.mockResolvedValue(makeExistingDefault())
       tx.tariffPlan.findMany.mockResolvedValue([
         { id: 'p2', vehicleTypes: [] },
@@ -598,7 +648,7 @@ describe('TariffService admin writes', () => {
     })
 
     it('no guard fires when only ONE other active plan remains (invariant exempt)', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.findFirst.mockResolvedValue(makeExistingDefault())
       // Deleting the default down to exactly one remaining active plan needs no replacement.
       tx.tariffPlan.findMany.mockResolvedValue([{ id: 'p2', vehicleTypes: [] }])
@@ -610,13 +660,11 @@ describe('TariffService admin writes', () => {
         where: { id: 'plan1' },
         data: { isActive: false },
       })
-      expect(
-        tx.tariffPlan.update.mock.calls.some((c) => c[0].where.id === 'p2'),
-      ).toBe(false)
+      expect(tx.tariffPlan.update.mock.calls.some((c) => c[0].where.id === 'p2')).toBe(false)
     })
 
     it('delete rejects without a replacement when 2+ others remain', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.findFirst.mockResolvedValue(makeExistingDefault())
       tx.tariffPlan.findMany.mockResolvedValue([
         { id: 'p2', vehicleTypes: [] },
@@ -630,7 +678,7 @@ describe('TariffService admin writes', () => {
     })
 
     it('delete rejects a replacement candidate whose vehicleTypes is non-empty', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.findFirst.mockResolvedValue(makeExistingDefault())
       tx.tariffPlan.findMany.mockResolvedValue([
         { id: 'p2', vehicleTypes: ['CAR'] },
@@ -644,7 +692,7 @@ describe('TariffService admin writes', () => {
     })
 
     it('delete rejects an unknown replacement candidate id', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.findFirst.mockResolvedValue(makeExistingDefault())
       tx.tariffPlan.findMany.mockResolvedValue([
         { id: 'p2', vehicleTypes: [] },
@@ -657,7 +705,7 @@ describe('TariffService admin writes', () => {
     })
 
     it('translates a P2002 on the replacement promotion into DefaultTariffRequiredError (race)', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.findFirst.mockResolvedValue(makeExistingDefault())
       tx.tariffPlan.findMany.mockResolvedValue([
         { id: 'p2', vehicleTypes: [] },
@@ -681,7 +729,7 @@ describe('TariffService admin writes', () => {
     })
 
     it('skips the guard entirely when the edited plan is not the active default', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.findFirst.mockResolvedValue(makeExistingDefault({ isDefault: false }))
 
       await service.deletePlan(operatorUser, 'plan1')
@@ -690,8 +738,8 @@ describe('TariffService admin writes', () => {
       expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalled()
     })
 
-    it('update promoting a not-yet-default plan unsets the operator\'s current default first', async () => {
-      setScope({ kind: 'operator', operatorId: 'op1' })
+    it("update promoting a not-yet-default plan unsets the operator's current default first", async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
       tx.tariffPlan.findFirst.mockResolvedValue(
         makeExistingDefault({ id: 'plan2', isDefault: false }),
       )
@@ -739,8 +787,8 @@ describe('TariffService.simulate', () => {
   beforeEach(() => {
     prisma = {}
     scope = {
-      resolve: jest.fn().mockResolvedValue({ kind: 'operator', operatorId: 'op1' }),
-      scopeWhere: jest.fn().mockReturnValue({ operatorId: 'op1' }),
+      resolve: jest.fn().mockResolvedValue({ kind: 'operator', operatorIds: ['op1'] }),
+      scopeWhere: jest.fn().mockReturnValue({ operatorId: { in: ['op1'] } }),
     }
     service = new TariffService(
       prisma as unknown as PrismaService,

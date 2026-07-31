@@ -11,7 +11,8 @@ import { MapsService } from './maps.service'
       provide: MAP_CONTEXT_TOKEN,
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
-        const provider = (config.get<string>('MAP_PROVIDER') ?? 'google') as MapProviderConfig['provider']
+        const provider = (config.get<string>('MAP_PROVIDER') ??
+          'google') as MapProviderConfig['provider']
 
         switch (provider) {
           case 'google':

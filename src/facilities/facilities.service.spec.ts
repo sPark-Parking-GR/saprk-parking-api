@@ -1,11 +1,17 @@
-import type { VehicleType } from '@prisma/client'
+import { Prisma, type VehicleType } from '@prisma/client'
 import { FacilitiesService } from './facilities.service'
+import type { BookingService } from '../booking/booking.service'
 import type { InventoryService } from '../inventory/inventory.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { TariffService } from '../tariff/tariff.service'
 import type { OperatorScopeService } from '../common/authz/operator-scope.service'
 
 const decimal = (n: number) => ({ toNumber: () => n }) as never
+
+// Rebuilds the Sql the tagged template would have produced, so a test can inspect the
+// placeholder text and the bound values separately.
+const sqlOf = (call: unknown[]): Prisma.Sql =>
+  Prisma.sql(call[0] as readonly string[], ...call.slice(1))
 
 const startsAt = new Date('2026-06-18T10:00:00Z')
 const endsAt = new Date('2026-06-18T12:00:00Z')
@@ -40,6 +46,7 @@ describe('FacilitiesService.search', () => {
       inventory as unknown as InventoryService,
       tariff as unknown as TariffService,
       {} as unknown as OperatorScopeService,
+      {} as unknown as BookingService,
     )
   })
 
@@ -169,6 +176,104 @@ describe('FacilitiesService.search', () => {
     expect(res.clusters).toEqual([{ id: 'c_0_0', lat: 37.98, lng: 23.73, count: 600 }])
     expect(prisma.facility.findMany).not.toHaveBeenCalled()
   })
+
+  describe('vehicleType filtering', () => {
+    const bounds = { north: 38, south: 37, east: 24, west: 23 }
+
+    it('applies the vehicleType filter to the count, not only to the points', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([{ count: 3 }])
+        .mockResolvedValueOnce([{ id: 'f1' }, { id: 'f2' }, { id: 'f3' }])
+      prisma.facility.findMany.mockResolvedValue([makeFacility()])
+
+      const res = await service.search({
+        lat: 37.98,
+        lng: 23.73,
+        radiusMeters: 5000,
+        bounds,
+        startsAt,
+        endsAt,
+        vehicleType: 'CAR' as VehicleType,
+      })
+
+      const countSql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
+      const pointsSql = sqlOf(prisma.$queryRaw.mock.calls[1]!)
+
+      expect(countSql.text).toContain('::"VehicleType" = ANY("vehicleTypes")')
+      expect(countSql.values).toContain('CAR')
+      expect(pointsSql.text).toContain('::"VehicleType" = ANY("vehicleTypes")')
+      expect(pointsSql.values).toContain('CAR')
+      expect(countSql.text).not.toContain('CAR')
+      expect(res.total).toBe(3)
+    })
+
+    it('leaves the vehicle filter out of the Prisma hydration (SQL is the only source)', async () => {
+      prisma.$queryRaw.mockResolvedValueOnce([{ count: 1 }]).mockResolvedValueOnce([{ id: 'f1' }])
+      prisma.facility.findMany.mockResolvedValue([makeFacility()])
+
+      await service.search({
+        lat: 37.98,
+        lng: 23.73,
+        radiusMeters: 5000,
+        startsAt,
+        endsAt,
+        vehicleType: 'CAR' as VehicleType,
+      })
+
+      expect(prisma.facility.findMany.mock.calls[0]![0].where).toEqual({ id: { in: ['f1'] } })
+    })
+
+    it('omits the vehicle predicate entirely when no vehicleType is given', async () => {
+      prisma.$queryRaw.mockResolvedValueOnce([{ count: 0 }]).mockResolvedValueOnce([])
+
+      await service.search({ lat: 37.98, lng: 23.73, radiusMeters: 5000, startsAt, endsAt })
+
+      expect(sqlOf(prisma.$queryRaw.mock.calls[0]!).text).not.toContain('vehicleTypes')
+    })
+
+    it('stays in points mode when the vehicleType-filtered count fits MAX_POINTS', async () => {
+      prisma.$queryRaw.mockResolvedValueOnce([{ count: 250 }]).mockResolvedValueOnce([{ id: 'f1' }])
+      prisma.facility.findMany.mockResolvedValue([makeFacility()])
+
+      const res = await service.search({
+        lat: 37.98,
+        lng: 23.73,
+        radiusMeters: 5000,
+        bounds,
+        startsAt,
+        endsAt,
+        vehicleType: 'CAR' as VehicleType,
+      })
+
+      expect(res.mode).toBe('points')
+      expect(res.total).toBe(250)
+      expect(res.points).toHaveLength(1)
+    })
+
+    it('flips to clusters on the filtered count and clusters the same filtered set', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([{ count: 251 }])
+        .mockResolvedValueOnce([{ gx: 1, gy: 2, count: 251, lat: 37.5, lng: 23.5 }])
+
+      const res = await service.search({
+        lat: 37.98,
+        lng: 23.73,
+        radiusMeters: 5000,
+        bounds,
+        startsAt,
+        endsAt,
+        vehicleType: 'CAR' as VehicleType,
+      })
+
+      expect(res.mode).toBe('clusters')
+      expect(res.clusters).toEqual([{ id: 'c_1_2', lat: 37.5, lng: 23.5, count: 251 }])
+
+      const clusterSql = sqlOf(prisma.$queryRaw.mock.calls[1]!)
+      expect(clusterSql.text).toContain('::"VehicleType" = ANY("vehicleTypes")')
+      expect(clusterSql.values).toContain('CAR')
+      expect(prisma.facility.findMany).not.toHaveBeenCalled()
+    })
+  })
 })
 
 describe('FacilitiesService.getDetail', () => {
@@ -178,12 +283,17 @@ describe('FacilitiesService.getDetail', () => {
   }
   let service: FacilitiesService
 
-  const activePlan = { id: 'plan1', isActive: true, name: 'Standard', tiers: [], windows: [], caps: [] }
+  const activePlan = {
+    id: 'plan1',
+    isActive: true,
+    name: 'Standard',
+    tiers: [],
+    windows: [],
+    caps: [],
+  }
   const inactivePlan = { ...activePlan, id: 'plan2', isActive: false }
 
-  function detailRow(
-    tariffAssignments: { vehicleType: string; tariffPlan: unknown }[],
-  ) {
+  function detailRow(tariffAssignments: { vehicleType: string; tariffPlan: unknown }[]) {
     return {
       id: 'f1',
       name: 'Lot A',
@@ -205,6 +315,7 @@ describe('FacilitiesService.getDetail', () => {
       {} as unknown as InventoryService,
       {} as unknown as TariffService,
       {} as unknown as OperatorScopeService,
+      {} as unknown as BookingService,
     )
   })
 

@@ -13,17 +13,24 @@ const makeJob = (data: TileFetchJobData) => ({ data }) as unknown as Job<TileFet
 const place = (id: string): Place =>
   ({ placeId: id, coordinates: { lat: 37.98, lng: 23.72 } }) as unknown as Place
 
-const capResults = (): Place[] => Array.from({ length: GOOGLE_MAX_RESULTS }, (_, i) => place(`p${i}`))
+const capResults = (): Place[] =>
+  Array.from({ length: GOOGLE_MAX_RESULTS }, (_, i) => place(`p${i}`))
 
 describe('GoogleFetchProcessor subdivision', () => {
-  let prisma: { rawPlace: { findUnique: jest.Mock; upsert: jest.Mock }; ingestTile: { update: jest.Mock } }
+  let prisma: {
+    rawPlace: { findUnique: jest.Mock; upsert: jest.Mock }
+    ingestTile: { update: jest.Mock }
+  }
   let maps: { searchPlaces: jest.Mock }
   let ingestion: { enqueueGoogleSubtiles: jest.Mock }
   let processor: GoogleFetchProcessor
 
   beforeEach(() => {
     prisma = {
-      rawPlace: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue({}) },
+      rawPlace: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue({}),
+      },
       ingestTile: { update: jest.fn().mockResolvedValue({}) },
     }
     maps = { searchPlaces: jest.fn() }

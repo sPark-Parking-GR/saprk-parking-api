@@ -24,18 +24,36 @@ export class InviteNotRevocableError extends DomainError {
   }
 }
 
+// A lapsed invite IS resendable — reissuing it is the whole point — so only the two
+// terminal states are refused.
+export class InviteNotResendableError extends DomainError {
+  constructor(status: string) {
+    super(`An invite that is ${status} cannot be resent; issue a new one instead`)
+  }
+}
+
 export interface InviteSummary {
   id: string
   email: string
   businessName: string
   status: string
+  kind: string
+  role: string
+  operatorId: string | null
   expiresAt: Date
   createdAt: Date
   acceptedAt: Date | null
 }
 
+// create/resend additionally report whether the email carrying the raw token actually
+// went out, because that token has no other exit from the system.
+export interface InviteIssued extends InviteSummary {
+  delivered: boolean
+}
+
 export interface InviteValidation {
   businessName: string
   email: string
+  role: string
   expired: boolean
 }

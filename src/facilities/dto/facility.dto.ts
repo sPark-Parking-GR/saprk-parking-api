@@ -161,13 +161,17 @@ const noDuplicateSlots = (rows: { vehicleType: VehicleType }[]) => {
   return true
 }
 
+// Opt-in to cancelling AND refunding every booking a deactivation would strand. Defaults
+// to false so the destructive reading is never the one a caller gets by omission.
+const forceDeactivate = z.boolean().default(false)
+
 export const bulkFacilitySchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('enable'), ids: bulkIds }),
-  z.object({ action: z.literal('disable'), ids: bulkIds }),
+  z.object({ action: z.literal('disable'), ids: bulkIds, force: forceDeactivate }),
   z.object({ action: z.literal('deploy'), ids: bulkIds }),
   z.object({ action: z.literal('publish'), ids: bulkIds }),
   z.object({ action: z.literal('unpublish'), ids: bulkIds }),
-  z.object({ action: z.literal('delete'), ids: bulkIds }),
+  z.object({ action: z.literal('delete'), ids: bulkIds, force: forceDeactivate }),
   z.object({
     action: z.literal('assignTariff'),
     ids: bulkIds,
@@ -179,6 +183,15 @@ export const bulkFacilitySchema = z.discriminatedUnion('action', [
 ])
 
 export type BulkFacilityDto = z.infer<typeof bulkFacilitySchema>
+
+export const deactivateFacilitySchema = z.object({
+  force: z.preprocess(
+    (v) => (typeof v === 'string' ? v === 'true' : v),
+    z.boolean().default(false),
+  ),
+})
+
+export type DeactivateFacilityDto = z.infer<typeof deactivateFacilitySchema>
 
 export const assignTariffSchema = z.object({
   vehicleType: z.nativeEnum(VehicleType),

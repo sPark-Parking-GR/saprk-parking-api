@@ -68,7 +68,9 @@ describe('normalizeGoogle', () => {
   })
 
   it('captures place id, business status and types as provenance rules', () => {
-    const out = normalizeGoogle(basePlace({ businessStatus: 'OPERATIONAL', types: ['parking', 'establishment'] }))
+    const out = normalizeGoogle(
+      basePlace({ businessStatus: 'OPERATIONAL', types: ['parking', 'establishment'] }),
+    )
     expect(out.rules).toEqual([
       { ruleKey: 'google:place_id', ruleValue: 'PLACE_1' },
       { ruleKey: 'google:business_status', ruleValue: 'OPERATIONAL' },

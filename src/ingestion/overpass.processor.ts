@@ -43,7 +43,7 @@ export class OverpassProcessor extends WorkerHost {
           lastError: null,
         },
       })
-      this.logger.log(`Tile ${tileId}: stored ${stored}/${elements.length} parking element(s)`)
+      this.logger.log({ tileId, stored, total: elements.length }, 'Stored parking elements')
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await this.prisma.ingestTile.update({

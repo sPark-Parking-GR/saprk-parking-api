@@ -25,9 +25,7 @@ export type IngestRegionDto = z.infer<typeof ingestRegionSchema>
 // Sweep: drive the full osm→google→promote pipeline over a set of areas at once.
 // Areas come by known city name and/or as explicit bounding boxes; at least one
 // area is required so a sweep never no-ops.
-const cityNameSchema = z.enum(
-  Object.keys(GREEK_CITY_REGIONS) as [string, ...string[]],
-)
+const cityNameSchema = z.enum(Object.keys(GREEK_CITY_REGIONS) as [string, ...string[]])
 
 export const sweepSchema = z
   .object({
