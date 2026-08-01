@@ -26,6 +26,7 @@ import { NotificationsModule } from './notifications/notifications.module'
 import { OperatorsModule } from './operators/operators.module'
 import { PaymentsModule } from './payments/payments.module'
 import { PrismaModule } from './prisma/prisma.module'
+import { SubscriptionsModule } from './subscriptions/subscriptions.module'
 import { TariffModule } from './tariff/tariff.module'
 
 @Module({
@@ -40,6 +41,7 @@ import { TariffModule } from './tariff/tariff.module'
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     PrismaModule,
     AuthModule,
+    SubscriptionsModule,
     MapsModule,
     PaymentsModule,
     NotificationsModule,

@@ -19,7 +19,6 @@ import {
 } from '../common/authz/operator-scope.service'
 import {
   DomainError,
-  FacilityAlreadyExistsError,
   FacilityDeactivationFailedError,
   FacilityFieldForbiddenError,
   FacilityHasActiveBookingsError,
@@ -29,6 +28,7 @@ import {
 } from '../common/errors/domain.errors'
 import { InventoryService } from '../inventory/inventory.service'
 import { PrismaService } from '../prisma/prisma.service'
+import { EntitlementService } from '../subscriptions/entitlement.service'
 import { TariffService, assignmentMismatchReason } from '../tariff/tariff.service'
 import type {
   BulkFacilityDto,
@@ -173,6 +173,7 @@ export class FacilitiesService {
     private readonly tariff: TariffService,
     private readonly operatorScope: OperatorScopeService,
     private readonly bookings: BookingService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async search(params: FacilitySearchParams): Promise<FacilitySearchResponse> {
@@ -575,68 +576,62 @@ export class FacilitiesService {
     })
     if (!operator) throw new DomainError('operatorId required')
 
-    try {
-      const created = await this.prisma.$transaction(async (tx) => {
-        // Lock the operator row so two concurrent creates serialize on the same
-        // operator, then enforce the one-facility-per-operator cap under that lock.
-        await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${operatorId} FOR UPDATE`
+    const created = await this.prisma.$transaction(async (tx) => {
+      // Lock the operator row so two concurrent creates serialize on the same operator,
+      // then check the plan's facility quota under that lock. With
+      // Facility_operatorId_claimed_key dropped in 20260803100000, this lock is the ONLY
+      // thing preventing two simultaneous creates from both passing a quota of one — it
+      // used to be belt-and-suspenders behind the unique index and is now the primary
+      // control. The assert must therefore stay inside this transaction, after the lock.
+      await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${operatorId} FOR UPDATE`
 
-        const existing = await tx.facility.count({ where: { operatorId } })
-        if (existing >= 1) throw new FacilityAlreadyExistsError(operatorId)
+      await this.entitlements.assertCanCreateFacility(operatorId, tx)
 
-        // `geog` is a GENERATED ALWAYS column; the database derives it from lat/lng,
-        // so no raw write is needed (and one would be rejected by Postgres).
-        const facility = await tx.facility.create({
-          data: {
-            operatorId,
-            kind: FacilityKind.BUSINESS,
-            name: dto.name,
-            address: dto.address,
-            lat: new Prisma.Decimal(dto.lat),
-            lng: new Prisma.Decimal(dto.lng),
-            totalCapacity: dto.totalCapacity,
-            onlineQuota: dto.onlineQuota,
-            vehicleTypes: dto.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v]),
-            heightRestrictionCm: dto.heightRestrictionCm ?? null,
-            openingHoursJson: dto.openingHours as unknown as Prisma.InputJsonValue,
-            amenities: dto.amenities,
-            cancellationPolicy: dto.cancellationPolicy,
-            isActive: false,
-            isVerified: false,
-            rank: 0,
-          },
-        })
-
-        // Analytics attributes money through FacilityOwnershipPeriod, never through
-        // Facility.operatorId, and the attribution join is an inner one: a facility with no
-        // open period earns revenue that no report can see. Same transaction as the insert,
-        // so a facility can never exist without one.
-        await tx.facilityOwnershipPeriod.create({
-          data: { facilityId: facility.id, operatorId, from: facility.createdAt, to: null },
-        })
-
-        await tx.auditLog.create({
-          data: {
-            actorId: user.id,
-            actorRole: user.role,
-            action: 'facility.created',
-            entityType: 'Facility',
-            entityId: facility.id,
-          },
-        })
-
-        return facility
+      // `geog` is a GENERATED ALWAYS column; the database derives it from lat/lng,
+      // so no raw write is needed (and one would be rejected by Postgres).
+      const facility = await tx.facility.create({
+        data: {
+          operatorId,
+          kind: FacilityKind.BUSINESS,
+          name: dto.name,
+          address: dto.address,
+          lat: new Prisma.Decimal(dto.lat),
+          lng: new Prisma.Decimal(dto.lng),
+          totalCapacity: dto.totalCapacity,
+          onlineQuota: dto.onlineQuota,
+          vehicleTypes: dto.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v]),
+          heightRestrictionCm: dto.heightRestrictionCm ?? null,
+          openingHoursJson: dto.openingHours as unknown as Prisma.InputJsonValue,
+          amenities: dto.amenities,
+          cancellationPolicy: dto.cancellationPolicy,
+          isActive: false,
+          isVerified: false,
+          rank: 0,
+        },
       })
 
-      return this.toAdminFacility(created)
-    } catch (error) {
-      // Belt-and-suspenders: if two requests both pass the count check before either
-      // commits, the unique index on Facility.operatorId rejects the loser with P2002.
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        throw new FacilityAlreadyExistsError(operatorId)
-      }
-      throw error
-    }
+      // Analytics attributes money through FacilityOwnershipPeriod, never through
+      // Facility.operatorId, and the attribution join is an inner one: a facility with no
+      // open period earns revenue that no report can see. Same transaction as the insert,
+      // so a facility can never exist without one.
+      await tx.facilityOwnershipPeriod.create({
+        data: { facilityId: facility.id, operatorId, from: facility.createdAt, to: null },
+      })
+
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'facility.created',
+          entityType: 'Facility',
+          entityId: facility.id,
+        },
+      })
+
+      return facility
+    })
+
+    return this.toAdminFacility(created)
   }
 
   async update(user: AuthUser, id: string, dto: UpdateFacilityDto): Promise<AdminFacility> {

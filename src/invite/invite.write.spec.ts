@@ -15,6 +15,7 @@ import { OperatorSuspendedError, OperatorTargetRequiredError } from '../common/e
 import { OperatorAccessService } from '../operators/operator-access.service'
 import { OperatorNotFoundError } from '../operators/operators.types'
 import type { PrismaService } from '../prisma/prisma.service'
+import type { EntitlementService } from '../subscriptions/entitlement.service'
 import type { NotificationsService } from '../notifications/notifications.service'
 import { InviteService } from './invite.service'
 import {
@@ -92,7 +93,9 @@ describe('InviteService', () => {
     operatorMembership: { create: jest.Mock }
     user: { update: jest.Mock }
     auditLog: { create: jest.Mock }
+    $executeRaw: jest.Mock
   }
+  let entitlements: { assertCanAddStaffSeat: jest.Mock }
   let notifications: { sendOperatorInvite: jest.Mock; sendOperatorMemberInvite: jest.Mock }
   let config: { getOrThrow: jest.Mock }
   let firebase: { signUp: jest.Mock; deleteUser: jest.Mock }
@@ -121,7 +124,9 @@ describe('InviteService', () => {
       operatorMembership: { create: jest.fn() },
       user: { update: jest.fn() },
       auditLog: { create: jest.fn() },
+      $executeRaw: jest.fn().mockResolvedValue(0),
     }
+    entitlements = { assertCanAddStaffSeat: jest.fn().mockResolvedValue(undefined) }
     prisma = {
       parkingOperator: {
         create: tx.parkingOperator.create,
@@ -158,6 +163,7 @@ describe('InviteService', () => {
       notifications as unknown as NotificationsService,
       config as unknown as ConfigService,
       new OperatorAccessService(prismaService, new OperatorScopeService(prismaService)),
+      entitlements as unknown as EntitlementService,
       firebase as unknown as IAuthProvider,
     )
   })

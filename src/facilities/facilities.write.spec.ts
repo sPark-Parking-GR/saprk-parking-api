@@ -8,7 +8,7 @@ import {
   type OperatorScope,
 } from '../common/authz/operator-scope.service'
 import {
-  FacilityAlreadyExistsError,
+  EntitlementLimitExceededError,
   FacilityDeactivationFailedError,
   FacilityFieldForbiddenError,
   FacilityHasActiveBookingsError,
@@ -19,6 +19,7 @@ import {
 } from '../common/errors/domain.errors'
 import type { InventoryService } from '../inventory/inventory.service'
 import type { PrismaService } from '../prisma/prisma.service'
+import type { EntitlementService } from '../subscriptions/entitlement.service'
 import type { TariffService } from '../tariff/tariff.service'
 import {
   bulkFacilitySchema,
@@ -112,6 +113,7 @@ describe('FacilitiesService admin writes', () => {
   }
   let scope: { resolve: jest.Mock; scopeWhere: jest.Mock }
   let bookings: { cancelBooking: jest.Mock }
+  let entitlements: { assertCanCreateFacility: jest.Mock }
   let service: FacilitiesService
 
   function setScope(s: OperatorScope) {
@@ -186,12 +188,14 @@ describe('FacilitiesService admin writes', () => {
     }
     scope = { resolve: jest.fn(), scopeWhere: jest.fn() }
     bookings = { cancelBooking: jest.fn() }
+    entitlements = { assertCanCreateFacility: jest.fn().mockResolvedValue(undefined) }
     service = new FacilitiesService(
       prisma as unknown as PrismaService,
       {} as unknown as InventoryService,
       {} as unknown as TariffService,
       scope as unknown as OperatorScopeService,
       bookings as unknown as BookingService,
+      entitlements as unknown as EntitlementService,
     )
   })
 
@@ -268,18 +272,28 @@ describe('FacilitiesService admin writes', () => {
     expect(prisma.facility.create).not.toHaveBeenCalled()
   })
 
-  describe('one-facility-per-operator cap', () => {
-    it('rejects a second create when the operator already owns a facility', async () => {
+  /**
+   * These were the one-facility-per-operator cap tests. The cap is gone — the limit is now
+   * whatever the operator's plan grants — so they assert the same three properties against
+   * its replacement rather than being deleted: the refusal happens, it happens under the
+   * operator row lock, and it happens before anything is written.
+   */
+  describe('facility quota', () => {
+    it('refuses a create the entitlement service rejects, with the entitlement error', async () => {
       setScope({ kind: 'operator', operatorIds: ['op1'] })
-      tx.facility.count.mockResolvedValue(1)
+      entitlements.assertCanCreateFacility.mockRejectedValue(
+        new EntitlementLimitExceededError('facilities', 1, 1),
+      )
 
       await expect(service.create(operatorUser, { ...validCreate })).rejects.toBeInstanceOf(
-        FacilityAlreadyExistsError,
+        EntitlementLimitExceededError,
       )
       expect(tx.facility.create).not.toHaveBeenCalled()
     })
 
-    it('locks the operator row (FOR UPDATE) before the cap count', async () => {
+    // The dropped unique index used to be the backstop for a check-then-act race. This
+    // ordering IS the replacement guarantee, so it is asserted rather than assumed.
+    it('locks the operator row (FOR UPDATE) before the quota check', async () => {
       setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.create.mockResolvedValue(makeRow())
 
@@ -287,22 +301,18 @@ describe('FacilitiesService admin writes', () => {
 
       expect(tx.$executeRaw).toHaveBeenCalled()
       const lockOrder = tx.$executeRaw.mock.invocationCallOrder[0]!
-      const countOrder = tx.facility.count.mock.invocationCallOrder[0]!
-      expect(lockOrder).toBeLessThan(countOrder)
+      const assertOrder = entitlements.assertCanCreateFacility.mock.invocationCallOrder[0]!
+      expect(lockOrder).toBeLessThan(assertOrder)
     })
 
-    it('translates a P2002 unique-violation race into FacilityAlreadyExistsError', async () => {
+    // The assert has to run inside the caller's transaction or the lock above buys nothing.
+    it('passes the transaction client to the quota check', async () => {
       setScope({ kind: 'operator', operatorIds: ['op1'] })
-      tx.facility.create.mockRejectedValue(
-        new Prisma.PrismaClientKnownRequestError('unique', {
-          code: 'P2002',
-          clientVersion: 'test',
-        }),
-      )
+      prisma.facility.create.mockResolvedValue(makeRow())
 
-      await expect(service.create(operatorUser, { ...validCreate })).rejects.toBeInstanceOf(
-        FacilityAlreadyExistsError,
-      )
+      await service.create(operatorUser, { ...validCreate })
+
+      expect(entitlements.assertCanCreateFacility).toHaveBeenCalledWith('op1', tx)
     })
   })
 

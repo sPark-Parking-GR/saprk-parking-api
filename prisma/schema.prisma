@@ -147,6 +147,23 @@ enum ApprovalStatus {
   EXPIRED
 }
 
+enum BillingInterval {
+  MONTHLY
+  YEARLY
+}
+
+// CANCELLED is the only terminal state, and it is the one the partial unique index
+// excludes: an operator may accumulate any number of cancelled subscriptions over time but
+// may hold at most one live agreement. PAST_DUE still grants the plan's entitlements —
+// dunning decides when a delinquent account loses access, and silently voiding limits on
+// the first failed charge would break a paying customer's operations mid-cycle.
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
 // How a facility is used, so free public lots and commercial parking businesses are
 // managed separately. OSM mixes both; Google only ever returns real businesses.
 enum FacilityKind {
@@ -292,6 +309,7 @@ model ParkingOperator {
   tariffPlans      TariffPlan[]
   invites          OperatorInvite[]
   ownershipPeriods FacilityOwnershipPeriod[]
+  subscriptions    OperatorSubscription[]
 
   @@index([status])
   @@index([lifecycleStatus, purgeAfter])
@@ -886,4 +904,84 @@ model PendingApproval {
   @@index([status, expiresAt])
   @@index([action, resourceType, resourceId])
   @@index([requestedBy])
+}
+
+// ─── Billing ──────────────────────────────────────────────────────────────────
+
+// The sellable catalog, deliberately separate from OperatorSubscription: a plan is a
+// product many tenants share and that must keep describing what was sold long after
+// pricing moves on. It therefore carries the same five lifecycle columns as the four
+// LIFECYCLE_MODELS so a retired plan is archived, never deleted, while the subscriptions
+// pointing at it keep resolving.
+//
+// It is deliberately NOT registered in LIFECYCLE_MODELS: the Prisma lifecycle extension
+// would then silently filter it, and a billing predicate that decides what a customer may
+// do must be visible at the call site rather than injected. Every read in
+// EntitlementService and SubscriptionAdminService names lifecycleStatus explicitly, and
+// archival runs through the billing admin surface, not the generic lifecycle service.
+//
+// priceCents is an integer minor unit, never a float — the same rule Payment.amountCents
+// and Booking.quotedPriceCents already follow.
+model SubscriptionPlan {
+  id          String          @id @default(cuid())
+  code        String          @unique
+  name        String
+  description String?
+  priceCents  Int
+  currency    String          @default("EUR")
+  interval    BillingInterval @default(MONTHLY)
+  // Validated by entitlementsSchema at every read and write boundary; see
+  // src/subscriptions/entitlements.schema.ts for why an untyped blob is not acceptable.
+  entitlements Json
+  // Self-serve plans are offered in the public catalog; sales-negotiated ones exist only
+  // for a platform admin to assign by hand.
+  isPublic    Boolean         @default(true)
+  sortOrder   Int             @default(0)
+
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions OperatorSubscription[]
+
+  @@index([lifecycleStatus, sortOrder])
+}
+
+// One operator's instance of a plan. At most one non-terminal (non-CANCELLED) row per
+// operator is a PARTIAL unique index defined in the migration — not expressible as a
+// schema @@unique, so this stays a plain index here and the database enforces it, exactly
+// as Facility_operatorId_claimed_key and TariffPlan_operator_active_default_key did.
+//
+// entitlementOverride is a PARTIAL entitlement patch merged over the plan's own values, so
+// a negotiated deal ("Starter, but four facilities") is expressed as the single key that
+// differs instead of forcing a bespoke plan into the public catalog.
+//
+// providerSubscriptionId is nullable and unique-when-set: no billing provider is wired
+// yet, and Postgres treats NULLs as distinct so every unwired row coexists.
+model OperatorSubscription {
+  id                     String             @id @default(cuid())
+  operatorId             String
+  planId                 String
+  status                 SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart     DateTime           @default(now())
+  currentPeriodEnd       DateTime?
+  trialEndsAt            DateTime?
+  cancelAtPeriodEnd      Boolean            @default(false)
+  cancelledAt            DateTime?
+  providerSubscriptionId String?            @unique
+  entitlementOverride    Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  operator ParkingOperator  @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  plan     SubscriptionPlan @relation(fields: [planId], references: [id])
+
+  @@index([operatorId, status])
+  @@index([planId])
 }

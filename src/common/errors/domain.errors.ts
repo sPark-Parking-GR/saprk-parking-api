@@ -152,9 +152,81 @@ export class FacilityFieldForbiddenError extends DomainError {
   }
 }
 
-export class FacilityAlreadyExistsError extends DomainError {
-  constructor(operatorId: string) {
-    super(`Operator ${operatorId} already has a facility. Each operator may own only one.`)
+// A quota refusal, replacing the hardcoded one-facility-per-operator cap. Names the limit
+// and the number in use rather than saying "limit reached": the caller cannot tell an
+// upgrade from a cleanup without both, and a refusal with no number is a support ticket.
+// `resource` is already plural ("facilities") — quotas are never expressed as one.
+export class EntitlementLimitExceededError extends DomainError {
+  constructor(
+    readonly resource: string,
+    readonly limit: number,
+    readonly current: number,
+  ) {
+    super(
+      `This operator's plan allows ${limit} ${resource} and ${current} are already in use. Upgrade the plan or remove one first.`,
+    )
+  }
+}
+
+// One limit a target plan would already be violating. `remove` is the count that has to go,
+// precomputed so neither the client nor the operator has to do the subtraction.
+export interface EntitlementViolation {
+  resource: string
+  limit: number
+  current: number
+  remove: number
+}
+
+// A plan change that would leave the operator over quota the moment it applied. Refused
+// outright rather than enforced: silently deleting a customer's facilities to fit a
+// cheaper plan destroys data they are still paying to hold, and admitting the change and
+// leaving them over quota produces a tenant that no later create can ever unblock and no
+// screen explains. Carries every violation, not the first, so one round trip tells them
+// the whole cleanup.
+export class SubscriptionDowngradeBlockedError extends DomainError {
+  constructor(readonly violations: ReadonlyArray<EntitlementViolation>) {
+    super(
+      `Cannot apply this plan: ${violations
+        .map(
+          (v) =>
+            `${v.current} ${v.resource} exceed the plan limit of ${v.limit} — remove ${v.remove} first`,
+        )
+        .join('; ')}`,
+    )
+  }
+}
+
+export class SubscriptionPlanNotFoundError extends DomainError {
+  constructor(id: string) {
+    super(`Subscription plan ${id} not found`)
+  }
+}
+
+export class SubscriptionPlanCodeTakenError extends DomainError {
+  constructor(code: string) {
+    super(`A subscription plan with code "${code}" already exists`)
+  }
+}
+
+// Archival is the only way to retire a plan, and it must not strand the agreements that
+// point at it — the FK is ON DELETE RESTRICT for the same reason.
+export class SubscriptionPlanInUseError extends DomainError {
+  constructor(code: string, subscribers: number) {
+    super(
+      `Plan "${code}" still has ${subscribers} live subscription(s). Move them to another plan first.`,
+    )
+  }
+}
+
+// Fail closed on a misconfigured catalog. Every operator without an explicit subscription
+// resolves to the default plan, so if that row is missing or archived, the honest answer is
+// that entitlements cannot be determined — not that the operator has none (which would
+// block every tenant) and not that they are unlimited (which would sell the platform away).
+export class DefaultSubscriptionPlanMissingError extends DomainError {
+  constructor(code: string) {
+    super(
+      `The default subscription plan "${code}" is missing or archived, so entitlements cannot be resolved. Restore it in the plan catalog.`,
+    )
   }
 }
 

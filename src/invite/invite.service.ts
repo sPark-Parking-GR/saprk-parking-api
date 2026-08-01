@@ -17,6 +17,7 @@ import { NotificationsService } from '../notifications/notifications.service'
 import { OperatorAccessService } from '../operators/operator-access.service'
 import { OperatorNotFoundError } from '../operators/operators.types'
 import { PrismaService } from '../prisma/prisma.service'
+import { EntitlementService } from '../subscriptions/entitlement.service'
 import type { CreateInviteDto, CreateMemberInviteDto } from './dto/invite.dto'
 import {
   InviteAlreadyAcceptedError,
@@ -48,6 +49,7 @@ export class InviteService {
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
     private readonly access: OperatorAccessService,
+    private readonly entitlements: EntitlementService,
     @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: IAuthProvider,
   ) {}
 
@@ -121,6 +123,13 @@ export class InviteService {
     const email = dto.email.toLowerCase()
 
     const invite = await this.prisma.$transaction(async (tx) => {
+      // Seats are checked at ISSUANCE, not at accept: a link that cannot be redeemed is
+      // worse than a refusal the inviting admin sees immediately, and counting unredeemed
+      // invites against the quota is what stops an operator on two seats from mailing out
+      // twenty. Under the same operator-row lock the other quota paths take.
+      await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${operatorId} FOR UPDATE`
+      await this.entitlements.assertCanAddStaffSeat(operatorId, tx)
+
       const created = await tx.operatorInvite.create({
         data: {
           email,

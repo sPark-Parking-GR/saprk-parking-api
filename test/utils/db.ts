@@ -33,4 +33,33 @@ export async function truncateAll(prisma: PrismaClient): Promise<void> {
 
   const list = tables.map((name) => `"public"."${name}"`).join(', ')
   await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`)
+  await restoreDefaultPlan(prisma)
+}
+
+/**
+ * The Starter plan is seeded by migration 20260803100000, so it is part of the schema's
+ * post-condition rather than test data — but it lives in an application table and so gets
+ * truncated with everything else. Every facility create and restore resolves entitlements
+ * against it, so without this each suite would have to remember a seeding line and would
+ * otherwise fail with a "no default plan" 503 that looks nothing like its actual cause.
+ *
+ * Truncating and re-seeding rather than preserving the table: suites create their own
+ * plans, and leaving those in place would leak between tests.
+ */
+async function restoreDefaultPlan(prisma: PrismaClient): Promise<void> {
+  await prisma.subscriptionPlan.create({
+    data: {
+      id: 'plan_starter',
+      code: 'starter',
+      name: 'Starter',
+      priceCents: 0,
+      entitlements: {
+        maxFacilities: 1,
+        maxTariffPlans: null,
+        maxStaffSeats: null,
+        features: [],
+        commissionBps: 0,
+      },
+    },
+  })
 }

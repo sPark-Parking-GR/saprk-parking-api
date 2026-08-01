@@ -3,11 +3,13 @@ import type { NestFastifyApplication } from '@nestjs/platform-fastify'
 import { ConfigService } from '@nestjs/config'
 import { AnalyticsService } from '../../src/analytics/analytics.service'
 import {
+  EntitlementLimitExceededError,
   FacilityHasActiveBookingsError,
   LifecycleRestoreConflictError,
 } from '../../src/common/errors/domain.errors'
 import { FacilitiesService } from '../../src/facilities/facilities.service'
 import { LifecyclePurgeService } from '../../src/lifecycle/lifecycle-purge.service'
+import { EntitlementService } from '../../src/subscriptions/entitlement.service'
 import { LifecycleService } from '../../src/lifecycle/lifecycle.service'
 import type { PrismaService } from '../../src/prisma/prisma.service'
 import { authUser } from '../utils/auth'
@@ -16,8 +18,10 @@ import {
   seedBooking,
   seedFacility,
   seedOperator,
+  seedOperatorSubscription,
   seedOwnership,
   seedPayment,
+  seedSubscriptionPlan,
   seedTariffPlan,
   seedUser,
 } from '../utils/seed'
@@ -51,7 +55,7 @@ describe('resource lifecycle (e2e)', () => {
     // JobsModule (which wires LifecycleModule into the app) is stubbed out by the e2e
     // harness, so the services are built directly against the app's extended client —
     // the same wiring JobsModule performs in production.
-    lifecycle = new LifecycleService(prisma, app.get(ConfigService))
+    lifecycle = new LifecycleService(prisma, app.get(ConfigService), app.get(EntitlementService))
     purge = new LifecyclePurgeService(prisma)
     facilities = app.get(FacilitiesService)
   })
@@ -247,21 +251,38 @@ describe('resource lifecycle (e2e)', () => {
       expect(untouched.lifecycleStatus).toBe(LifecycleStatus.ACTIVE)
     })
 
-    it('refuses to restore a facility when the operator filled the cap meanwhile, naming the conflict', async () => {
+    it('refuses to restore a facility when the operator refilled its quota meanwhile', async () => {
+      // Archiving frees a quota slot, so an operator on a 1-facility plan can create a
+      // replacement — and restoring the original would then put them over the limit.
       const op = await seedOperator(raw)
       const original = await seedFacility(raw, { operatorId: op.id, ...CENTRE })
       await lifecycle.archiveFacility(ACTOR, original.id)
-      const replacement = await seedFacility(raw, { operatorId: op.id, ...CENTRE })
+      await seedFacility(raw, { operatorId: op.id, ...CENTRE })
 
-      await expect(lifecycle.restoreFacility(ACTOR, original.id)).rejects.toThrow(
-        new RegExp(replacement.id),
-      )
       await expect(lifecycle.restoreFacility(ACTOR, original.id)).rejects.toBeInstanceOf(
-        LifecycleRestoreConflictError,
+        EntitlementLimitExceededError,
       )
 
       const still = await raw.facility.findUniqueOrThrow({ where: { id: original.id } })
       expect(still.lifecycleStatus).toBe(LifecycleStatus.ARCHIVED)
+    })
+
+    it('allows the restore once the operator is on a plan with room for both', async () => {
+      const op = await seedOperator(raw)
+      const growth = await seedSubscriptionPlan(raw, {
+        id: 'plan-growth-restore',
+        code: 'GROWTH_RESTORE',
+        maxFacilities: 5,
+      })
+      await seedOperatorSubscription(raw, { operatorId: op.id, planId: growth.id })
+      const original = await seedFacility(raw, { operatorId: op.id, ...CENTRE })
+      await lifecycle.archiveFacility(ACTOR, original.id)
+      await seedFacility(raw, { operatorId: op.id, ...CENTRE })
+
+      await lifecycle.restoreFacility(ACTOR, original.id)
+
+      const restored = await raw.facility.findUniqueOrThrow({ where: { id: original.id } })
+      expect(restored.lifecycleStatus).toBe(LifecycleStatus.ACTIVE)
     })
 
     it('refuses to restore an archived default plan once another plan holds the default slot', async () => {
@@ -284,16 +305,37 @@ describe('resource lifecycle (e2e)', () => {
       )
     })
 
-    it('both recreated partial unique indexes carry the lifecycle predicate', async () => {
+    it('the recreated tariff partial unique index carries the lifecycle predicate', async () => {
       const rows = await raw.$queryRaw<Array<{ indexname: string; indexdef: string }>>`
         SELECT indexname, indexdef FROM pg_indexes
-        WHERE indexname IN ('Facility_operatorId_claimed_key', 'TariffPlan_operator_active_default_key')`
+        WHERE indexname = 'TariffPlan_operator_active_default_key'`
 
-      expect(rows).toHaveLength(2)
-      for (const row of rows) {
-        expect(row.indexdef).toContain('lifecycleStatus')
-        expect(row.indexdef).toContain('ACTIVE')
-      }
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.indexdef).toContain('lifecycleStatus')
+      expect(rows[0]!.indexdef).toContain('ACTIVE')
+    })
+
+    /**
+     * Facility_operatorId_claimed_key was the other half of this pair until
+     * 20260803100000_subscription_entitlements dropped it: a unique index cannot express
+     * "at most N facilities", and N is now per-operator plan data. Asserted as absent
+     * rather than deleted, because its disappearance is load-bearing — restoreFacility's
+     * P2002 branch and FacilitiesService.create's row lock were both written around it.
+     */
+    it('the one-facility-per-operator unique index is gone, replaced by plan entitlements', async () => {
+      const rows = await raw.$queryRaw<Array<{ indexname: string }>>`
+        SELECT indexname FROM pg_indexes WHERE indexname = 'Facility_operatorId_claimed_key'`
+
+      expect(rows).toHaveLength(0)
+    })
+
+    it('at most one live subscription per operator is enforced by a partial unique index', async () => {
+      const rows = await raw.$queryRaw<Array<{ indexname: string; indexdef: string }>>`
+        SELECT indexname, indexdef FROM pg_indexes
+        WHERE indexname = 'OperatorSubscription_operator_live_key'`
+
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.indexdef).toContain('CANCELLED')
     })
   })
 

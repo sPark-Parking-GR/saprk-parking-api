@@ -7,6 +7,7 @@ import {
   PaymentStatus,
   Prisma,
   RefundStatus,
+  SubscriptionStatus,
   UserRole,
   VehicleType,
 } from '@prisma/client'
@@ -14,11 +15,73 @@ import type { Booking, Facility, ParkingOperator, Payment, User } from '@prisma/
 import type { PrismaClient } from '@prisma/client'
 
 /**
- * The ingestion pipeline's synthetic owner for un-onboarded imports. It is the one
- * operator exempted from the `Facility_operatorId_claimed_key` partial unique index, so
- * it is also the only way to seed more than one facility under a single operator.
+ * The ingestion pipeline's synthetic owner for un-onboarded imports. It is the one operator
+ * exempted from subscription quotas entirely (see EntitlementService.isQuotaExempt), and it
+ * was previously the one exempted by name from the `Facility_operatorId_claimed_key` partial
+ * unique index that 20260803100000_subscription_entitlements dropped.
  */
 export const UNCLAIMED_OPERATOR_ID = 'osm-unclaimed-operator'
+
+/** Mirrors the row 20260803100000_subscription_entitlements seeds. */
+export const STARTER_PLAN_ID = 'plan_starter'
+export const STARTER_PLAN_CODE = 'starter'
+
+export interface SubscriptionPlanSeed {
+  id?: string
+  code?: string
+  name?: string
+  maxFacilities?: number | null
+  maxTariffPlans?: number | null
+  maxStaffSeats?: number | null
+  features?: string[]
+  commissionBps?: number
+  priceCents?: number
+}
+
+/**
+ * `truncateAll` wipes SubscriptionPlan along with everything else, taking the Starter row
+ * the migration seeded with it. Any suite whose code path resolves entitlements has to put
+ * it back, or every operator without a live subscription resolves to a missing default plan
+ * and fails closed with a 503 — which is the correct production behaviour and a useless
+ * test failure.
+ */
+export function seedSubscriptionPlan(prisma: PrismaClient, seed: SubscriptionPlanSeed = {}) {
+  return prisma.subscriptionPlan.create({
+    data: {
+      id: seed.id ?? STARTER_PLAN_ID,
+      code: seed.code ?? STARTER_PLAN_CODE,
+      name: seed.name ?? 'Starter',
+      priceCents: seed.priceCents ?? 0,
+      entitlements: {
+        maxFacilities: seed.maxFacilities === undefined ? 1 : seed.maxFacilities,
+        maxTariffPlans: seed.maxTariffPlans === undefined ? null : seed.maxTariffPlans,
+        maxStaffSeats: seed.maxStaffSeats === undefined ? null : seed.maxStaffSeats,
+        features: seed.features ?? [],
+        commissionBps: seed.commissionBps ?? 0,
+      },
+    },
+  })
+}
+
+export interface OperatorSubscriptionSeed {
+  operatorId: string
+  planId: string
+  status?: SubscriptionStatus
+  entitlementOverride?: Prisma.InputJsonValue
+}
+
+export function seedOperatorSubscription(prisma: PrismaClient, seed: OperatorSubscriptionSeed) {
+  return prisma.operatorSubscription.create({
+    data: {
+      operatorId: seed.operatorId,
+      planId: seed.planId,
+      status: seed.status ?? SubscriptionStatus.ACTIVE,
+      ...(seed.entitlementOverride === undefined
+        ? {}
+        : { entitlementOverride: seed.entitlementOverride }),
+    },
+  })
+}
 
 function uniqueSuffix(): string {
   return randomUUID().replace(/-/g, '').slice(0, 12)

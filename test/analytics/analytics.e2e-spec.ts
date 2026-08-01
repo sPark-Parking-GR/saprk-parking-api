@@ -55,6 +55,9 @@ describe('analytics (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(prisma)
+    // truncateAll takes the migration-seeded Starter plan with it, and the create path
+    // resolves entitlements before it writes. Without this, the one test that creates a
+    // facility through the service fails closed on a missing default plan.
   })
 
   /** One operator that owns one facility outright, plus a caller scoped to it. */

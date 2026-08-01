@@ -3,6 +3,7 @@ import { FacilitiesService } from './facilities.service'
 import type { BookingService } from '../booking/booking.service'
 import type { InventoryService } from '../inventory/inventory.service'
 import type { PrismaService } from '../prisma/prisma.service'
+import type { EntitlementService } from '../subscriptions/entitlement.service'
 import type { TariffService } from '../tariff/tariff.service'
 import type { OperatorScopeService } from '../common/authz/operator-scope.service'
 
@@ -47,6 +48,7 @@ describe('FacilitiesService.search', () => {
       tariff as unknown as TariffService,
       {} as unknown as OperatorScopeService,
       {} as unknown as BookingService,
+      {} as unknown as EntitlementService,
     )
   })
 
@@ -318,6 +320,7 @@ describe('FacilitiesService.getDetail', () => {
       {} as unknown as TariffService,
       {} as unknown as OperatorScopeService,
       {} as unknown as BookingService,
+      {} as unknown as EntitlementService,
     )
   })
 

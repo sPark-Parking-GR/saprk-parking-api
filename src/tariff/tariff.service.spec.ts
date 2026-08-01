@@ -5,6 +5,7 @@ import type { CompiledPlan, CompiledCap } from './tariff.types'
 import type { OperatorScopeService } from '../common/authz/operator-scope.service'
 import { DomainError } from '../common/errors/domain.errors'
 import type { PrismaService } from '../prisma/prisma.service'
+import type { EntitlementService } from '../subscriptions/entitlement.service'
 
 const CAR = 'CAR' as VehicleType
 
@@ -336,6 +337,7 @@ describe('TariffService.computeTotalsByFacility', () => {
     service = new TariffService(
       prisma as unknown as PrismaService,
       {} as unknown as OperatorScopeService,
+      {} as unknown as EntitlementService,
     )
   })
 
@@ -469,6 +471,7 @@ describe('TariffService.computeQuote', () => {
     const service = new TariffService(
       prisma as unknown as PrismaService,
       {} as unknown as OperatorScopeService,
+      {} as unknown as EntitlementService,
     )
 
     const badStartsAt = new Date('2026-06-18T10:00:00Z')
@@ -534,6 +537,7 @@ describe('TariffService.priceWithPinnedPlan', () => {
     service = new TariffService(
       prisma as unknown as PrismaService,
       {} as unknown as OperatorScopeService,
+      {} as unknown as EntitlementService,
     )
   })
 

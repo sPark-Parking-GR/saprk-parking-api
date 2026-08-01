@@ -20,6 +20,7 @@ import {
   TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import { PrismaService } from '../prisma/prisma.service'
+import { EntitlementService } from '../subscriptions/entitlement.service'
 import { compileDraft } from './draft-compiler'
 import { priceStay } from './pricing-engine'
 import { validateRateGrid, validateSchedule } from './schedule-validation'
@@ -105,6 +106,7 @@ export class TariffService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly operatorScope: OperatorScopeService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async computeQuote(request: QuoteRequest): Promise<PriceQuote> {
@@ -317,6 +319,13 @@ export class TariffService {
     }
 
     const created = await this.prisma.$transaction(async (tx) => {
+      // Same lock-then-check shape as FacilitiesService.create, and for the same reason:
+      // no unique index can express "at most N plans", so this lock is the only thing
+      // serializing two concurrent creates against one quota.
+      await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${operatorId} FOR UPDATE`
+
+      await this.entitlements.assertCanCreateTariffPlan(operatorId, tx)
+
       // An operator's very first active plan needs no manual "make it default" step — with
       // nothing else to route to, an eligible (all-vehicle-types) plan should just work.
       // Once they have any active plan already, later creates go back to requiring an

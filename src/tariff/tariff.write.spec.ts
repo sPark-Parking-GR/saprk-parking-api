@@ -12,6 +12,7 @@ import {
 } from '../common/errors/domain.errors'
 import { validateRateGrid } from './schedule-validation'
 import type { PrismaService } from '../prisma/prisma.service'
+import type { EntitlementService } from '../subscriptions/entitlement.service'
 import { tariffDraftSchema, type TariffDraftDto } from './dto/tariff.dto'
 
 const operatorUser: AuthUser = {
@@ -128,6 +129,7 @@ describe('TariffService admin writes', () => {
     $transaction: jest.Mock
   }
   let scope: { resolve: jest.Mock; scopeWhere: jest.Mock }
+  let entitlements: { assertCanCreateTariffPlan: jest.Mock }
   let service: TariffService
   let tx: {
     facility: { updateMany: jest.Mock }
@@ -146,6 +148,7 @@ describe('TariffService admin writes', () => {
     rateCap: { createMany: jest.Mock; deleteMany: jest.Mock }
     tariffRate: { createMany: jest.Mock }
     auditLog: { create: jest.Mock }
+    $executeRaw: jest.Mock
   }
 
   function setScope(s: OperatorScope) {
@@ -237,6 +240,7 @@ describe('TariffService admin writes', () => {
       rateCap: { createMany: jest.fn(), deleteMany: jest.fn() },
       tariffRate: { createMany: jest.fn() },
       auditLog: { create: jest.fn() },
+      $executeRaw: jest.fn().mockResolvedValue(0),
     }
     prisma = {
       facility: {
@@ -267,9 +271,11 @@ describe('TariffService admin writes', () => {
       $transaction: jest.fn(async (cb: (t: typeof tx) => unknown) => cb(tx)),
     }
     scope = { resolve: jest.fn(), scopeWhere: jest.fn() }
+    entitlements = { assertCanCreateTariffPlan: jest.fn().mockResolvedValue(undefined) }
     service = new TariffService(
       prisma as unknown as PrismaService,
       scope as unknown as OperatorScopeService,
+      entitlements as unknown as EntitlementService,
     )
   })
 
@@ -793,6 +799,7 @@ describe('TariffService.simulate', () => {
     service = new TariffService(
       prisma as unknown as PrismaService,
       scope as unknown as OperatorScopeService,
+      {} as unknown as EntitlementService,
     )
   })
 

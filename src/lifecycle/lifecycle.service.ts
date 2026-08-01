@@ -10,9 +10,9 @@ import {
   OperatorHasActiveFacilitiesError,
 } from '../common/errors/domain.errors'
 import { unhonouredBookingsWhere } from '../facilities/facilities.service'
-import { UNCLAIMED_OPERATOR_ID } from '../ingestion/ingestion.constants'
 import { anyLifecycleStatus } from '../prisma/lifecycle.extension'
 import { PrismaService } from '../prisma/prisma.service'
+import { EntitlementService } from '../subscriptions/entitlement.service'
 
 export interface LifecycleActor {
   id: string
@@ -41,6 +41,7 @@ export class LifecycleService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async archiveFacility(actor: LifecycleActor, id: string, reason?: string): Promise<void> {
@@ -82,10 +83,10 @@ export class LifecycleService {
   }
 
   /**
-   * Restore re-validates the one-facility-per-operator cap rather than just clearing the
-   * flag: the archived row left the cap's partial-index domain, the operator may have
-   * created a replacement meanwhile, and restoring would re-enter the domain. isActive is
-   * NOT touched — archiving unpublished the facility and restore never republishes.
+   * Restore re-validates the operator's facility entitlement rather than just clearing the
+   * flag: archiving freed a quota slot, the operator may have filled it meanwhile, and
+   * restoring consumes one again. isActive is NOT touched — archiving unpublished the
+   * facility and restore never republishes.
    *
    * `reason` lands in the audit row only, never in lifecycleReason: that column describes
    * why the row is in its CURRENT state, and every restore clears it. Writing a restore
@@ -100,42 +101,18 @@ export class LifecycleService {
         'restored',
       )
 
-      if (row.operatorId !== UNCLAIMED_OPERATOR_ID) {
-        const conflict = await tx.facility.findFirst({
-          where: {
-            operatorId: row.operatorId,
-            id: { not: id },
-            lifecycleStatus: LifecycleStatus.ACTIVE,
-          },
-          select: { id: true, name: true },
-        })
-        if (conflict) {
-          throw new LifecycleRestoreConflictError(
-            'facility',
-            id,
-            `operator ${row.operatorId} already has an active facility (${conflict.id} "${conflict.name}") and may own only one. Archive it first.`,
-          )
-        }
-      }
+      // Restoring returns a facility to the ACTIVE set, so it consumes quota exactly like
+      // a create and must clear the same entitlement check — the operator may now be on a
+      // multi-facility plan. Lock the operator row first: the partial unique index that
+      // used to backstop this was dropped with the one-facility cap, so this lock is the
+      // only thing serialising a restore against a concurrent create.
+      await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${row.operatorId} FOR UPDATE`
+      await this.entitlements.assertCanCreateFacility(row.operatorId, tx)
 
-      try {
-        await tx.facility.update({
-          where: { id, lifecycleStatus: row.lifecycleStatus },
-          data: this.write(actor, LifecycleStatus.ACTIVE, undefined),
-        })
-      } catch (error) {
-        // The recreated partial unique index is the concurrency backstop: a competing
-        // create or restore that claimed the operator's slot after the pre-check above
-        // surfaces here as P2002.
-        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-          throw new LifecycleRestoreConflictError(
-            'facility',
-            id,
-            'a concurrent change claimed the operator facility slot this restore needs. Re-check and retry.',
-          )
-        }
-        throw error
-      }
+      await tx.facility.update({
+        where: { id, lifecycleStatus: row.lifecycleStatus },
+        data: this.write(actor, LifecycleStatus.ACTIVE, undefined),
+      })
       await this.audit(tx, actor, 'facility.restored', 'Facility', id, { reason: reason ?? null })
     })
   }

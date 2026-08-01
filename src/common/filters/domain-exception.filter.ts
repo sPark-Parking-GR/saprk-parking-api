@@ -18,9 +18,10 @@ import {
   ApprovalNotPendingError,
   BookingNotFoundError,
   BookingStatusTransitionError,
+  DefaultSubscriptionPlanMissingError,
   DefaultTariffRequiredError,
   DomainError,
-  FacilityAlreadyExistsError,
+  EntitlementLimitExceededError,
   FacilityDeactivationFailedError,
   FacilityFieldForbiddenError,
   FacilityHasActiveBookingsError,
@@ -42,6 +43,10 @@ import {
   QuoteExpiredError,
   RefundFailedError,
   SelfApprovalError,
+  SubscriptionDowngradeBlockedError,
+  SubscriptionPlanCodeTakenError,
+  SubscriptionPlanInUseError,
+  SubscriptionPlanNotFoundError,
   TariffPlanNotFoundError,
   TicketNotFoundError,
   TicketNotIssuableError,
@@ -107,6 +112,16 @@ export class DomainExceptionFilter implements ExceptionFilter {
       }
     }
 
+    // Same shape as the lifecycle blocker list above, and for the same reason: the refusal
+    // has to be renderable as the exact cleanup the operator must perform, without a
+    // second call to work out which limits are breached and by how much.
+    if (exception instanceof SubscriptionDowngradeBlockedError) {
+      return {
+        status: HttpStatus.CONFLICT,
+        body: { message: exception.message, violations: exception.violations },
+      }
+    }
+
     const status = this.statusForDomainError(exception)
     if (status) {
       return { status, body: { message: (exception as Error).message } }
@@ -151,7 +166,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof OperatorMemberNotFoundError ||
       exception instanceof TicketNotFoundError ||
       exception instanceof LifecycleResourceNotFoundError ||
-      exception instanceof ApprovalNotFoundError
+      exception instanceof ApprovalNotFoundError ||
+      exception instanceof SubscriptionPlanNotFoundError
     ) {
       return HttpStatus.NOT_FOUND
     }
@@ -174,7 +190,9 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof BookingStatusTransitionError ||
       exception instanceof IdempotencyConflictError ||
       exception instanceof DefaultTariffRequiredError ||
-      exception instanceof FacilityAlreadyExistsError ||
+      exception instanceof EntitlementLimitExceededError ||
+      exception instanceof SubscriptionPlanCodeTakenError ||
+      exception instanceof SubscriptionPlanInUseError ||
       exception instanceof FacilityHasActiveBookingsError ||
       exception instanceof AccountHasUnsettledBookingsError ||
       exception instanceof InviteAlreadyAcceptedError ||
@@ -215,7 +233,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
     // is expected to succeed on retry.
     if (
       exception instanceof AccessCodeGenerationError ||
-      exception instanceof TicketVerificationUnavailableError
+      exception instanceof TicketVerificationUnavailableError ||
+      exception instanceof DefaultSubscriptionPlanMissingError
     ) {
       return HttpStatus.SERVICE_UNAVAILABLE
     }

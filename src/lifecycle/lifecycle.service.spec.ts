@@ -1,6 +1,7 @@
 import { LifecycleStatus, Prisma } from '@prisma/client'
 import type { ConfigService } from '@nestjs/config'
 import {
+  EntitlementLimitExceededError,
   FacilityHasActiveBookingsError,
   LifecycleResourceNotFoundError,
   LifecycleRestoreConflictError,
@@ -8,6 +9,7 @@ import {
   OperatorHasActiveFacilitiesError,
 } from '../common/errors/domain.errors'
 import type { PrismaService } from '../prisma/prisma.service'
+import type { EntitlementService } from '../subscriptions/entitlement.service'
 import { LifecycleService } from './lifecycle.service'
 
 const ACTOR = { id: 'admin-1', role: 'platform_admin' }
@@ -19,6 +21,7 @@ type Tx = {
   user: { findFirst: jest.Mock; update: jest.Mock }
   booking: { count: jest.Mock }
   auditLog: { create: jest.Mock }
+  $executeRaw: jest.Mock
 }
 
 function makeTx(): Tx {
@@ -29,10 +32,19 @@ function makeTx(): Tx {
     user: { findFirst: jest.fn(), update: jest.fn() },
     booking: { count: jest.fn().mockResolvedValue(0) },
     auditLog: { create: jest.fn() },
+    $executeRaw: jest.fn(),
   }
 }
 
-function makeService(tx: Tx): LifecycleService {
+type Entitlements = { assertCanCreateFacility: jest.Mock }
+
+function makeEntitlements(): Entitlements {
+  // Quota is EntitlementService's job and has its own suite; here it always permits, so
+  // these cases exercise lifecycle transitions rather than re-testing quotas.
+  return { assertCanCreateFacility: jest.fn().mockResolvedValue(undefined) }
+}
+
+function makeService(tx: Tx, entitlements: Entitlements): LifecycleService {
   const prisma = {
     $transaction: jest.fn(async (fn: (client: Tx) => Promise<unknown>) => fn(tx)),
   }
@@ -40,6 +52,7 @@ function makeService(tx: Tx): LifecycleService {
   return new LifecycleService(
     prisma as unknown as PrismaService,
     config as unknown as ConfigService,
+    entitlements as unknown as EntitlementService,
   )
 }
 
@@ -52,11 +65,13 @@ function p2002(): Prisma.PrismaClientKnownRequestError {
 
 describe('LifecycleService — facility', () => {
   let tx: Tx
+  let entitlements: Entitlements
   let service: LifecycleService
 
   beforeEach(() => {
     tx = makeTx()
-    service = makeService(tx)
+    entitlements = makeEntitlements()
+    service = makeService(tx, entitlements)
   })
 
   it('archives an active facility, forcing unpublish', async () => {
@@ -132,63 +147,54 @@ describe('LifecycleService — facility', () => {
     expect(data.purgeAfter.getTime() - before).toBeLessThanOrEqual(expected + 60_000)
   })
 
-  it('refuses restore when the operator has an active facility, naming the conflict', async () => {
-    tx.facility.findFirst
-      .mockResolvedValueOnce({
-        id: 'f1',
-        operatorId: 'op1',
-        lifecycleStatus: LifecycleStatus.ARCHIVED,
-      })
-      .mockResolvedValueOnce({ id: 'f2', name: 'Replacement Garage' })
+  it('refuses restore when the operator is at its facility entitlement', async () => {
+    tx.facility.findFirst.mockResolvedValueOnce({
+      id: 'f1',
+      operatorId: 'op1',
+      lifecycleStatus: LifecycleStatus.ARCHIVED,
+    })
+    entitlements.assertCanCreateFacility.mockRejectedValueOnce(
+      new EntitlementLimitExceededError('facilities', 1, 1),
+    )
 
-    await expect(service.restoreFacility(ACTOR, 'f1')).rejects.toThrow(
-      /f2 "Replacement Garage".*may own only one/,
+    await expect(service.restoreFacility(ACTOR, 'f1')).rejects.toBeInstanceOf(
+      EntitlementLimitExceededError,
     )
     expect(tx.facility.update).not.toHaveBeenCalled()
   })
 
-  it('restores without republishing and translates a concurrent P2002 to a domain error', async () => {
-    tx.facility.findFirst
-      .mockResolvedValueOnce({
-        id: 'f1',
-        operatorId: 'op1',
-        lifecycleStatus: LifecycleStatus.ARCHIVED,
-      })
-      .mockResolvedValueOnce(null)
-    tx.facility.update.mockRejectedValueOnce(p2002())
-
-    await expect(service.restoreFacility(ACTOR, 'f1')).rejects.toBeInstanceOf(
-      LifecycleRestoreConflictError,
-    )
-
-    tx.facility.findFirst
-      .mockResolvedValueOnce({
-        id: 'f1',
-        operatorId: 'op1',
-        lifecycleStatus: LifecycleStatus.ARCHIVED,
-      })
-      .mockResolvedValueOnce(null)
-    tx.facility.update.mockResolvedValueOnce({})
-
-    await service.restoreFacility(ACTOR, 'f1')
-
-    const data = tx.facility.update.mock.calls[1][0].data as Record<string, unknown>
-    expect(data['lifecycleStatus']).toBe(LifecycleStatus.ACTIVE)
-    expect(data['purgeAfter']).toBeNull()
-    expect(data).not.toHaveProperty('isActive')
-  })
-
-  it('skips the cap check for the synthetic unclaimed-import operator', async () => {
+  it('locks the operator row before checking quota, so a concurrent create cannot slip past', async () => {
     tx.facility.findFirst.mockResolvedValueOnce({
       id: 'f1',
-      operatorId: 'osm-unclaimed-operator',
+      operatorId: 'op1',
       lifecycleStatus: LifecycleStatus.ARCHIVED,
     })
 
     await service.restoreFacility(ACTOR, 'f1')
 
-    expect(tx.facility.findFirst).toHaveBeenCalledTimes(1)
-    expect(tx.facility.update).toHaveBeenCalled()
+    // The partial unique index that used to backstop this was dropped with the
+    // one-facility cap, so ordering here is the whole guarantee.
+    const lockOrder = tx.$executeRaw.mock.invocationCallOrder[0]
+    const checkOrder = entitlements.assertCanCreateFacility.mock.invocationCallOrder[0]
+    expect(lockOrder).toBeDefined()
+    expect(checkOrder).toBeDefined()
+    expect(lockOrder as number).toBeLessThan(checkOrder as number)
+    expect(entitlements.assertCanCreateFacility).toHaveBeenCalledWith('op1', tx)
+  })
+
+  it('restores without republishing', async () => {
+    tx.facility.findFirst.mockResolvedValueOnce({
+      id: 'f1',
+      operatorId: 'op1',
+      lifecycleStatus: LifecycleStatus.ARCHIVED,
+    })
+
+    await service.restoreFacility(ACTOR, 'f1')
+
+    const data = tx.facility.update.mock.calls[0][0].data as Record<string, unknown>
+    expect(data['lifecycleStatus']).toBe(LifecycleStatus.ACTIVE)
+    expect(data['purgeAfter']).toBeNull()
+    expect(data).not.toHaveProperty('isActive')
   })
 })
 
@@ -198,7 +204,7 @@ describe('LifecycleService — tariff plan', () => {
 
   beforeEach(() => {
     tx = makeTx()
-    service = makeService(tx)
+    service = makeService(tx, makeEntitlements())
   })
 
   it('archives preserving isActive and isDefault', async () => {
@@ -273,7 +279,7 @@ describe('LifecycleService — operator', () => {
 
   beforeEach(() => {
     tx = makeTx()
-    service = makeService(tx)
+    service = makeService(tx, makeEntitlements())
   })
 
   it('refuses to archive an operator that still has lifecycle-active facilities', async () => {
@@ -314,7 +320,7 @@ describe('LifecycleService — user', () => {
 
   beforeEach(() => {
     tx = makeTx()
-    service = makeService(tx)
+    service = makeService(tx, makeEntitlements())
   })
 
   it('archiving revokes sessions via the watermark', async () => {
