@@ -8,8 +8,16 @@ const DEFAULT_DATABASE_URL =
  * a bound parameter in DDL. Both facts make this pattern a safety interlock rather than a
  * style rule: it is what stops a stray DATABASE_URL from pointing the teardown at the
  * developer's own `spark` database.
+ *
+ * Scoped to `_e2e` only, an orphaned `spark_verify` created by other one-off tooling was
+ * once invisible to this same guard and had to be dropped by hand. Widened to a small,
+ * explicit set of throwaway suffixes so any script pointing `E2E_DATABASE_URL` at its own
+ * scratch database — not just this suite's — gets the same interlock, rather than every
+ * one-off tool inventing its own unguarded drop/create. `spark` itself still can never
+ * match: every branch requires a `_suffix`, so a bare database name is rejected no matter
+ * what suffixes are added here.
  */
-const TEST_DATABASE_NAME = /^[a-z][a-z0-9_]*_e2e$/
+const THROWAWAY_DATABASE_NAME = /^[a-z][a-z0-9_]*_(?:e2e|scratch|verify|test|tmp)$/
 
 export const E2E_AUTH_SECRET = 'e2e-auth-secret-0123456789abcdef'
 
@@ -24,10 +32,10 @@ export function resolveTestDatabase(): TestDatabase {
   const url = new URL(process.env['E2E_DATABASE_URL'] ?? DEFAULT_DATABASE_URL)
   const name = decodeURIComponent(url.pathname.slice(1))
 
-  if (!TEST_DATABASE_NAME.test(name)) {
+  if (!THROWAWAY_DATABASE_NAME.test(name)) {
     throw new Error(
       `Refusing to run e2e against database "${name}": the name must match ` +
-        `${TEST_DATABASE_NAME.source}. The harness drops and recreates this database.`,
+        `${THROWAWAY_DATABASE_NAME.source}. The harness drops and recreates this database.`,
     )
   }
 

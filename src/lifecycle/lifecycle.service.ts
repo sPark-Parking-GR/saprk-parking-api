@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import { LifecycleStatus, Prisma } from '@prisma/client'
+import { RequestContext } from '../common/context/request-context'
 import {
   FacilityHasActiveBookingsError,
   LifecycleResourceNotFoundError,
@@ -85,8 +86,12 @@ export class LifecycleService {
    * flag: the archived row left the cap's partial-index domain, the operator may have
    * created a replacement meanwhile, and restoring would re-enter the domain. isActive is
    * NOT touched — archiving unpublished the facility and restore never republishes.
+   *
+   * `reason` lands in the audit row only, never in lifecycleReason: that column describes
+   * why the row is in its CURRENT state, and every restore clears it. Writing a restore
+   * motive there would leave an ACTIVE row explaining why it was archived.
    */
-  async restoreFacility(actor: LifecycleActor, id: string): Promise<void> {
+  async restoreFacility(actor: LifecycleActor, id: string, reason?: string): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
       const row = await this.loadFacility(
         tx,
@@ -131,7 +136,7 @@ export class LifecycleService {
         }
         throw error
       }
-      await this.audit(tx, actor, 'facility.restored', 'Facility', id)
+      await this.audit(tx, actor, 'facility.restored', 'Facility', id, { reason: reason ?? null })
     })
   }
 
@@ -174,7 +179,7 @@ export class LifecycleService {
     })
   }
 
-  async restoreTariffPlan(actor: LifecycleActor, id: string): Promise<void> {
+  async restoreTariffPlan(actor: LifecycleActor, id: string, reason?: string): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
       const row = await this.loadTariffPlan(
         tx,
@@ -218,7 +223,9 @@ export class LifecycleService {
         }
         throw error
       }
-      await this.audit(tx, actor, 'tariff_plan.restored', 'TariffPlan', id)
+      await this.audit(tx, actor, 'tariff_plan.restored', 'TariffPlan', id, {
+        reason: reason ?? null,
+      })
     })
   }
 
@@ -257,7 +264,7 @@ export class LifecycleService {
     })
   }
 
-  async restoreOperator(actor: LifecycleActor, id: string): Promise<void> {
+  async restoreOperator(actor: LifecycleActor, id: string, reason?: string): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
       const row = await this.loadOperator(
         tx,
@@ -269,7 +276,9 @@ export class LifecycleService {
         where: { id, lifecycleStatus: row.lifecycleStatus },
         data: this.write(actor, LifecycleStatus.ACTIVE, undefined),
       })
-      await this.audit(tx, actor, 'operator.restored', 'ParkingOperator', id)
+      await this.audit(tx, actor, 'operator.restored', 'ParkingOperator', id, {
+        reason: reason ?? null,
+      })
     })
   }
 
@@ -313,7 +322,7 @@ export class LifecycleService {
     })
   }
 
-  async restoreUser(actor: LifecycleActor, id: string): Promise<void> {
+  async restoreUser(actor: LifecycleActor, id: string, reason?: string): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
       const row = await this.loadUser(
         tx,
@@ -332,7 +341,7 @@ export class LifecycleService {
         where: { id, lifecycleStatus: row.lifecycleStatus },
         data: this.write(actor, LifecycleStatus.ACTIVE, undefined),
       })
-      await this.audit(tx, actor, 'user.restored', 'User', id)
+      await this.audit(tx, actor, 'user.restored', 'User', id, { reason: reason ?? null })
     })
   }
 
@@ -463,6 +472,7 @@ export class LifecycleService {
         action,
         entityType,
         entityId,
+        ipAddress: RequestContext.getIp(),
         ...(payload ? { payload } : {}),
       },
     })

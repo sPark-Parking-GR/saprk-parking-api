@@ -240,3 +240,64 @@ export class OperatorHasActiveFacilitiesError extends DomainError {
     )
   }
 }
+
+// The impact dry run found at least one hard stop. Carries the full blocker list rather
+// than only the first, so one round trip tells the caller everything they must clear —
+// and the same list the /impact preview showed them.
+export class LifecycleActionBlockedError extends DomainError {
+  constructor(
+    action: string,
+    resource: string,
+    id: string,
+    readonly blockers: ReadonlyArray<{ code: string; message: string; remedy: string }>,
+  ) {
+    super(
+      `Cannot ${action} ${resource} ${id}: ${blockers.map((blocker) => blocker.message).join('; ')}`,
+    )
+  }
+}
+
+// Fail-closed bootstrap: purge needs a second holder of platform:tenant.purge to approve
+// it, and a fresh install created by bootstrap:admin has exactly one. Auto-bypassing the
+// two-person rule while only one holder exists would remove the control precisely in the
+// situation a compromised sole account would exploit, so the purge is refused instead.
+export class PurgeApproverUnavailableError extends DomainError {
+  constructor() {
+    super(
+      'Purge needs a second platform administrator to approve it, and no other account holds that permission. Grant platform admin to a second person first.',
+    )
+  }
+}
+
+export class ApprovalNotFoundError extends DomainError {
+  constructor(id: string) {
+    super(`Approval ${id} not found`)
+  }
+}
+
+// The whole point of the control: the person who asked cannot be the second pair of eyes.
+export class SelfApprovalError extends DomainError {
+  constructor() {
+    super(
+      'You requested this purge and cannot approve it. A different platform administrator must.',
+    )
+  }
+}
+
+export class ApprovalExpiredError extends DomainError {
+  constructor(id: string) {
+    super(`Approval ${id} has expired and cannot be redeemed. Request the purge again.`)
+  }
+}
+
+export class ApprovalNotPendingError extends DomainError {
+  constructor(id: string, status: string) {
+    super(`Approval ${id} is already ${status.toLowerCase()} and cannot be decided again`)
+  }
+}
+
+export class ApprovalAlreadyPendingError extends DomainError {
+  constructor(id: string) {
+    super(`This purge is already awaiting approval (${id}). Have it approved or rejected first.`)
+  }
+}

@@ -137,6 +137,16 @@ enum LifecycleStatus {
   PURGED
 }
 
+// Outcome of a two-person-rule request (see the PendingApproval model). PENDING is the
+// only redeemable state and the only one the partial unique index counts; the other three
+// are terminal, so an approval can be spent exactly once.
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
 // How a facility is used, so free public lots and commercial parking businesses are
 // managed separately. OSM mixes both; Google only ever returns real businesses.
 enum FacilityKind {
@@ -841,4 +851,39 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([actorId])
   @@index([createdAt])
+}
+
+// ─── Two-person rule ──────────────────────────────────────────────────────────
+
+// One irreversible action, requested by one platform administrator and redeemable only by
+// a different one. Purge is the only action that mints these: archive and tombstone are
+// reversible and need no second pair of eyes.
+//
+// requestedBy/decidedBy are TEXT with no foreign key, matching lifecycleChangedBy: who
+// asked and who agreed are audit facts that must outlive either account.
+//
+// At most one PENDING row per (action, resourceType, resourceId) is a PARTIAL unique index
+// defined in the migration (WHERE status = 'PENDING'), following the same convention as
+// Facility_operatorId_claimed_key — not expressible as a schema @@unique, so this stays a
+// plain index here and the database enforces the constraint.
+model PendingApproval {
+  id              String         @id @default(cuid())
+  action          String
+  resourceType    String
+  resourceId      String
+  reason          String
+  requestedBy     String
+  requestedByRole String
+  status          ApprovalStatus @default(PENDING)
+  expiresAt       DateTime
+  decidedBy       String?
+  decidedByRole   String?
+  decidedAt       DateTime?
+  decisionReason  String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([status, expiresAt])
+  @@index([action, resourceType, resourceId])
+  @@index([requestedBy])
 }

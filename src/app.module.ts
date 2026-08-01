@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config'
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core'
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler'
 import { LoggerModule } from 'nestjs-pino'
+import { AdminModule } from './admin/admin.module'
 import { AnalyticsModule } from './analytics/analytics.module'
 import { AuditModule } from './audit/audit.module'
 import { AuthModule } from './auth/auth.module'
@@ -52,6 +53,7 @@ import { TariffModule } from './tariff/tariff.module'
     IngestionModule,
     AnalyticsModule,
     AuditModule,
+    AdminModule,
     HealthModule,
   ],
   providers: [

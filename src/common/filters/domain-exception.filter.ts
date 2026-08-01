@@ -12,6 +12,10 @@ import { AuthError, EmailInUseError, InvalidCredentialsError, InvalidTokenError 
 import {
   AccessCodeGenerationError,
   AnalyticsScopeForbiddenError,
+  ApprovalAlreadyPendingError,
+  ApprovalExpiredError,
+  ApprovalNotFoundError,
+  ApprovalNotPendingError,
   BookingNotFoundError,
   BookingStatusTransitionError,
   DefaultTariffRequiredError,
@@ -23,6 +27,7 @@ import {
   FacilityNotBookableError,
   FacilityNotFoundError,
   IdempotencyConflictError,
+  LifecycleActionBlockedError,
   LifecycleResourceNotFoundError,
   LifecycleRestoreConflictError,
   LifecycleTransitionError,
@@ -33,8 +38,10 @@ import {
   OperatorHasActiveFacilitiesError,
   OperatorSuspendedError,
   OperatorTargetRequiredError,
+  PurgeApproverUnavailableError,
   QuoteExpiredError,
   RefundFailedError,
+  SelfApprovalError,
   TariffPlanNotFoundError,
   TicketNotFoundError,
   TicketNotIssuableError,
@@ -91,6 +98,15 @@ export class DomainExceptionFilter implements ExceptionFilter {
       }
     }
 
+    // The blocker list travels with the refusal so the client can render the same
+    // {code, message, remedy} triples the /impact dry run showed, without a second call.
+    if (exception instanceof LifecycleActionBlockedError) {
+      return {
+        status: HttpStatus.CONFLICT,
+        body: { message: exception.message, blockers: exception.blockers },
+      }
+    }
+
     const status = this.statusForDomainError(exception)
     if (status) {
       return { status, body: { message: (exception as Error).message } }
@@ -134,7 +150,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof OperatorNotFoundError ||
       exception instanceof OperatorMemberNotFoundError ||
       exception instanceof TicketNotFoundError ||
-      exception instanceof LifecycleResourceNotFoundError
+      exception instanceof LifecycleResourceNotFoundError ||
+      exception instanceof ApprovalNotFoundError
     ) {
       return HttpStatus.NOT_FOUND
     }
@@ -142,11 +159,12 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof OperatorContextRequiredError ||
       exception instanceof FacilityFieldForbiddenError ||
       exception instanceof OperatorSuspendedError ||
-      exception instanceof AnalyticsScopeForbiddenError
+      exception instanceof AnalyticsScopeForbiddenError ||
+      exception instanceof SelfApprovalError
     ) {
       return HttpStatus.FORBIDDEN
     }
-    if (exception instanceof InviteExpiredError) {
+    if (exception instanceof InviteExpiredError || exception instanceof ApprovalExpiredError) {
       return HttpStatus.GONE
     }
     if (
@@ -170,7 +188,11 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof TicketNotIssuableError ||
       exception instanceof LifecycleTransitionError ||
       exception instanceof LifecycleRestoreConflictError ||
-      exception instanceof OperatorHasActiveFacilitiesError
+      exception instanceof LifecycleActionBlockedError ||
+      exception instanceof OperatorHasActiveFacilitiesError ||
+      exception instanceof PurgeApproverUnavailableError ||
+      exception instanceof ApprovalNotPendingError ||
+      exception instanceof ApprovalAlreadyPendingError
     ) {
       return HttpStatus.CONFLICT
     }

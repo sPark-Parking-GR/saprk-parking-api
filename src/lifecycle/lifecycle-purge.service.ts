@@ -1,7 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { BookingStatus, LifecycleStatus, Prisma } from '@prisma/client'
+import { RequestContext } from '../common/context/request-context'
+import {
+  LifecycleResourceNotFoundError,
+  LifecycleTransitionError,
+} from '../common/errors/domain.errors'
 import { anyLifecycleStatus } from '../prisma/lifecycle.extension'
 import { PrismaService } from '../prisma/prisma.service'
+import type { LifecycleActor } from './lifecycle.service'
+import {
+  RESOURCE_AUDIT_PREFIX,
+  RESOURCE_ENTITY_TYPE,
+  type LifecycleResourceType,
+} from './lifecycle.types'
 
 // Rows processed per resource per run. The worker repeats on an interval, so a backlog
 // larger than one batch drains across runs instead of holding one job open for hours.
@@ -18,6 +29,17 @@ const ROW_GONE = 'P2025'
 export interface PurgeCounts {
   purged: number
   blocked: number
+}
+
+/**
+ * Everything that physically pins a row against deletion, counted per resource. The batch
+ * sweep, the on-demand purge and the impact dry run all read these same numbers, so what
+ * an administrator is shown before approving is what actually decides the outcome.
+ */
+export interface PurgeRefs {
+  /** Non-zero means the purge cannot proceed at all. */
+  blocking: number
+  counts: Record<string, number>
 }
 
 export interface PurgeSummary {
@@ -80,14 +102,12 @@ export class LifecyclePurgeService {
     const due = await this.due(this.prisma.facility, now)
 
     for (const { id } of due) {
-      const bookings = await this.prisma.booking.count({ where: { facilityId: id } })
-      if (bookings > 0) {
+      const refs = await this.facilityRefs(id)
+      if (refs.blocking > 0) {
         counts.blocked++
         continue
       }
-      const outcome = await this.tryPurge('Facility', id, async (tx) => {
-        await tx.facility.delete({ where: { id, lifecycleStatus: LifecycleStatus.TOMBSTONED } })
-      })
+      const outcome = await this.tryPurge('Facility', id, (tx) => this.removeFacility(tx, id))
       counts[outcome]++
     }
     return counts
@@ -98,9 +118,7 @@ export class LifecyclePurgeService {
     const due = await this.due(this.prisma.tariffPlan, now)
 
     for (const { id } of due) {
-      const outcome = await this.tryPurge('TariffPlan', id, async (tx) => {
-        await tx.tariffPlan.delete({ where: { id, lifecycleStatus: LifecycleStatus.TOMBSTONED } })
-      })
+      const outcome = await this.tryPurge('TariffPlan', id, (tx) => this.removeTariffPlan(tx, id))
       counts[outcome]++
     }
     return counts
@@ -111,24 +129,14 @@ export class LifecyclePurgeService {
     const due = await this.due(this.prisma.parkingOperator, now)
 
     for (const { id } of due) {
-      // The facility count must see EVERY lifecycle state: a tombstoned facility still
-      // physically references its operator, and the default filter would hide it.
-      const [facilities, ownershipPeriods, promotionPlans] = await Promise.all([
-        this.prisma.facility.count({
-          where: { operatorId: id, lifecycleStatus: anyLifecycleStatus() },
-        }),
-        this.prisma.facilityOwnershipPeriod.count({ where: { operatorId: id } }),
-        this.prisma.promotionPlan.count({ where: { operatorId: id } }),
-      ])
-      if (facilities > 0 || ownershipPeriods > 0 || promotionPlans > 0) {
+      const refs = await this.operatorRefs(id)
+      if (refs.blocking > 0) {
         counts.blocked++
         continue
       }
-      const outcome = await this.tryPurge('ParkingOperator', id, async (tx) => {
-        await tx.parkingOperator.delete({
-          where: { id, lifecycleStatus: LifecycleStatus.TOMBSTONED },
-        })
-      })
+      const outcome = await this.tryPurge('ParkingOperator', id, (tx) =>
+        this.removeOperator(tx, id),
+      )
       counts[outcome]++
     }
     return counts
@@ -144,42 +152,207 @@ export class LifecyclePurgeService {
     })
 
     for (const row of due) {
-      const unsettled = await this.prisma.booking.count({ where: this.unsettledWhere(row.id) })
-      if (unsettled > 0) {
+      const refs = await this.userRefs(row.id)
+      if (refs.blocking > 0) {
         counts.blocked++
         continue
       }
-      // The uid is about to be nulled and is stored nowhere else; logging it is the ops
-      // trail for cleaning up the remote identity, same as AccountDeletionService.
-      if (row.firebaseUid) {
-        this.logger.warn(
-          `Purging user ${row.id}: Firebase identity ${row.firebaseUid} must be removed separately`,
-        )
-      }
-      const outcome = await this.tryPurge('User', row.id, async (tx) => {
-        const at = new Date()
-        await tx.user.update({
-          where: { id: row.id, lifecycleStatus: LifecycleStatus.TOMBSTONED },
-          data: {
-            email: tombstoneEmail(row.id),
-            displayName: null,
-            avatarUrl: null,
-            passwordHash: null,
-            firebaseUid: null,
-            emailVerified: false,
-            deletedAt: at,
-            sessionsValidFrom: at,
-            lifecycleStatus: LifecycleStatus.PURGED,
-            lifecycleChangedAt: at,
-            lifecycleReason: 'Retention purge: anonymised in place',
-          },
-        })
-        await tx.vehicle.deleteMany({ where: { userId: row.id } })
-        await tx.passwordResetToken.deleteMany({ where: { userId: row.id } })
-      })
+      this.warnAboutRemoteIdentity(row.id, row.firebaseUid)
+      const outcome = await this.tryPurge('User', row.id, (tx) => this.anonymiseUser(tx, row.id))
       counts[outcome]++
     }
     return counts
+  }
+
+  /**
+   * A purge an administrator asked for and a second one approved, applied now rather than
+   * when the retention window lapses. It runs the same reference checks and the same
+   * removal recipes as the sweep — the only differences are that it names one row, that a
+   * blocked row is an error the caller must see instead of a counter, and that the audit
+   * entry carries the human who approved it and their stated reason.
+   */
+  async purgeOne(
+    actor: LifecycleActor,
+    resourceType: LifecycleResourceType,
+    id: string,
+    audit: { reason: string; approvalId: string; requestedBy: string },
+  ): Promise<void> {
+    const entityType = RESOURCE_ENTITY_TYPE[resourceType]
+    await this.assertTombstoned(resourceType, id, entityType)
+
+    if (resourceType === 'user') {
+      const row = await this.prisma.user.findFirst({
+        where: { id, lifecycleStatus: anyLifecycleStatus() },
+        select: { firebaseUid: true },
+      })
+      this.warnAboutRemoteIdentity(id, row?.firebaseUid ?? null)
+    }
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await this.remove(tx, resourceType, id)
+        await tx.auditLog.create({
+          data: {
+            actorId: actor.id,
+            actorRole: actor.role,
+            action: `${RESOURCE_AUDIT_PREFIX[resourceType]}.purged`,
+            entityType,
+            entityId: id,
+            payload: {
+              reason: audit.reason,
+              approvalId: audit.approvalId,
+              requestedBy: audit.requestedBy,
+            },
+            ipAddress: RequestContext.getIp(),
+          },
+        })
+      })
+    } catch (error) {
+      // A RESTRICT FK the pre-checks did not cover. The sweep counts this as blocked and
+      // retries; an on-demand purge has a caller waiting, so it is told instead.
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === FK_RESTRICTED) {
+          throw new LifecycleTransitionError(
+            entityType,
+            id,
+            'referenced by other records',
+            'purged',
+          )
+        }
+        if (error.code === ROW_GONE) throw new LifecycleResourceNotFoundError(entityType, id)
+      }
+      throw error
+    }
+  }
+
+  /** Bookings are ON DELETE RESTRICT, so any one of them pins the facility forever. */
+  async facilityRefs(id: string): Promise<PurgeRefs> {
+    const bookings = await this.prisma.booking.count({ where: { facilityId: id } })
+    return { blocking: bookings, counts: { bookings } }
+  }
+
+  /**
+   * Nothing pins a plan: its schedule cascades and bookings pin plans by (id, version)
+   * value rather than by FK. Kept as a method so every resource is asked the same question.
+   */
+  tariffPlanRefs(): Promise<PurgeRefs> {
+    return Promise.resolve({ blocking: 0, counts: {} })
+  }
+
+  async operatorRefs(id: string): Promise<PurgeRefs> {
+    // The facility count must see EVERY lifecycle state: a tombstoned facility still
+    // physically references its operator, and the default filter would hide it.
+    const [facilities, ownershipPeriods, promotionPlans] = await Promise.all([
+      this.prisma.facility.count({
+        where: { operatorId: id, lifecycleStatus: anyLifecycleStatus() },
+      }),
+      this.prisma.facilityOwnershipPeriod.count({ where: { operatorId: id } }),
+      this.prisma.promotionPlan.count({ where: { operatorId: id } }),
+    ])
+    return {
+      blocking: facilities + ownershipPeriods + promotionPlans,
+      counts: { facilities, ownershipPeriods, promotionPlans },
+    }
+  }
+
+  async userRefs(id: string): Promise<PurgeRefs> {
+    const unsettledBookings = await this.prisma.booking.count({ where: unsettledWhere(id) })
+    return { blocking: unsettledBookings, counts: { unsettledBookings } }
+  }
+
+  refs(resourceType: LifecycleResourceType, id: string): Promise<PurgeRefs> {
+    switch (resourceType) {
+      case 'facility':
+        return this.facilityRefs(id)
+      case 'tariff-plan':
+        return this.tariffPlanRefs()
+      case 'operator':
+        return this.operatorRefs(id)
+      case 'user':
+        return this.userRefs(id)
+    }
+  }
+
+  private async assertTombstoned(
+    resourceType: LifecycleResourceType,
+    id: string,
+    entityType: string,
+  ): Promise<void> {
+    const where = { id, lifecycleStatus: anyLifecycleStatus() }
+    const select = { lifecycleStatus: true } as const
+    const row =
+      resourceType === 'facility'
+        ? await this.prisma.facility.findFirst({ where, select })
+        : resourceType === 'tariff-plan'
+          ? await this.prisma.tariffPlan.findFirst({ where, select })
+          : resourceType === 'operator'
+            ? await this.prisma.parkingOperator.findFirst({ where, select })
+            : await this.prisma.user.findFirst({ where, select })
+
+    if (!row) throw new LifecycleResourceNotFoundError(entityType, id)
+    if (row.lifecycleStatus !== LifecycleStatus.TOMBSTONED) {
+      throw new LifecycleTransitionError(entityType, id, row.lifecycleStatus, 'purged')
+    }
+  }
+
+  private remove(
+    tx: Prisma.TransactionClient,
+    resourceType: LifecycleResourceType,
+    id: string,
+  ): Promise<void> {
+    switch (resourceType) {
+      case 'facility':
+        return this.removeFacility(tx, id)
+      case 'tariff-plan':
+        return this.removeTariffPlan(tx, id)
+      case 'operator':
+        return this.removeOperator(tx, id)
+      case 'user':
+        return this.anonymiseUser(tx, id)
+    }
+  }
+
+  private async removeFacility(tx: Prisma.TransactionClient, id: string): Promise<void> {
+    await tx.facility.delete({ where: { id, lifecycleStatus: LifecycleStatus.TOMBSTONED } })
+  }
+
+  private async removeTariffPlan(tx: Prisma.TransactionClient, id: string): Promise<void> {
+    await tx.tariffPlan.delete({ where: { id, lifecycleStatus: LifecycleStatus.TOMBSTONED } })
+  }
+
+  private async removeOperator(tx: Prisma.TransactionClient, id: string): Promise<void> {
+    await tx.parkingOperator.delete({ where: { id, lifecycleStatus: LifecycleStatus.TOMBSTONED } })
+  }
+
+  private async anonymiseUser(tx: Prisma.TransactionClient, id: string): Promise<void> {
+    const at = new Date()
+    await tx.user.update({
+      where: { id, lifecycleStatus: LifecycleStatus.TOMBSTONED },
+      data: {
+        email: tombstoneEmail(id),
+        displayName: null,
+        avatarUrl: null,
+        passwordHash: null,
+        firebaseUid: null,
+        emailVerified: false,
+        deletedAt: at,
+        sessionsValidFrom: at,
+        lifecycleStatus: LifecycleStatus.PURGED,
+        lifecycleChangedAt: at,
+        lifecycleReason: 'Retention purge: anonymised in place',
+      },
+    })
+    await tx.vehicle.deleteMany({ where: { userId: id } })
+    await tx.passwordResetToken.deleteMany({ where: { userId: id } })
+  }
+
+  // The uid is about to be nulled and is stored nowhere else; logging it is the ops
+  // trail for cleaning up the remote identity, same as AccountDeletionService.
+  private warnAboutRemoteIdentity(userId: string, firebaseUid: string | null): void {
+    if (!firebaseUid) return
+    this.logger.warn(
+      `Purging user ${userId}: Firebase identity ${firebaseUid} must be removed separately`,
+    )
   }
 
   private due(
@@ -239,22 +412,23 @@ export class LifecyclePurgeService {
       return 'blocked'
     }
   }
+}
 
-  // Mirrors AccountDeletionService.unsettledWhere: money mid-flight, a bay still being
-  // held, or a car currently inside one. Anonymising the account under those would
-  // strand a settlement nobody can complete.
-  private unsettledWhere(userId: string): Prisma.BookingWhereInput {
-    const now = new Date()
-    return {
-      userId,
-      OR: [
-        {
-          status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
-          endsAt: { gt: now },
-        },
-        { status: BookingStatus.PENDING_PAYMENT, expiresAt: { gt: now } },
-        { status: BookingStatus.REFUND_PENDING },
-      ],
-    }
+// Mirrors AccountDeletionService.unsettledWhere: money mid-flight, a bay still being
+// held, or a car currently inside one. Anonymising the account under those would
+// strand a settlement nobody can complete. Exported so the impact dry run counts exactly
+// the rows the purge will refuse over, following the unhonouredBookingsWhere convention.
+export function unsettledWhere(userId: string): Prisma.BookingWhereInput {
+  const now = new Date()
+  return {
+    userId,
+    OR: [
+      {
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
+        endsAt: { gt: now },
+      },
+      { status: BookingStatus.PENDING_PAYMENT, expiresAt: { gt: now } },
+      { status: BookingStatus.REFUND_PENDING },
+    ],
   }
 }
