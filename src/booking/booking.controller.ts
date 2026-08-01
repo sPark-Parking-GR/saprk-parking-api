@@ -5,20 +5,27 @@ import {
   Delete,
   Get,
   Headers,
+  HttpCode,
   Param,
   Post,
   Query,
 } from '@nestjs/common'
+import { Throttle } from '@nestjs/throttler'
 import type { AuthUser, UserRole } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { BookingService } from './booking.service'
+import { TicketService } from './ticket.service'
 import {
   createBookingSchema,
   listBookingsSchema,
+  listMyBookingsSchema,
+  verifyTicketSchema,
   type CreateBookingDto,
   type ListBookingsDto,
+  type ListMyBookingsDto,
+  type VerifyTicketDto,
 } from './dto/booking.dto'
 
 // Controller-layer gate for the owner-or-staff endpoints. Every booking belongs to an
@@ -33,7 +40,37 @@ const BOOKING_ACTOR_ROLES: UserRole[] = [
 
 @Controller('bookings')
 export class BookingController {
-  constructor(private readonly bookings: BookingService) {}
+  constructor(
+    private readonly bookings: BookingService,
+    private readonly tickets: TicketService,
+  ) {}
+
+  // Declared before ':id' so the literal route can never be shadowed by a booking id.
+  @Roles(...BOOKING_ACTOR_ROLES)
+  @Get('mine')
+  mine(
+    @Query(new ZodValidationPipe(listMyBookingsSchema)) query: ListMyBookingsDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.bookings.listMine(user, query)
+  }
+
+  /**
+   * Barrier scan. 20/min per caller is deliberately below every other operator route: a
+   * scanner running at a real gate needs a handful of calls a minute, while the endpoint
+   * takes a credential and answers with booking data, so anything faster is either a
+   * misconfigured client or someone grinding codes.
+   */
+  @Roles('operator_staff', 'operator_admin')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Post('verify-qr')
+  @HttpCode(200)
+  verifyTicket(
+    @Body(new ZodValidationPipe(verifyTicketSchema)) body: VerifyTicketDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.tickets.verify(user, body)
+  }
 
   @Roles('operator_staff', 'operator_admin', 'platform_admin')
   @Get()
@@ -78,6 +115,15 @@ export class BookingController {
   @Get(':id')
   get(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.bookings.getBooking(id, user)
+  }
+
+  // The owner's rotating code. Cheap enough to poll while the ticket is on screen, which
+  // is what a code that rotates every minute requires.
+  @Roles(...BOOKING_ACTOR_ROLES)
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  @Get(':id/qr')
+  qr(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.tickets.issue(user, id)
   }
 
   @Roles(...BOOKING_ACTOR_ROLES)

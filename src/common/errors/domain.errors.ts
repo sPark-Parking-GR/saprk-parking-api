@@ -25,6 +25,42 @@ export class BookingNotFoundError extends DomainError {
   }
 }
 
+// A scanned ticket resolves to no booking the caller may act on. Deliberately names
+// neither the booking nor the credential: it is returned both when nothing matches and
+// when the match belongs to another operator's facility, so the two are indistinguishable
+// and ids cannot be probed — the same rule assertBookingAccess and transitionByOperator
+// already apply. Echoing the presented code back would also put a live credential in logs.
+export class TicketNotFoundError extends DomainError {
+  constructor() {
+    super('No booking matches this ticket')
+  }
+}
+
+// The replay cache could not be reached, so a rotating code cannot be proven unused. See
+// TicketService.claimNonce for why that refuses the scan instead of waving it through.
+export class TicketVerificationUnavailableError extends DomainError {
+  constructor() {
+    super(
+      'QR verification is temporarily unavailable. Check the booking in with the access code instead.',
+    )
+  }
+}
+
+export class TicketNotIssuableError extends DomainError {
+  constructor() {
+    super('This booking has no live ticket')
+  }
+}
+
+// The scanned string is not a ticket this version can read at all. Distinct from
+// TicketNotFoundError, which means the ticket parsed and matched nothing: this one is a
+// bad request (400 via the DomainError fallback) and never touches the database.
+export class MalformedTicketError extends DomainError {
+  constructor() {
+    super('This code is not a valid sPark ticket')
+  }
+}
+
 export class BookingStatusTransitionError extends DomainError {
   constructor(from: string, to: string) {
     super(`Invalid booking status transition: ${from} → ${to}`)

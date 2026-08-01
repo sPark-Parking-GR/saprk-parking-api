@@ -18,7 +18,7 @@ import { PrismaService } from '../prisma/prisma.service'
 import { TariffService } from '../tariff/tariff.service'
 import type { PriceQuote } from '../tariff/tariff.types'
 import { generateAccessCode, generateQrSecret } from './credentials'
-import type { ListBookingsDto } from './dto/booking.dto'
+import type { ListBookingsDto, ListMyBookingsDto } from './dto/booking.dto'
 import type {
   BookingDetail,
   BookingList,
@@ -37,6 +37,24 @@ interface CancellableBooking {
 }
 
 const ACCESS_CODE_ATTEMPTS = 5
+
+// One list projection for the ops board and the consumer's own trips: both render the same
+// card, and a second hand-maintained select is how a column like qrSecret gets added back
+// to exactly one of them.
+const LIST_SELECT = {
+  id: true,
+  accessCode: true,
+  status: true,
+  startsAt: true,
+  endsAt: true,
+  vehiclePlate: true,
+  vehicleType: true,
+  quotedPriceCents: true,
+  finalPriceCents: true,
+  currency: true,
+  createdAt: true,
+  facility: { select: { id: true, name: true } },
+} satisfies Prisma.BookingSelect
 
 @Injectable()
 export class BookingService {
@@ -61,20 +79,31 @@ export class BookingService {
         orderBy: { startsAt: 'desc' },
         skip: query.skip,
         take: query.take,
-        select: {
-          id: true,
-          accessCode: true,
-          status: true,
-          startsAt: true,
-          endsAt: true,
-          vehiclePlate: true,
-          vehicleType: true,
-          quotedPriceCents: true,
-          finalPriceCents: true,
-          currency: true,
-          createdAt: true,
-          facility: { select: { id: true, name: true } },
-        },
+        select: LIST_SELECT,
+      }),
+      this.prisma.booking.count({ where }),
+    ])
+
+    return { items: rows, total, skip: query.skip, take: query.take }
+  }
+
+  /**
+   * The authenticated consumer's own trips. Ownership is the whole `where` clause, not a
+   * post-filter, so there is no id to probe and no operator scope involved. Ordered by
+   * startsAt like the ops board: a trips list is read by when the stay is, not by when the
+   * row happened to be written.
+   */
+  async listMine(user: AuthUser, query: ListMyBookingsDto): Promise<BookingList> {
+    const where: Prisma.BookingWhereInput = { userId: user.id }
+    if (query.status) where.status = query.status
+
+    const [rows, total] = await Promise.all([
+      this.prisma.booking.findMany({
+        where,
+        orderBy: { startsAt: 'desc' },
+        skip: query.skip,
+        take: query.take,
+        select: LIST_SELECT,
       }),
       this.prisma.booking.count({ where }),
     ])

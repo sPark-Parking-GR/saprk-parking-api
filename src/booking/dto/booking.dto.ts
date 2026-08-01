@@ -4,6 +4,7 @@ import {
   BOOKING_BACKDATE_GRACE_MINUTES,
   MAX_BOOKING_DURATION_MINUTES,
 } from '../../tariff/tariff.types'
+import { ACCESS_CODE_ALPHABET, ACCESS_CODE_LENGTH } from '../credentials'
 
 export const createBookingSchema = z
   .object({
@@ -48,3 +49,33 @@ export const listBookingsSchema = z.object({
 })
 
 export type ListBookingsDto = z.infer<typeof listBookingsSchema>
+
+// The consumer's own trips: same page contract as the ops board, minus the filters that
+// only make sense across tenants.
+export const listMyBookingsSchema = listBookingsSchema.pick({
+  status: true,
+  skip: true,
+  take: true,
+})
+
+export type ListMyBookingsDto = z.infer<typeof listMyBookingsSchema>
+
+// Bounded so an oversized body never reaches the parser; the shape itself is checked once,
+// by parseQrPayload in TicketService, rather than being asserted here and again there.
+const qrPayloadSchema = z.string().trim().min(1).max(256)
+
+const accessCodeSchema = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .regex(new RegExp(`^[${ACCESS_CODE_ALPHABET}]{${ACCESS_CODE_LENGTH}}$`), 'Malformed access code')
+
+// A union of two strict branches rather than two optional fields: it makes "exactly one
+// credential" the type, so the service never has to assert which one arrived, and a body
+// carrying both is rejected instead of one silently winning.
+export const verifyTicketSchema = z.union([
+  z.object({ payload: qrPayloadSchema, autoCheckIn: z.boolean().default(false) }).strict(),
+  z.object({ accessCode: accessCodeSchema, autoCheckIn: z.boolean().default(false) }).strict(),
+])
+
+export type VerifyTicketDto = z.infer<typeof verifyTicketSchema>

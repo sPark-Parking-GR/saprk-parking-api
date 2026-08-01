@@ -1,4 +1,4 @@
-import { createBookingSchema } from './booking.dto'
+import { createBookingSchema, listMyBookingsSchema, verifyTicketSchema } from './booking.dto'
 
 const baseInput = {
   facilityId: 'f1',
@@ -93,5 +93,55 @@ describe('createBookingSchema account rules', () => {
       expect(result.data).not.toHaveProperty('guestEmail')
       expect(result.data).not.toHaveProperty('guestPhone')
     }
+  })
+})
+
+describe('verifyTicketSchema', () => {
+  const payload = `v1.ckbooking000000000000001.29500000.${'a'.repeat(22)}`
+  const accessCode = '0123456789ABCDEFGHJKMNPQRS'
+
+  it('accepts a QR payload and defaults autoCheckIn off', () => {
+    const result = verifyTicketSchema.safeParse({ payload })
+
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data).toEqual({ payload, autoCheckIn: false })
+  })
+
+  it('accepts an access code, normalising case and surrounding whitespace', () => {
+    const result = verifyTicketSchema.safeParse({
+      accessCode: `  ${accessCode.toLowerCase()} `,
+      autoCheckIn: true,
+    })
+
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data).toEqual({ accessCode, autoCheckIn: true })
+  })
+
+  it.each([
+    ['neither credential', {}],
+    ['both credentials', { payload, accessCode }],
+    ['an access code using an ambiguous character', { accessCode: `${accessCode.slice(0, -1)}I` }],
+    ['a short access code', { accessCode: accessCode.slice(0, 10) }],
+    ['an empty payload', { payload: '' }],
+    ['a payload past the length ceiling', { payload: 'v1.'.padEnd(300, 'x') }],
+  ])('rejects a body carrying %s', (_label, body) => {
+    expect(verifyTicketSchema.safeParse(body).success).toBe(false)
+  })
+})
+
+describe('listMyBookingsSchema', () => {
+  it('keeps the ops board page defaults', () => {
+    expect(listMyBookingsSchema.parse({})).toEqual({ skip: 0, take: 20 })
+  })
+
+  it('drops the cross-tenant filters the ops board carries', () => {
+    const parsed = listMyBookingsSchema.parse({ facilityId: 'f1', q: 'ABC' })
+
+    expect(parsed).not.toHaveProperty('facilityId')
+    expect(parsed).not.toHaveProperty('q')
+  })
+
+  it('holds the page ceiling', () => {
+    expect(listMyBookingsSchema.safeParse({ take: 500 }).success).toBe(false)
   })
 })

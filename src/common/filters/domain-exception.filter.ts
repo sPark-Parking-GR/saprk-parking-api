@@ -32,6 +32,9 @@ import {
   QuoteExpiredError,
   RefundFailedError,
   TariffPlanNotFoundError,
+  TicketNotFoundError,
+  TicketNotIssuableError,
+  TicketVerificationUnavailableError,
 } from '../errors/domain.errors'
 import { AccountHasUnsettledBookingsError } from '../../auth/auth.types'
 import {
@@ -125,7 +128,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof TariffPlanNotFoundError ||
       exception instanceof InviteNotFoundError ||
       exception instanceof OperatorNotFoundError ||
-      exception instanceof OperatorMemberNotFoundError
+      exception instanceof OperatorMemberNotFoundError ||
+      exception instanceof TicketNotFoundError
     ) {
       return HttpStatus.NOT_FOUND
     }
@@ -157,7 +161,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof OperatorNotReactivatableError ||
       exception instanceof LastOperatorAdminError ||
       exception instanceof SelfRoleChangeError ||
-      exception instanceof SelfMembershipRemovalError
+      exception instanceof SelfMembershipRemovalError ||
+      exception instanceof TicketNotIssuableError
     ) {
       return HttpStatus.CONFLICT
     }
@@ -178,7 +183,10 @@ export class DomainExceptionFilter implements ExceptionFilter {
     }
     // 503: nothing the caller sent is wrong and nothing was persisted; the same request
     // is expected to succeed on retry.
-    if (exception instanceof AccessCodeGenerationError) {
+    if (
+      exception instanceof AccessCodeGenerationError ||
+      exception instanceof TicketVerificationUnavailableError
+    ) {
       return HttpStatus.SERVICE_UNAVAILABLE
     }
     if (exception instanceof OperatorTargetRequiredError) {

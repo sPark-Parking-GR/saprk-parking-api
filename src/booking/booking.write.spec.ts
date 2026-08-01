@@ -17,7 +17,7 @@ import type { NotificationsService } from '../notifications/notifications.servic
 import type { PaymentsService } from '../payments/payments.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { TariffService } from '../tariff/tariff.service'
-import { listBookingsSchema } from './dto/booking.dto'
+import { listBookingsSchema, listMyBookingsSchema } from './dto/booking.dto'
 
 const operatorUser: AuthUser = {
   id: 'u-op',
@@ -205,6 +205,46 @@ describe('BookingService ops board', () => {
     await service.checkOut('b1', platformUser)
 
     expect(tx.booking.update.mock.calls[0]![0].data.status).toBe(BookingStatus.CHECKED_OUT)
+  })
+
+  describe('consumer trips', () => {
+    const consumer: AuthUser = {
+      id: 'u-consumer',
+      email: 'consumer@spark.gr',
+      role: 'user',
+      emailVerified: true,
+    }
+
+    it('filters on the authenticated caller and resolves no operator scope at all', async () => {
+      await service.listMine(consumer, listMyBookingsSchema.parse({}))
+
+      const args = prisma.booking.findMany.mock.calls[0]![0]
+      expect(args.where).toEqual({ userId: 'u-consumer' })
+      expect(args.orderBy).toEqual({ startsAt: 'desc' })
+      expect(scope.resolve).not.toHaveBeenCalled()
+    })
+
+    it('counts the same predicate it lists, so the page total cannot span other users', async () => {
+      await service.listMine(consumer, listMyBookingsSchema.parse({ status: 'CONFIRMED' }))
+
+      expect(prisma.booking.count.mock.calls[0]![0].where).toEqual(
+        prisma.booking.findMany.mock.calls[0]![0].where,
+      )
+    })
+
+    it('never selects qrSecret', async () => {
+      await service.listMine(consumer, listMyBookingsSchema.parse({}))
+
+      expect(prisma.booking.findMany.mock.calls[0]![0].select).not.toHaveProperty('qrSecret')
+    })
+
+    it('applies the requested page window', async () => {
+      await service.listMine(consumer, listMyBookingsSchema.parse({ skip: '10', take: '5' }))
+
+      const args = prisma.booking.findMany.mock.calls[0]![0]
+      expect(args.skip).toBe(10)
+      expect(args.take).toBe(5)
+    })
   })
 })
 

@@ -169,6 +169,7 @@ model User {
   operatorMemberships OperatorMembership[]
   invitesSent         OperatorInvite[]
   passwordResetTokens PasswordResetToken[]
+  savedFacilities     SavedFacility[]
 
   @@index([email])
 }
@@ -354,6 +355,7 @@ model Facility {
   reviews          Review[]
   promotionPlan    PromotionPlan?
   ownershipPeriods FacilityOwnershipPeriod[]
+  savedBy          SavedFacility[]
 
   // Generated geography point (kept in sync with lat/lng by the database). Managed
   // via raw SQL in the migration; Prisma treats it as an opaque column.
@@ -404,6 +406,22 @@ model FacilityImage {
   facility Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
 
   @@index([facilityId])
+}
+
+// A consumer's bookmarked facilities, server-side so they survive a reinstall. Both sides
+// cascade: the row is a personal preference with no financial or audit value, so it must
+// never be the reason a facility or an account cannot be deleted.
+model SavedFacility {
+  id         String   @id @default(cuid())
+  userId     String
+  facilityId String
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  facility Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, facilityId])
+  @@index([userId, createdAt])
 }
 
 model FacilityRule {

@@ -160,6 +160,10 @@ export interface BookingSeed {
   quotedPriceCents?: number
   vehicleType?: VehicleType
   currency?: string
+  /** Set to mint a scannable ticket; production writes this only at confirm time. */
+  qrSecret?: string
+  /** Must satisfy the base32 alphabet when the booking is going to be scanned by code. */
+  accessCode?: string
 }
 
 export function seedBooking(prisma: PrismaClient, seed: BookingSeed): Promise<Booking> {
@@ -174,9 +178,17 @@ export function seedBooking(prisma: PrismaClient, seed: BookingSeed): Promise<Bo
       quotedPriceCents: seed.quotedPriceCents ?? 1_000,
       currency: seed.currency ?? 'EUR',
       status: seed.status ?? BookingStatus.CONFIRMED,
-      accessCode: `AC${uniqueSuffix().toUpperCase()}`,
+      accessCode: seed.accessCode ?? `AC${uniqueSuffix().toUpperCase()}`,
+      ...(seed.qrSecret ? { qrSecret: seed.qrSecret } : {}),
     },
   })
+}
+
+export function seedSavedFacility(
+  prisma: PrismaClient,
+  seed: { userId: string; facilityId: string },
+): Promise<unknown> {
+  return prisma.savedFacility.create({ data: seed })
 }
 
 export interface PaymentSeed {
