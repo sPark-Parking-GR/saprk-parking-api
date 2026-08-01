@@ -1,5 +1,6 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common'
 import { PrismaClient } from '@prisma/client'
+import { lifecycleExtension } from './lifecycle.extension'
 
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
@@ -10,6 +11,15 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 
   private connected = false
   private retryTimer: NodeJS.Timeout | null = null
+
+  // Constructor-return swap: every injection of PrismaService dispatches through the
+  // lifecycle extension (see lifecycle.extension.ts for exactly what it does and does
+  // not cover), so no call site can forget the filter. The extended client proxies the
+  // original instance, so the Nest lifecycle hooks and retry state below keep working.
+  constructor() {
+    super()
+    return this.$extends(lifecycleExtension) as unknown as this
+  }
 
   async onModuleInit() {
     await this.connectWithRetry()

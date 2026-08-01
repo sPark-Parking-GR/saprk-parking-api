@@ -392,8 +392,8 @@ describe('FacilitiesService admin writes', () => {
       await service.adminMap(operatorUser, { bounds })
 
       const sql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
-      expect(sql.text).toContain('"operatorId" IN ($5,$6)')
-      expect(sql.values.slice(4)).toEqual(['op1', 'op2'])
+      expect(sql.text).toContain('"operatorId" IN ($6,$7)')
+      expect(sql.values.slice(5)).toEqual(['op1', 'op2'])
 
       const where = prisma.facility.findMany.mock.calls[0]![0].where
       expect(where.AND).toContainEqual({ operatorId: { in: ['op1', 'op2'] } })
@@ -405,7 +405,14 @@ describe('FacilitiesService admin writes', () => {
 
       await service.adminMap(operatorUser, { bounds, operatorId: 'op9' })
 
-      expect(sqlOf(prisma.$queryRaw.mock.calls[0]!).values).toEqual([23, 37, 24, 38, 'op1'])
+      expect(sqlOf(prisma.$queryRaw.mock.calls[0]!).values).toEqual([
+        23,
+        37,
+        24,
+        38,
+        'ACTIVE',
+        'op1',
+      ])
     })
 
     it('binds `q` as a parameter instead of inlining it into the SQL', async () => {
@@ -415,9 +422,9 @@ describe('FacilitiesService admin writes', () => {
       await service.adminMap(platformUser, { bounds, q })
 
       const sql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
-      expect(sql.text).toContain('("name" ILIKE $5 OR "address" ILIKE $6)')
+      expect(sql.text).toContain('("name" ILIKE $6 OR "address" ILIKE $7)')
       expect(sql.text).not.toContain('DROP TABLE')
-      expect(sql.values).toEqual([23, 37, 24, 38, `%${q}%`, `%${q}%`])
+      expect(sql.values).toEqual([23, 37, 24, 38, 'ACTIVE', `%${q}%`, `%${q}%`])
     })
 
     it('binds kind, the boolean filters and a platform-selected operatorId', async () => {
@@ -432,12 +439,13 @@ describe('FacilitiesService admin writes', () => {
       })
 
       const sql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
-      expect(sql.text).toContain('"isActive" = $5')
-      expect(sql.text).toContain('"isVerified" = $6')
-      expect(sql.text).toContain('"kind" = $7::"FacilityKind"')
-      expect(sql.text).toContain('"operatorId" IN ($8)')
+      expect(sql.text).toContain('"lifecycleStatus" = $5::"LifecycleStatus"')
+      expect(sql.text).toContain('"isActive" = $6')
+      expect(sql.text).toContain('"isVerified" = $7')
+      expect(sql.text).toContain('"kind" = $8::"FacilityKind"')
+      expect(sql.text).toContain('"operatorId" IN ($9)')
       expect(sql.text).not.toContain('BUSINESS')
-      expect(sql.values).toEqual([23, 37, 24, 38, true, false, 'BUSINESS', 'op9'])
+      expect(sql.values).toEqual([23, 37, 24, 38, 'ACTIVE', true, false, 'BUSINESS', 'op9'])
     })
 
     it('matches bounds on the indexed geog column with longitude-first envelope args', async () => {
@@ -449,7 +457,7 @@ describe('FacilitiesService admin writes', () => {
       expect(sql.text).toContain(
         'ST_Intersects("geog", ST_MakeEnvelope($1, $2, $3, $4, 4326)::geography)',
       )
-      expect(sql.values).toEqual([bounds.west, bounds.south, bounds.east, bounds.north])
+      expect(sql.values).toEqual([bounds.west, bounds.south, bounds.east, bounds.north, 'ACTIVE'])
     })
 
     it('returns an empty response without a second query when nothing matches', async () => {
@@ -516,6 +524,7 @@ describe('FacilitiesService admin writes', () => {
       expect(call.where).toEqual({
         AND: [
           { lat: { gte: 37, lte: 38 }, lng: { gte: 23, lte: 24 } },
+          { lifecycleStatus: 'ACTIVE' },
           {
             OR: [
               { name: { contains: 'kolonaki', mode: 'insensitive' } },
@@ -533,6 +542,7 @@ describe('FacilitiesService admin writes', () => {
         37,
         24,
         38,
+        'ACTIVE',
         '%kolonaki%',
         '%kolonaki%',
         true,

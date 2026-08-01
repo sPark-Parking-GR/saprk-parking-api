@@ -286,12 +286,14 @@ describe('FacilitiesService.getDetail', () => {
   const activePlan = {
     id: 'plan1',
     isActive: true,
+    lifecycleStatus: 'ACTIVE',
     name: 'Standard',
     tiers: [],
     windows: [],
     caps: [],
   }
   const inactivePlan = { ...activePlan, id: 'plan2', isActive: false }
+  const archivedPlan = { ...activePlan, id: 'plan3', lifecycleStatus: 'ARCHIVED' }
 
   function detailRow(tariffAssignments: { vehicleType: string; tariffPlan: unknown }[]) {
     return {
@@ -346,6 +348,16 @@ describe('FacilitiesService.getDetail', () => {
       { vehicleType: 'CAR', tariffPlan: activePlan },
       { vehicleType: 'TRUCK', tariffPlan: null },
     ])
+  })
+
+  it('nulls out an assigned plan that is no longer lifecycle-active (nested includes bypass the default filter)', async () => {
+    prisma.facility.findFirst.mockResolvedValue(
+      detailRow([{ vehicleType: 'CAR', tariffPlan: archivedPlan }]),
+    )
+
+    const res = await service.getDetail('f1')
+
+    expect(res.tariffAssignments).toEqual([{ vehicleType: 'CAR', tariffPlan: null }])
   })
 
   it('returns an empty tariffAssignments array when nothing is assigned', async () => {

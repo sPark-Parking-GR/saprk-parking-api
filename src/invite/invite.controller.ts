@@ -3,6 +3,7 @@ import { Throttle } from '@nestjs/throttler'
 import type { AuthUser } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { Public } from '../auth/decorators/public.decorator'
+import { RequirePermission } from '../auth/decorators/require-permission.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import {
@@ -19,7 +20,7 @@ import { InviteService } from './invite.service'
 export class InviteController {
   constructor(private readonly invites: InviteService) {}
 
-  @Roles('platform_admin')
+  @RequirePermission('platform:role.grant')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post()
   create(

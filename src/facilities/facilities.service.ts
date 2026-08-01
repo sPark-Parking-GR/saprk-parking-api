@@ -1,7 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { computeDistanceMeters } from '@spark/maps'
 import type { OpeningHours, VehicleType as ContractVehicleType } from '@spark/types'
-import { BookingStatus, FacilityKind, Prisma, PromotionType, VehicleType } from '@prisma/client'
+import {
+  BookingStatus,
+  FacilityKind,
+  LifecycleStatus,
+  Prisma,
+  PromotionType,
+  VehicleType,
+} from '@prisma/client'
 import type { AuthUser } from '@spark/types'
 import { BookingService } from '../booking/booking.service'
 import {
@@ -56,9 +63,21 @@ const CLUSTER_ROWS = 12
 // vehicle currently inside (CHECKED_IN), and not yet over. Everything else is history.
 const UNHONOURED_BOOKING_STATUSES = [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN]
 
+// Shared with LifecycleService: archiving or tombstoning a facility must refuse for
+// exactly the same reason deactivating one does.
+export function unhonouredBookingsWhere(facilityId: string | string[]): Prisma.BookingWhereInput {
+  return {
+    facilityId: Array.isArray(facilityId) ? { in: facilityId } : facilityId,
+    status: { in: UNHONOURED_BOOKING_STATUSES },
+    endsAt: { gt: new Date() },
+  }
+}
+
 // Public visibility gate, shared by every public search query so the count, the point
 // prefilter and the cluster buckets can never disagree about what is publicly listable.
-const PUBLIC_VISIBLE_SQL = Prisma.sql`"isActive" AND "isVerified" AND "kind" != 'RESTRICTED'`
+// The lifecycle term is load-bearing: these queries run as raw SQL, which the default
+// lifecycle filter (src/prisma/lifecycle.extension.ts) cannot intercept.
+const PUBLIC_VISIBLE_SQL = Prisma.sql`"isActive" AND "isVerified" AND "kind" != 'RESTRICTED' AND "lifecycleStatus" = 'ACTIVE'`
 
 /**
  * One admin-map filter term, expressed as data so it can be rendered twice: as Prisma
@@ -74,6 +93,7 @@ type AdminMapFilter =
   | { on: 'isVerified'; value: boolean }
   | { on: 'kind'; value: FacilityKind }
   | { on: 'operators'; value: string[] }
+  | { on: 'lifecycle'; value: LifecycleStatus }
 
 function adminFilterWhere(filter: AdminMapFilter): Prisma.FacilityWhereInput {
   switch (filter.on) {
@@ -97,6 +117,8 @@ function adminFilterWhere(filter: AdminMapFilter): Prisma.FacilityWhereInput {
       return { kind: filter.value }
     case 'operators':
       return { operatorId: { in: filter.value } }
+    case 'lifecycle':
+      return { lifecycleStatus: filter.value }
   }
 }
 
@@ -116,6 +138,8 @@ function adminFilterSql(filter: AdminMapFilter): Prisma.Sql {
       return Prisma.sql`"kind" = ${filter.value}::"FacilityKind"`
     case 'operators':
       return Prisma.sql`"operatorId" IN (${Prisma.join(filter.value)})`
+    case 'lifecycle':
+      return Prisma.sql`"lifecycleStatus" = ${filter.value}::"LifecycleStatus"`
   }
 }
 
@@ -350,10 +374,15 @@ export class FacilitiesService {
     // resolution — that belongs to the editor UI's getTariffAssignments). Assignment and
     // activation are independent: a plan can be deactivated while still assigned, so null
     // out an assigned-but-inactive plan per row so a dead plan is never shown as live pricing.
+    // The lifecycle check is not redundant: the plan arrives through a nested include,
+    // which the default lifecycle filter does not intercept.
     const { tariffAssignments, ...rest } = facility
     const assignments = tariffAssignments.map((a) => ({
       ...a,
-      tariffPlan: a.tariffPlan.isActive ? a.tariffPlan : null,
+      tariffPlan:
+        a.tariffPlan.isActive && a.tariffPlan.lifecycleStatus === LifecycleStatus.ACTIVE
+          ? a.tariffPlan
+          : null,
     }))
 
     return {
@@ -729,11 +758,7 @@ export class FacilitiesService {
   // Bookings that a deactivation would strand: not yet finished, and either paid and
   // waiting (CONFIRMED) or with the vehicle already inside (CHECKED_IN).
   private unhonouredWhere(facilityId: string | string[]): Prisma.BookingWhereInput {
-    return {
-      facilityId: Array.isArray(facilityId) ? { in: facilityId } : facilityId,
-      status: { in: UNHONOURED_BOOKING_STATUSES },
-      endsAt: { gt: new Date() },
-    }
+    return unhonouredBookingsWhere(facilityId)
   }
 
   /**
@@ -1062,7 +1087,12 @@ export class FacilitiesService {
    * `operatorId` — only a platform caller may narrow to an arbitrary operator.
    */
   private adminMapFilters(scope: OperatorScope, params: AdminMapParams): AdminMapFilter[] {
-    const filters: AdminMapFilter[] = [{ on: 'bounds', bounds: params.bounds }]
+    // Lifecycle rides in the filter list so both renderings (Prisma where for points,
+    // raw SQL for count/clusters) carry it — the SQL paths bypass the client extension.
+    const filters: AdminMapFilter[] = [
+      { on: 'bounds', bounds: params.bounds },
+      { on: 'lifecycle', value: LifecycleStatus.ACTIVE },
+    ]
     if (params.q) filters.push({ on: 'text', value: params.q })
     if (params.isActive !== undefined) filters.push({ on: 'isActive', value: params.isActive })
     if (params.isVerified !== undefined) {

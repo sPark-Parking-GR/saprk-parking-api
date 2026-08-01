@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'crypto'
 import { ForbiddenException, Inject, Injectable, Logger } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import type { IAuthProvider } from '@spark/auth'
-import type { AuthResult, AuthUser, UserRole } from '@spark/types'
+import { hasPlatformPermission, type AuthResult, type AuthUser, type UserRole } from '@spark/types'
 import {
   InviteStatus,
   OperatorInviteKind,
@@ -52,9 +52,9 @@ export class InviteService {
   ) {}
 
   async create(actor: AuthUser, dto: CreateInviteDto): Promise<InviteIssued> {
-    // Controller already gates on @Roles('platform_admin'); re-check in the service
-    // layer per the both-layers authorization rule.
-    if (actor.role !== 'platform_admin') {
+    // Controller already gates on @RequirePermission('platform:role.grant'); re-check in
+    // the service layer per the both-layers authorization rule.
+    if (!hasPlatformPermission(actor.role, 'platform:role.grant')) {
       throw new ForbiddenException('Only platform admins may issue operator invites')
     }
 
@@ -429,7 +429,7 @@ export class InviteService {
       return
     }
 
-    if (actor.role !== 'platform_admin') {
+    if (!hasPlatformPermission(actor.role, 'platform:role.grant')) {
       throw new ForbiddenException('Only platform admins may manage operator invites')
     }
   }

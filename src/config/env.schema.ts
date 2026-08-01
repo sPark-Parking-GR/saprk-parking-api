@@ -73,6 +73,10 @@ const envSchema = z
     EMAIL_FROM_ADDRESS: z.string().optional(),
     EMAIL_FROM_NAME: z.string().optional(),
     POSTMARK_SERVER_TOKEN: z.string().optional(),
+
+    // Days a tombstoned resource stays recoverable before the purge worker removes it
+    // (anonymises it, for users). See src/lifecycle/lifecycle-purge.service.ts.
+    LIFECYCLE_PURGE_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
   })
   .passthrough()
   .superRefine((env, ctx) => {

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common'
-import { FacilityKind, Prisma } from '@prisma/client'
+import { FacilityKind, LifecycleStatus, Prisma } from '@prisma/client'
 import type {
   RateCap,
   RateTier,
@@ -10,6 +10,7 @@ import type {
 } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
 import { OperatorScopeService, targetOperatorId } from '../common/authz/operator-scope.service'
+import { anyLifecycleStatus } from '../prisma/lifecycle.extension'
 import {
   DefaultTariffRequiredError,
   DomainError,
@@ -60,9 +61,13 @@ const scheduleInclude = {
 /**
  * A facility's assigned plan applies to a quote only when it is active, the quote
  * instant sits inside the plan's validity window, and the plan prices the requested
- * vehicle class (empty vehicleTypes = all classes).
+ * vehicle class (empty vehicleTypes = all classes). The lifecycle gate matters here
+ * because the pricing paths load plans through nested includes, which the default
+ * lifecycle filter (src/prisma/lifecycle.extension.ts) does not intercept — this
+ * in-memory check is what keeps an archived plan from pricing a new quote.
  */
 export function isPlanApplicable(plan: TariffPlan, at: Date, vehicleType: VehicleType): boolean {
+  if (plan.lifecycleStatus !== LifecycleStatus.ACTIVE) return false
   if (!plan.isActive) return false
   if (plan.validFrom && plan.validFrom > at) return false
   if (plan.validTo && plan.validTo < at) return false
@@ -173,8 +178,12 @@ export class TariffService {
 
     if (endsAt <= startsAt) throw new DomainError('endsAt must be after startsAt')
 
+    // Explicit lifecycle opt-out: the pin records a historical pricing fact, and an
+    // in-flight stay must still reprice at check-out even if its plan was archived or
+    // tombstoned mid-stay. Only a physical purge makes the pin unresolvable, which the
+    // null return already reports.
     const plan = await this.prisma.tariffPlan.findFirst({
-      where: { id: planId, version: planVersion },
+      where: { id: planId, version: planVersion, lifecycleStatus: anyLifecycleStatus() },
       include: scheduleInclude,
     })
     if (!plan) return null

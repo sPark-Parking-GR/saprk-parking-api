@@ -1,5 +1,5 @@
 import { ForbiddenException, Injectable } from '@nestjs/common'
-import type { AuthUser } from '@spark/types'
+import { hasPlatformPermission, type AuthUser } from '@spark/types'
 import type { Prisma } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import type { ListAuditLogDto } from './dto/audit.dto'
@@ -10,9 +10,9 @@ export class AuditService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list(actor: AuthUser, query: ListAuditLogDto): Promise<AuditLogList> {
-    // Controller already gates on @Roles('platform_admin'); re-check in the service
-    // layer per the both-layers authorization rule.
-    if (actor.role !== 'platform_admin') {
+    // Controller already gates on @RequirePermission('platform:tenant.read'); re-check in
+    // the service layer per the both-layers authorization rule.
+    if (!hasPlatformPermission(actor.role, 'platform:tenant.read')) {
       throw new ForbiddenException('Only platform admins may view the audit log')
     }
 

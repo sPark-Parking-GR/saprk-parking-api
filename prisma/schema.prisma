@@ -124,6 +124,19 @@ enum TileStatus {
   FAILED
 }
 
+// Administrative resource lifecycle, orthogonal to isActive (published/bookable).
+// ARCHIVED and TOMBSTONED rows are hidden from every default Prisma read by the client
+// extension in src/prisma/lifecycle.extension.ts; raw SQL must filter explicitly.
+// TOMBSTONED means deleted-but-recoverable and carries purgeAfter; PURGED is terminal and
+// only ever reached by User rows, which are anonymised in place because their bookings
+// are ON DELETE RESTRICT financial records (other models are physically removed).
+enum LifecycleStatus {
+  ACTIVE
+  ARCHIVED
+  TOMBSTONED
+  PURGED
+}
+
 // How a facility is used, so free public lots and commercial parking businesses are
 // managed separately. OSM mixes both; Google only ever returns real businesses.
 enum FacilityKind {
@@ -162,6 +175,15 @@ model User {
   // again, and its email is rewritten so the address is free to sign up afresh.
   deletedAt DateTime?
 
+  // Platform-administration lifecycle (see the LifecycleStatus enum). lifecycleChangedBy
+  // is the acting user's id with no FK on purpose: it is an audit fact that must outlive
+  // the actor's own row.
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
+
   vehicles            Vehicle[]
   wallet              Wallet?
   bookings            Booking[]
@@ -172,6 +194,7 @@ model User {
   savedFacilities     SavedFacility[]
 
   @@index([email])
+  @@index([lifecycleStatus, purgeAfter])
 }
 
 // Single-use, short-lived password reset grant. Only the sha256 hash of the raw token is
@@ -246,6 +269,13 @@ model ParkingOperator {
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
+  // Platform-administration lifecycle (see LifecycleStatus).
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
+
   facilities       Facility[]
   memberships      OperatorMembership[]
   promotionPlans   PromotionPlan[]
@@ -254,6 +284,7 @@ model ParkingOperator {
   ownershipPeriods FacilityOwnershipPeriod[]
 
   @@index([status])
+  @@index([lifecycleStatus, purgeAfter])
 }
 
 // A single-use, expiring grant that provisions an identity and an OperatorMembership.
@@ -347,6 +378,18 @@ model Facility {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
+  // Platform-administration lifecycle (see LifecycleStatus). Archiving forces
+  // isActive = false because the public search predicate lives in raw SQL
+  // (PUBLIC_VISIBLE_SQL) where the client extension cannot reach; restore never
+  // republishes. The one-facility-per-operator partial unique index counts only
+  // lifecycle-ACTIVE rows (see the resource_lifecycle migration), so restore must
+  // re-validate the cap.
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
+
   operator         ParkingOperator            @relation(fields: [operatorId], references: [id])
   tariffAssignments FacilityTariffAssignment[]
   images           FacilityImage[]
@@ -371,6 +414,7 @@ model Facility {
   // schema @@unique, so this stays a plain index here; the DB enforces the cap.
   @@index([operatorId])
   @@index([geog], type: Gist)
+  @@index([lifecycleStatus, purgeAfter])
 }
 
 // Who owned a facility, and when. `Facility.operatorId` answers only "who owns it NOW",
@@ -462,6 +506,17 @@ model TariffPlan {
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
+  // Platform-administration lifecycle (see LifecycleStatus). Unlike Facility, archiving
+  // PRESERVES isActive/isDefault: applicability is enforced in memory (isPlanApplicable
+  // checks lifecycle) and the operator-default partial unique index counts only
+  // lifecycle-ACTIVE rows, so archiving a default frees the slot while keeping the state
+  // whose conflicts restore must re-validate.
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
+
   operator          ParkingOperator            @relation(fields: [operatorId], references: [id], onDelete: Cascade)
   facilityAssignments FacilityTariffAssignment[]
   tiers             RateTier[]
@@ -469,6 +524,7 @@ model TariffPlan {
   caps              RateCap[]
 
   @@index([operatorId, isActive])
+  @@index([lifecycleStatus, purgeAfter])
 }
 
 // Assigns a plan to a facility for one concrete vehicle type. A plan may back many

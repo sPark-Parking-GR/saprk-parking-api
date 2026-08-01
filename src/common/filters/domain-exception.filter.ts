@@ -23,10 +23,14 @@ import {
   FacilityNotBookableError,
   FacilityNotFoundError,
   IdempotencyConflictError,
+  LifecycleResourceNotFoundError,
+  LifecycleRestoreConflictError,
+  LifecycleTransitionError,
   MixedCurrencyAnalyticsError,
   NoApplicableTariffError,
   NoAvailabilityError,
   OperatorContextRequiredError,
+  OperatorHasActiveFacilitiesError,
   OperatorSuspendedError,
   OperatorTargetRequiredError,
   QuoteExpiredError,
@@ -129,7 +133,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof InviteNotFoundError ||
       exception instanceof OperatorNotFoundError ||
       exception instanceof OperatorMemberNotFoundError ||
-      exception instanceof TicketNotFoundError
+      exception instanceof TicketNotFoundError ||
+      exception instanceof LifecycleResourceNotFoundError
     ) {
       return HttpStatus.NOT_FOUND
     }
@@ -162,7 +167,10 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof LastOperatorAdminError ||
       exception instanceof SelfRoleChangeError ||
       exception instanceof SelfMembershipRemovalError ||
-      exception instanceof TicketNotIssuableError
+      exception instanceof TicketNotIssuableError ||
+      exception instanceof LifecycleTransitionError ||
+      exception instanceof LifecycleRestoreConflictError ||
+      exception instanceof OperatorHasActiveFacilitiesError
     ) {
       return HttpStatus.CONFLICT
     }

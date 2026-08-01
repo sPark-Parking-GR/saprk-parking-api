@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common'
 import { OperatorStatus, type Prisma } from '@prisma/client'
-import type { AuthUser } from '@spark/types'
+import { hasPlatformPermission, type AuthUser, type PlatformPermission } from '@spark/types'
 import { RequestContext } from '../common/context/request-context'
 import { UNCLAIMED_OPERATOR_ID } from '../ingestion/ingestion.constants'
 import { PrismaService } from '../prisma/prisma.service'
@@ -17,7 +17,7 @@ export class OperatorsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list(actor: AuthUser): Promise<OperatorSummary[]> {
-    this.assertPlatformAdmin(actor, 'view operators')
+    this.assertPermission(actor, 'platform:tenant.read', 'view operators')
 
     // The synthetic operator owning un-onboarded OSM/Google imports is an ingestion
     // artifact, not a business — it must never be offered as suspendable.
@@ -38,7 +38,7 @@ export class OperatorsService {
   }
 
   async getDetail(actor: AuthUser, id: string): Promise<OperatorDetail> {
-    this.assertPlatformAdmin(actor, 'view operator detail')
+    this.assertPermission(actor, 'platform:tenant.read', 'view operator detail')
 
     // The synthetic unclaimed-import operator (see list()) has no real detail page.
     if (id === UNCLAIMED_OPERATOR_ID) throw new OperatorNotFoundError(id)
@@ -88,7 +88,7 @@ export class OperatorsService {
   }
 
   async suspend(actor: AuthUser, id: string): Promise<void> {
-    this.assertPlatformAdmin(actor, 'suspend operators')
+    this.assertPermission(actor, 'platform:tenant.write', 'suspend operators')
 
     const count = await this.prisma.$transaction(async (tx) => {
       const { count } = await tx.parkingOperator.updateMany({
@@ -102,7 +102,7 @@ export class OperatorsService {
   }
 
   async reactivate(actor: AuthUser, id: string): Promise<void> {
-    this.assertPlatformAdmin(actor, 'reactivate operators')
+    this.assertPermission(actor, 'platform:tenant.write', 'reactivate operators')
 
     // verifiedAt is left untouched: it records the original verification, not this
     // restoration of access.
@@ -117,10 +117,10 @@ export class OperatorsService {
     if (count === 0) await this.explainFailedTransition(id, OperatorStatus.SUSPENDED)
   }
 
-  private assertPlatformAdmin(actor: AuthUser, action: string): void {
-    // Controller already gates on @Roles('platform_admin'); re-check in the service
-    // layer per the both-layers authorization rule.
-    if (actor.role !== 'platform_admin') {
+  private assertPermission(actor: AuthUser, permission: PlatformPermission, action: string): void {
+    // Controller already gates on the same permission; re-check in the service layer per
+    // the both-layers authorization rule.
+    if (!hasPlatformPermission(actor.role, permission)) {
       throw new ForbiddenException(`Only platform admins may ${action}`)
     }
   }

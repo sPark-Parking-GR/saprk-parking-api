@@ -1,4 +1,4 @@
-import { RateUnit, CapScope, type VehicleType } from '@prisma/client'
+import { LifecycleStatus, RateUnit, CapScope, type VehicleType } from '@prisma/client'
 import { TariffService } from './tariff.service'
 import { priceStay } from './pricing-engine'
 import type { CompiledPlan, CompiledCap } from './tariff.types'
@@ -278,6 +278,7 @@ describe('TariffService.computeTotalsByFacility', () => {
       id: 'p',
       operatorId: 'op1',
       isActive: true,
+      lifecycleStatus: LifecycleStatus.ACTIVE,
       validFrom: null,
       validTo: null,
       vehicleTypes: [] as VehicleType[],
@@ -546,7 +547,13 @@ describe('TariffService.priceWithPinnedPlan', () => {
       endsAt,
     })
 
-    expect(prisma.tariffPlan.findFirst.mock.calls[0]![0].where).toEqual({ id: 'p', version: 3 })
+    // The explicit lifecycle opt-out is load-bearing: a pinned reprice must resolve the
+    // plan even after it is archived or tombstoned.
+    expect(prisma.tariffPlan.findFirst.mock.calls[0]![0].where).toEqual({
+      id: 'p',
+      version: 3,
+      lifecycleStatus: { in: Object.values(LifecycleStatus) },
+    })
     expect(result).toEqual({ totalCents: 1200, currency: 'EUR', billableMinutes: 180 })
   })
 

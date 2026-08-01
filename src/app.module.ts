@@ -7,6 +7,7 @@ import { AnalyticsModule } from './analytics/analytics.module'
 import { AuditModule } from './audit/audit.module'
 import { AuthModule } from './auth/auth.module'
 import { AuthGuard } from './auth/guards/auth.guard'
+import { PermissionGuard } from './auth/guards/permission.guard'
 import { RolesGuard } from './auth/guards/roles.guard'
 import { BookingModule } from './booking/booking.module'
 import { DomainExceptionFilter } from './common/filters/domain-exception.filter'
@@ -57,7 +58,16 @@ import { TariffModule } from './tariff/tariff.module'
     { provide: APP_FILTER, useClass: DomainExceptionFilter },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
+    // Declaration order is execution order, and it is load-bearing. AuthGuard must run
+    // first: it is what populates request.user and what turns an anonymous or revoked
+    // caller into a 401 — put either authorization guard ahead of it and every unauthorized
+    // request would answer 403 on an empty user instead. RolesGuard then PermissionGuard is
+    // coarse-before-fine, so the failure a caller sees is the same one they saw before
+    // permissions existed. Every global guard must return true for a handler to run, so a
+    // route carrying both @Roles and @RequirePermission is a strict intersection by
+    // construction — neither guard can ever re-admit a caller the other refused.
     { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: APP_GUARD, useClass: PermissionGuard },
     { provide: APP_INTERCEPTOR, useClass: RequestContextInterceptor },
   ],
 })

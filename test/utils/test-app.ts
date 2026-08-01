@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common'
+import { Module, type Type } from '@nestjs/common'
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify'
 import { Test } from '@nestjs/testing'
 import { PARAMS_PROVIDER_TOKEN, type Params } from 'nestjs-pino'
@@ -29,12 +29,21 @@ export interface TestApp {
   prisma: PrismaService
 }
 
-export async function createTestApp(): Promise<TestApp> {
+export interface TestAppOptions {
+  /**
+   * Replaces the stub that IngestionModule is swapped for, so a suite that needs the
+   * ingestion ROUTES can supply the real controller over fake queue-backed services —
+   * without reinstating the BullMQ workers the stub exists to keep out.
+   */
+  ingestionModule?: Type<unknown>
+}
+
+export async function createTestApp(options: TestAppOptions = {}): Promise<TestApp> {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideModule(JobsModule)
     .useModule(NoJobsModule)
     .overrideModule(IngestionModule)
-    .useModule(NoIngestionModule)
+    .useModule(options.ingestionModule ?? NoIngestionModule)
     .overrideProvider(PARAMS_PROVIDER_TOKEN)
     .useValue(SILENT_LOGGER_PARAMS)
     .compile()

@@ -206,3 +206,37 @@ export class FacilityDeactivationFailedError extends DomainError {
     )
   }
 }
+
+export class LifecycleResourceNotFoundError extends DomainError {
+  constructor(resource: string, id: string) {
+    super(`${resource} ${id} not found`)
+  }
+}
+
+// The row exists but is not in a state the requested transition starts from (e.g.
+// archiving something already tombstoned, or restoring something active).
+export class LifecycleTransitionError extends DomainError {
+  constructor(resource: string, id: string, from: string, requested: string) {
+    super(`${resource} ${id} is ${from} and cannot be ${requested}`)
+  }
+}
+
+// Restore would re-enter a uniqueness domain that filled up while the row was out of it
+// (one facility per operator; one active default plan per operator). The message names
+// the conflicting row so the caller can act, and the recreated partial unique indexes
+// are the concurrency backstop behind this error — a raw P2002 is translated to it.
+export class LifecycleRestoreConflictError extends DomainError {
+  constructor(resource: string, id: string, conflict: string) {
+    super(`Cannot restore ${resource} ${id}: ${conflict}`)
+  }
+}
+
+// Archiving an operator while it still has lifecycle-active facilities would leave those
+// facilities publicly visible under an operator that administratively no longer exists.
+export class OperatorHasActiveFacilitiesError extends DomainError {
+  constructor(operatorId: string, count: number) {
+    super(
+      `Operator ${operatorId} still has ${count} active facilit${count === 1 ? 'y' : 'ies'}. Archive them first.`,
+    )
+  }
+}
