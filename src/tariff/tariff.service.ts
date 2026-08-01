@@ -10,6 +10,7 @@ import type {
 } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
 import { OperatorScopeService, targetOperatorId } from '../common/authz/operator-scope.service'
+import { LifecycleService } from '../lifecycle/lifecycle.service'
 import { anyLifecycleStatus } from '../prisma/lifecycle.extension'
 import {
   DefaultTariffRequiredError,
@@ -107,6 +108,7 @@ export class TariffService {
     private readonly prisma: PrismaService,
     private readonly operatorScope: OperatorScopeService,
     private readonly entitlements: EntitlementService,
+    private readonly lifecycle: LifecycleService,
   ) {}
 
   async computeQuote(request: QuoteRequest): Promise<PriceQuote> {
@@ -329,8 +331,10 @@ export class TariffService {
       // An operator's very first active plan needs no manual "make it default" step — with
       // nothing else to route to, an eligible (all-vehicle-types) plan should just work.
       // Once they have any active plan already, later creates go back to requiring an
-      // explicit ask. Filtered to isActive: deletePlan() soft-deletes (never removes the
-      // row), so a deactivated plan must not block auto-default for its replacement.
+      // explicit ask. A deleted plan must not block auto-default for its replacement:
+      // deletePlan archives rather than removing the row, and archived rows are excluded
+      // by the default lifecycle filter this count runs under (isActive stays true on
+      // them by design, so the flag alone would not exclude them).
       const existingCount = await tx.tariffPlan.count({ where: { operatorId, isActive: true } })
       const isDefault = draft.isDefault || (existingCount === 0 && canBeDefault(vehicleTypes))
 
@@ -473,9 +477,26 @@ export class TariffService {
   }
 
   /**
-   * Soft-deletes a plan: unassigns it from every facility currently pointing at it and
-   * deactivates it, atomically. Deactivating a still-assigned plan is allowed and always
-   * unassigns — the frontend gates this behind a confirm modal (see getAssignments).
+   * Deletes a plan: unassigns it from every facility currently pointing at it, then
+   * ARCHIVES it. Archiving is what removes the plan from the operator's own view (the
+   * lifecycle client extension default-filters to ACTIVE) while leaving it restorable
+   * from the platform administrator's trash; it used to be a bare `isActive = false`,
+   * which left the "deleted" plan listed and editable by the operator that deleted it.
+   * Deleting a still-assigned plan is allowed and always unassigns — the frontend gates
+   * this behind a confirm modal (see getAssignments).
+   *
+   * `isActive`/`isDefault` are deliberately NOT touched, here or in LifecycleService:
+   * restoreTariffPlan re-validates the one-active-default rule against exactly those two
+   * fields, and the partial unique index behind it counts only lifecycle-ACTIVE rows.
+   * Writing isActive=false would make a later restore bring the plan back disabled and
+   * skip the conflict check that protects the operator's default slot.
+   *
+   * All three steps share one transaction — the archive is handed this one rather than
+   * opening its own — because a commit that unassigned every facility without archiving
+   * would silently reprice them onto the operator default while the plan they pointed at
+   * was still listed. Within it the order is fixed: guardDefaultRemoval writes the plan
+   * row through the lifecycle-filtered client, which cannot see an archived row, so it
+   * runs before the archive, never after.
    */
   async deletePlan(user: AuthUser, planId: string, newDefaultPlanId?: string): Promise<void> {
     await this.assertPlanOwned(user, planId)
@@ -495,17 +516,12 @@ export class TariffService {
 
       await tx.facilityTariffAssignment.deleteMany({ where: { tariffPlanId: planId } })
 
-      await tx.tariffPlan.update({ where: { id: planId }, data: { isActive: false } })
-
-      await tx.auditLog.create({
-        data: {
-          actorId: user.id,
-          actorRole: user.role,
-          action: 'tariff_plan.deleted',
-          entityType: 'TariffPlan',
-          entityId: planId,
-        },
-      })
+      await this.lifecycle.archiveTariffPlan(
+        { id: user.id, role: user.role },
+        planId,
+        'Deleted by operator',
+        tx,
+      )
     })
   }
 

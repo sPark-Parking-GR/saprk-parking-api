@@ -4,6 +4,7 @@ import { priceStay } from './pricing-engine'
 import type { CompiledPlan, CompiledCap } from './tariff.types'
 import type { OperatorScopeService } from '../common/authz/operator-scope.service'
 import { DomainError } from '../common/errors/domain.errors'
+import type { LifecycleService } from '../lifecycle/lifecycle.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { EntitlementService } from '../subscriptions/entitlement.service'
 
@@ -338,6 +339,7 @@ describe('TariffService.computeTotalsByFacility', () => {
       prisma as unknown as PrismaService,
       {} as unknown as OperatorScopeService,
       {} as unknown as EntitlementService,
+      {} as unknown as LifecycleService,
     )
   })
 
@@ -472,6 +474,7 @@ describe('TariffService.computeQuote', () => {
       prisma as unknown as PrismaService,
       {} as unknown as OperatorScopeService,
       {} as unknown as EntitlementService,
+      {} as unknown as LifecycleService,
     )
 
     const badStartsAt = new Date('2026-06-18T10:00:00Z')
@@ -538,6 +541,7 @@ describe('TariffService.priceWithPinnedPlan', () => {
       prisma as unknown as PrismaService,
       {} as unknown as OperatorScopeService,
       {} as unknown as EntitlementService,
+      {} as unknown as LifecycleService,
     )
   })
 

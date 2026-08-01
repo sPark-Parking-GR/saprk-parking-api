@@ -4,6 +4,7 @@ import type { AuthUser } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { Public } from '../auth/decorators/public.decorator'
+import { FacilityFieldForbiddenError } from '../common/errors/domain.errors'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { FacilitiesService } from './facilities.service'
 import {
@@ -120,6 +121,9 @@ export class FacilitiesController {
     return this.facilities.assignTariff(user, id, body.vehicleType, body.tariffPlanId)
   }
 
+  // `kind` decides whether a facility is sellable at all, so it is platform-only. Gated
+  // here on the role and again in the service on the resolved operator scope, per the
+  // both-layers rule — neither check is load-bearing alone.
   @Roles('operator_admin', 'platform_admin')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Patch(':id')
@@ -128,6 +132,9 @@ export class FacilitiesController {
     @Body(new ZodValidationPipe(updateFacilitySchema)) body: UpdateFacilityDto,
     @CurrentUser() user: AuthUser,
   ) {
+    if (body.kind !== undefined && user.role !== 'platform_admin') {
+      throw new FacilityFieldForbiddenError('kind')
+    }
     return this.facilities.update(user, id, body)
   }
 

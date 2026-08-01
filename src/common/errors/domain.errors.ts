@@ -247,6 +247,18 @@ export class FacilityHasActiveBookingsError extends DomainError {
   }
 }
 
+// Only a BUSINESS facility can be quoted or booked, so moving one out of that kind
+// strands whatever is already sold there. No force twin of the delete path: the facility
+// keeps operating and there is nothing to refund against, so the count is the whole
+// remedy — wait the stays out, or cancel them through the delete flow.
+export class FacilityKindChangeBlockedError extends DomainError {
+  constructor(facilityId: string, kind: string, count: number) {
+    super(
+      `Facility ${facilityId} cannot become ${kind} while ${count} booking(s) are still to be honoured. Wait until they end, or cancel and refund them first.`,
+    )
+  }
+}
+
 // A caller asked for a report on an operator they do not belong to. The message names no
 // operator and reads the same whether or not the id exists, so the endpoint cannot be used
 // to enumerate tenants.

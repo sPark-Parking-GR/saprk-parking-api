@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common'
 import { LifecycleStatus, Prisma } from '@prisma/client'
+import { unhonouredBookingsWhere } from '../booking/booking.predicates'
 import { LifecycleResourceNotFoundError } from '../common/errors/domain.errors'
-import { unhonouredBookingsWhere } from '../facilities/facilities.service'
 import { anyLifecycleStatus } from '../prisma/lifecycle.extension'
 import { PrismaService } from '../prisma/prisma.service'
 import { unsettledWhere } from './lifecycle-purge.service'

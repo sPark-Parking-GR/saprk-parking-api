@@ -7,6 +7,7 @@ import {
   DomainError,
   FacilityDeactivationFailedError,
   FacilityHasActiveBookingsError,
+  FacilityKindChangeBlockedError,
   FacilityNotBookableError,
 } from '../errors/domain.errors'
 
@@ -46,6 +47,14 @@ describe('DomainExceptionFilter', () => {
     const { host, reply } = makeHost()
 
     filter.catch(new FacilityHasActiveBookingsError('f1', 3), host)
+
+    expect(reply.status).toHaveBeenCalledWith(HttpStatus.CONFLICT)
+  })
+
+  it('maps FacilityKindChangeBlockedError to 409, alongside the other booking-state refusals', () => {
+    const { host, reply } = makeHost()
+
+    filter.catch(new FacilityKindChangeBlockedError('f1', 'FREE_PUBLIC', 2), host)
 
     expect(reply.status).toHaveBeenCalledWith(HttpStatus.CONFLICT)
   })

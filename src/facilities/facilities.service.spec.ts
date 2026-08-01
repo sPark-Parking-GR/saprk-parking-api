@@ -2,6 +2,7 @@ import { Prisma, type VehicleType } from '@prisma/client'
 import { FacilitiesService } from './facilities.service'
 import type { BookingService } from '../booking/booking.service'
 import type { InventoryService } from '../inventory/inventory.service'
+import type { LifecycleService } from '../lifecycle/lifecycle.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { EntitlementService } from '../subscriptions/entitlement.service'
 import type { TariffService } from '../tariff/tariff.service'
@@ -49,6 +50,7 @@ describe('FacilitiesService.search', () => {
       {} as unknown as OperatorScopeService,
       {} as unknown as BookingService,
       {} as unknown as EntitlementService,
+      {} as unknown as LifecycleService,
     )
   })
 
@@ -321,6 +323,7 @@ describe('FacilitiesService.getDetail', () => {
       {} as unknown as OperatorScopeService,
       {} as unknown as BookingService,
       {} as unknown as EntitlementService,
+      {} as unknown as LifecycleService,
     )
   })
 

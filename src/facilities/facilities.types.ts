@@ -112,13 +112,15 @@ export type BulkFacilityAction =
   | 'delete'
   | 'assignTariff'
 
-// One facility a bulk deactivation deliberately left ACTIVE, with the numbers behind the
-// decision. `cancelled` is non-zero only for 'refund_failed': those bookings really were
-// cancelled and refunded before a later one failed, and pretending otherwise would hide
-// money that has already moved.
+// One facility a bulk disable/delete deliberately left ACTIVE, with the numbers behind
+// the decision. `cancelled` is non-zero only for 'refund_failed' and 'archive_failed':
+// those bookings really were cancelled and refunded before a later step failed, and
+// pretending otherwise would hide money that has already moved. 'archive_failed' means
+// the refunds went through but the lifecycle transition itself was refused — a lost race
+// against a concurrent booking or archive.
 export interface BulkFacilitySkipped {
   facilityId: string
-  reason: 'unhonoured_bookings' | 'refund_failed'
+  reason: 'unhonoured_bookings' | 'refund_failed' | 'archive_failed'
   unhonoured: number
   cancelled: number
 }

@@ -12,12 +12,14 @@ import {
   FacilityDeactivationFailedError,
   FacilityFieldForbiddenError,
   FacilityHasActiveBookingsError,
+  FacilityKindChangeBlockedError,
   FacilityNotFoundError,
   OperatorTargetRequiredError,
   TariffAssignmentMismatchError,
   TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import type { InventoryService } from '../inventory/inventory.service'
+import type { LifecycleService } from '../lifecycle/lifecycle.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { EntitlementService } from '../subscriptions/entitlement.service'
 import type { TariffService } from '../tariff/tariff.service'
@@ -114,6 +116,7 @@ describe('FacilitiesService admin writes', () => {
   let scope: { resolve: jest.Mock; scopeWhere: jest.Mock }
   let bookings: { cancelBooking: jest.Mock }
   let entitlements: { assertCanCreateFacility: jest.Mock }
+  let lifecycle: { archiveFacility: jest.Mock }
   let service: FacilitiesService
 
   function setScope(s: OperatorScope) {
@@ -189,6 +192,7 @@ describe('FacilitiesService admin writes', () => {
     scope = { resolve: jest.fn(), scopeWhere: jest.fn() }
     bookings = { cancelBooking: jest.fn() }
     entitlements = { assertCanCreateFacility: jest.fn().mockResolvedValue(undefined) }
+    lifecycle = { archiveFacility: jest.fn().mockResolvedValue(undefined) }
     service = new FacilitiesService(
       prisma as unknown as PrismaService,
       {} as unknown as InventoryService,
@@ -196,6 +200,7 @@ describe('FacilitiesService admin writes', () => {
       scope as unknown as OperatorScopeService,
       bookings as unknown as BookingService,
       entitlements as unknown as EntitlementService,
+      lifecycle as unknown as LifecycleService,
     )
   })
 
@@ -332,6 +337,108 @@ describe('FacilitiesService admin writes', () => {
     await expect(service.update(operatorUser, 'f1', { rank: 9 })).rejects.toBeInstanceOf(
       FacilityFieldForbiddenError,
     )
+  })
+
+  describe('facility kind (platform-admin only)', () => {
+    const BUSINESS = 'BUSINESS' as FacilityKind
+    const FREE_PUBLIC = 'FREE_PUBLIC' as FacilityKind
+
+    it('operator update cannot set kind', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', kind: BUSINESS })
+
+      await expect(
+        service.update(operatorUser, 'f1', { kind: FREE_PUBLIC }),
+      ).rejects.toBeInstanceOf(FacilityFieldForbiddenError)
+      expect(prisma.facility.update).not.toHaveBeenCalled()
+    })
+
+    it('platform update writes the kind and audits both the old and the new one', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', kind: BUSINESS })
+      prisma.facility.update.mockResolvedValue(makeRow({ kind: FREE_PUBLIC }))
+
+      const res = await service.update(platformUser, 'f1', { kind: FREE_PUBLIC })
+
+      expect(prisma.facility.update.mock.calls[0]![0].data.kind).toBe(FREE_PUBLIC)
+      expect(res.kind).toBe(FREE_PUBLIC)
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'facility.updated',
+            payload: { kindFrom: BUSINESS, kindTo: FREE_PUBLIC },
+          }),
+        }),
+      )
+    })
+
+    // Leaving BUSINESS makes the facility unquotable, so anything already sold there
+    // would be stranded. No force escape hatch on this path by design.
+    it('refuses to leave BUSINESS while bookings are still to be honoured, naming the count', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', kind: BUSINESS })
+      prisma.booking.count.mockResolvedValue(4)
+
+      const error = await service
+        .update(platformUser, 'f1', { kind: FREE_PUBLIC })
+        .catch((e: Error) => e)
+
+      expect(error).toBeInstanceOf(FacilityKindChangeBlockedError)
+      expect((error as Error).message).toContain('4 booking(s)')
+      expect((error as Error).message).toContain('FREE_PUBLIC')
+      expect(prisma.facility.update).not.toHaveBeenCalled()
+      expect(prisma.booking.count.mock.calls[0]![0].where.status).toEqual({
+        in: ['CONFIRMED', 'CHECKED_IN'],
+      })
+    })
+
+    // Dead pricing state otherwise: it would silently come back the moment an admin
+    // flipped the facility to BUSINESS again.
+    it('clears every tariff assignment in the same transaction as the kind change', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', kind: BUSINESS })
+      prisma.facility.update.mockResolvedValue(makeRow({ kind: FREE_PUBLIC }))
+
+      await service.update(platformUser, 'f1', { kind: FREE_PUBLIC })
+
+      expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
+        where: { facilityId: 'f1' },
+      })
+    })
+
+    it('entering BUSINESS neither checks bookings nor clears assignments', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', kind: FREE_PUBLIC })
+      prisma.facility.update.mockResolvedValue(makeRow({ kind: BUSINESS }))
+
+      await service.update(platformUser, 'f1', { kind: BUSINESS })
+
+      expect(prisma.booking.count).not.toHaveBeenCalled()
+      expect(tx.facilityTariffAssignment.deleteMany).not.toHaveBeenCalled()
+      expect(prisma.facility.update.mock.calls[0]![0].data.kind).toBe(BUSINESS)
+    })
+
+    it('re-setting BUSINESS on a BUSINESS facility is not a departure', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', kind: BUSINESS })
+      prisma.facility.update.mockResolvedValue(makeRow({ kind: BUSINESS }))
+
+      await service.update(platformUser, 'f1', { kind: BUSINESS })
+
+      expect(prisma.booking.count).not.toHaveBeenCalled()
+      expect(tx.facilityTariffAssignment.deleteMany).not.toHaveBeenCalled()
+    })
+
+    it('an update that does not mention kind carries no kind payload', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', kind: BUSINESS })
+      prisma.facility.update.mockResolvedValue(makeRow())
+
+      await service.update(platformUser, 'f1', { name: 'Renamed' })
+
+      expect(prisma.auditLog.create.mock.calls[0]![0].data.payload).toBeUndefined()
+      expect(tx.facilityTariffAssignment.deleteMany).not.toHaveBeenCalled()
+    })
   })
 
   it('platform update may set isVerified', async () => {
@@ -563,22 +670,54 @@ describe('FacilitiesService admin writes', () => {
     })
   })
 
-  it('soft delete sets isActive false and audits', async () => {
-    setScope({ kind: 'operator', operatorIds: ['op1'] })
-    prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
-    prisma.facility.update.mockResolvedValue(makeRow())
-
-    await service.softDelete(operatorUser, 'f1')
-
-    expect(prisma.facility.update).toHaveBeenCalledWith({
-      where: { id: 'f1' },
-      data: { isActive: false },
+  describe('delete archives instead of flipping a flag', () => {
+    beforeEach(() => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
+      prisma.facility.update.mockResolvedValue(makeRow())
     })
-    expect(prisma.auditLog.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ action: 'facility.deactivated' }),
-      }),
-    )
+
+    it('delegates the state change to LifecycleService with the acting user as actor', async () => {
+      await service.softDelete(operatorUser, 'f1')
+
+      expect(lifecycle.archiveFacility).toHaveBeenCalledWith(
+        { id: operatorUser.id, role: operatorUser.role },
+        'f1',
+        'Deleted by operator',
+      )
+    })
+
+    // The whole point of the change: a bare isActive=false left the row fully visible to
+    // the operator that "deleted" it, and a second audit action would double-count the event.
+    it('writes no isActive flag and no facility.deactivated audit row of its own', async () => {
+      await service.softDelete(operatorUser, 'f1')
+
+      expect(prisma.facility.update).not.toHaveBeenCalled()
+      expect(prisma.auditLog.create).not.toHaveBeenCalled()
+    })
+
+    it('refuses a facility outside the caller operator scope before archiving anything', async () => {
+      prisma.facility.findFirst.mockResolvedValue(null)
+
+      await expect(service.softDelete(operatorUser, 'f-other')).rejects.toBeInstanceOf(
+        FacilityNotFoundError,
+      )
+      expect(prisma.facility.findFirst.mock.calls[0]![0].where).toEqual({
+        id: 'f-other',
+        operatorId: { in: ['op1'] },
+      })
+      expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
+    })
+
+    // A lifecycle refusal (a booking taken mid-delete, a concurrent archive) is the
+    // caller's answer, not something to swallow into a success.
+    it('propagates a refusal from the lifecycle transition', async () => {
+      lifecycle.archiveFacility.mockRejectedValue(new FacilityHasActiveBookingsError('f1', 1))
+
+      await expect(service.softDelete(operatorUser, 'f1')).rejects.toBeInstanceOf(
+        FacilityHasActiveBookingsError,
+      )
+    })
   })
 
   describe('deactivation with unhonoured bookings', () => {
@@ -598,7 +737,7 @@ describe('FacilitiesService admin writes', () => {
 
       expect(error).toBeInstanceOf(FacilityHasActiveBookingsError)
       expect((error as Error).message).toContain('3 booking(s)')
-      expect(prisma.facility.update).not.toHaveBeenCalled()
+      expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
       expect(bookings.cancelBooking).not.toHaveBeenCalled()
     })
 
@@ -613,24 +752,31 @@ describe('FacilitiesService admin writes', () => {
       expect(where.endsAt.gt).toBeInstanceOf(Date)
     })
 
-    it('force cancels and refunds each blocking booking through the existing refund path', async () => {
+    // The refund count has nowhere else to go: the delete emits one audit row, the
+    // lifecycle's own, so the reason is what carries it into the admin trash listing.
+    it('force cancels and refunds each blocking booking, then archives naming the refunds', async () => {
       unhonoured('b1', 'b2')
 
       await service.softDelete(operatorUser, 'f1', true)
 
       expect(bookings.cancelBooking.mock.calls.map((c) => c[0])).toEqual(['b1', 'b2'])
       expect(bookings.cancelBooking).toHaveBeenCalledWith('b1', operatorUser)
-      expect(prisma.facility.update).toHaveBeenCalledWith({
-        where: { id: 'f1' },
-        data: { isActive: false },
-      })
-      expect(prisma.auditLog.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            action: 'facility.deactivated',
-            payload: { forced: true, cancelledBookings: 2 },
-          }),
-        }),
+      expect(lifecycle.archiveFacility).toHaveBeenCalledWith(
+        { id: operatorUser.id, role: operatorUser.role },
+        'f1',
+        'Deleted by operator (forced: 2 booking(s) cancelled and refunded)',
+      )
+    })
+
+    // Refunds first, archive after — otherwise LifecycleService's own in-transaction
+    // re-count would refuse the very bookings this call is about to cancel.
+    it('archives only after every refund has gone through', async () => {
+      unhonoured('b1')
+
+      await service.softDelete(operatorUser, 'f1', true)
+
+      expect(bookings.cancelBooking.mock.invocationCallOrder[0]!).toBeLessThan(
+        lifecycle.archiveFacility.mock.invocationCallOrder[0]!,
       )
     })
 
@@ -647,7 +793,7 @@ describe('FacilitiesService admin writes', () => {
       expect((error as Error).message).toContain('1 failed')
       // Every booking is attempted, so the caller learns the whole picture at once.
       expect(bookings.cancelBooking).toHaveBeenCalledTimes(3)
-      expect(prisma.facility.update).not.toHaveBeenCalled()
+      expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
     })
 
     it('blocks the update path from deactivating around the guard', async () => {
@@ -715,9 +861,9 @@ describe('FacilitiesService admin writes', () => {
       setScope({ kind: 'operator', operatorIds: ['op1'] })
     })
 
-    it('bulk delete soft-deletes the scoped facilities that owe nothing', async () => {
+    // The bulk delete must not diverge from the single-resource one: both archive.
+    it('bulk delete archives every scoped facility that owes nothing, flipping no flag', async () => {
       prisma.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
-      prisma.facility.updateMany.mockResolvedValue({ count: 2 })
 
       const res = await service.bulkUpdate(operatorUser, {
         ids: ['a', 'b'],
@@ -726,10 +872,60 @@ describe('FacilitiesService admin writes', () => {
       })
 
       expect(res).toEqual({ affected: 2 })
+      expect(lifecycle.archiveFacility.mock.calls.map((c) => c[1])).toEqual(['a', 'b'])
+      expect(lifecycle.archiveFacility).toHaveBeenCalledWith(
+        { id: operatorUser.id, role: operatorUser.role },
+        'a',
+        'Deleted by operator',
+      )
+      expect(prisma.facility.updateMany).not.toHaveBeenCalled()
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ action: 'facility.bulk.delete', entityId: '2 of 2' }),
+        }),
+      )
+    })
+
+    // 'disable' is an unpublish, not a delete, so it keeps the set-based flag flip.
+    it('bulk disable still deactivates in one updateMany and archives nothing', async () => {
+      prisma.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
+      prisma.facility.updateMany.mockResolvedValue({ count: 2 })
+
+      const res = await service.bulkUpdate(operatorUser, {
+        ids: ['a', 'b'],
+        action: 'disable',
+        force: false,
+      })
+
+      expect(res).toEqual({ affected: 2 })
       expect(prisma.facility.updateMany).toHaveBeenCalledWith({
         where: { id: { in: ['a', 'b'] }, operatorId: { in: ['op1'] } },
         data: { isActive: false },
       })
+      expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
+    })
+
+    it('reports an archive that lost a race as skipped and keeps the rest of the batch', async () => {
+      prisma.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
+      lifecycle.archiveFacility
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new FacilityHasActiveBookingsError('b', 1))
+
+      const res = await service.bulkUpdate(operatorUser, {
+        ids: ['a', 'b'],
+        action: 'delete',
+        force: false,
+      })
+
+      expect(res).toEqual({
+        affected: 1,
+        skipped: [{ facilityId: 'b', reason: 'archive_failed', unhonoured: 0, cancelled: 0 }],
+      })
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ action: 'facility.bulk.delete', entityId: '1 of 2' }),
+        }),
+      )
     })
 
     it('leaves a facility with unhonoured bookings active and reports it', async () => {
@@ -767,7 +963,6 @@ describe('FacilitiesService admin writes', () => {
         .mockResolvedValueOnce(undefined)
         .mockResolvedValueOnce(undefined)
         .mockRejectedValueOnce(new Error('provider down'))
-      prisma.facility.updateMany.mockResolvedValue({ count: 1 })
 
       const res = await service.bulkUpdate(operatorUser, {
         ids: ['a', 'b'],
@@ -781,10 +976,12 @@ describe('FacilitiesService admin writes', () => {
         affected: 1,
         skipped: [{ facilityId: 'b', reason: 'refund_failed', unhonoured: 2, cancelled: 1 }],
       })
-      expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-        where: { id: { in: ['a'] }, operatorId: { in: ['op1'] } },
-        data: { isActive: false },
-      })
+      expect(lifecycle.archiveFacility.mock.calls.map((c) => c[1])).toEqual(['a'])
+      expect(lifecycle.archiveFacility).toHaveBeenCalledWith(
+        { id: operatorUser.id, role: operatorUser.role },
+        'a',
+        'Deleted by operator (forced: 1 booking(s) cancelled and refunded)',
+      )
       expect(prisma.auditLog.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -1157,6 +1354,19 @@ describe('facility DTO validation', () => {
 
   it('rejects an empty update object', () => {
     expect(updateFacilitySchema.safeParse({}).success).toBe(false)
+  })
+
+  it('accepts a valid FacilityKind on update and rejects anything else', () => {
+    expect(updateFacilitySchema.safeParse({ kind: 'FREE_PUBLIC' }).success).toBe(true)
+    expect(updateFacilitySchema.safeParse({ kind: 'business' }).success).toBe(false)
+    expect(updateFacilitySchema.safeParse({ kind: 'NOT_A_KIND' }).success).toBe(false)
+  })
+
+  // Create stays BUSINESS: a kind in the body must be dropped, never honoured.
+  it('strips kind from a create body', () => {
+    const res = createFacilitySchema.safeParse({ ...validCreate, kind: 'FREE_PUBLIC' })
+    expect(res.success).toBe(true)
+    if (res.success) expect('kind' in res.data).toBe(false)
   })
 
   it('defaults amenities and cancellationPolicy on create', () => {

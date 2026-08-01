@@ -11,6 +11,7 @@ import {
   TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import { validateRateGrid } from './schedule-validation'
+import type { LifecycleService } from '../lifecycle/lifecycle.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { EntitlementService } from '../subscriptions/entitlement.service'
 import { tariffDraftSchema, type TariffDraftDto } from './dto/tariff.dto'
@@ -130,6 +131,7 @@ describe('TariffService admin writes', () => {
   }
   let scope: { resolve: jest.Mock; scopeWhere: jest.Mock }
   let entitlements: { assertCanCreateTariffPlan: jest.Mock }
+  let lifecycle: { archiveTariffPlan: jest.Mock }
   let service: TariffService
   let tx: {
     facility: { updateMany: jest.Mock }
@@ -272,10 +274,12 @@ describe('TariffService admin writes', () => {
     }
     scope = { resolve: jest.fn(), scopeWhere: jest.fn() }
     entitlements = { assertCanCreateTariffPlan: jest.fn().mockResolvedValue(undefined) }
+    lifecycle = { archiveTariffPlan: jest.fn().mockResolvedValue(undefined) }
     service = new TariffService(
       prisma as unknown as PrismaService,
       scope as unknown as OperatorScopeService,
       entitlements as unknown as EntitlementService,
+      lifecycle as unknown as LifecycleService,
     )
   })
 
@@ -436,26 +440,109 @@ describe('TariffService admin writes', () => {
     ).rejects.toBeInstanceOf(TariffPlanNotFoundError)
   })
 
-  it('delete removes every assignment row for the plan and deactivates in one transaction', async () => {
-    setScope({ kind: 'operator', operatorIds: ['op1'] })
+  describe('delete archives the plan', () => {
+    it('unassigns every facility, then delegates the state change to LifecycleService', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
 
-    await service.deletePlan(operatorUser, 'plan1')
+      await service.deletePlan(operatorUser, 'plan1')
 
-    // Both writes ran inside the single $transaction callback.
-    expect(prisma.$transaction).toHaveBeenCalledTimes(1)
-    expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
-      where: { tariffPlanId: 'plan1' },
+      expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
+        where: { tariffPlanId: 'plan1' },
+      })
+      expect(tx.facility.updateMany).not.toHaveBeenCalled()
+      // Handed the caller's own tx, not left to open its own: unassigning the facilities
+      // and archiving the plan are one delete and must commit together.
+      expect(lifecycle.archiveTariffPlan).toHaveBeenCalledWith(
+        { id: operatorUser.id, role: operatorUser.role },
+        'plan1',
+        'Deleted by operator',
+        tx,
+      )
     })
-    expect(tx.facility.updateMany).not.toHaveBeenCalled()
-    expect(tx.tariffPlan.update).toHaveBeenCalledWith({
-      where: { id: 'plan1' },
-      data: { isActive: false },
+
+    /**
+     * archiveTariffPlan deliberately preserves isActive/isDefault, because
+     * restoreTariffPlan re-validates the one-active-default rule against exactly those
+     * fields and the partial unique index counts only lifecycle-ACTIVE rows. Writing
+     * isActive=false here would make a later restore bring the plan back disabled and
+     * skip that conflict check.
+     */
+    it('does not touch isActive, and emits no tariff_plan.deleted row of its own', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+
+      await service.deletePlan(operatorUser, 'plan1')
+
+      expect(tx.tariffPlan.update).not.toHaveBeenCalled()
+      expect(prisma.auditLog.create).not.toHaveBeenCalled()
     })
-    expect(prisma.auditLog.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ action: 'tariff_plan.deleted' }),
-      }),
-    )
+
+    // guardDefaultRemoval writes to the plan row through the lifecycle-filtered client,
+    // which cannot see an archived row — so the unassign transaction must land first.
+    it('unassigns before archiving, never the other way round', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+
+      await service.deletePlan(operatorUser, 'plan1')
+
+      expect(tx.facilityTariffAssignment.deleteMany.mock.invocationCallOrder[0]!).toBeLessThan(
+        lifecycle.archiveTariffPlan.mock.invocationCallOrder[0]!,
+      )
+    })
+
+    it('promotes a replacement default before archiving the operator default', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.tariffPlan.findFirst.mockResolvedValue({
+        id: 'plan1',
+        version: 3,
+        operatorId: 'op1',
+        isActive: true,
+        isDefault: true,
+        vehicleTypes: [],
+      })
+      tx.tariffPlan.findMany.mockResolvedValue([
+        { id: 'plan2', vehicleTypes: [] },
+        { id: 'plan3', vehicleTypes: [] },
+      ])
+
+      await service.deletePlan(operatorUser, 'plan1', 'plan2')
+
+      expect(tx.tariffPlan.update).toHaveBeenCalledWith({
+        where: { id: 'plan2' },
+        data: { isDefault: true },
+      })
+      expect(lifecycle.archiveTariffPlan).toHaveBeenCalled()
+    })
+
+    it('refuses to archive when the default cannot be replaced', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.tariffPlan.findFirst.mockResolvedValue({
+        id: 'plan1',
+        version: 3,
+        operatorId: 'op1',
+        isActive: true,
+        isDefault: true,
+        vehicleTypes: [],
+      })
+      tx.tariffPlan.findMany.mockResolvedValue([
+        { id: 'plan2', vehicleTypes: [] },
+        { id: 'plan3', vehicleTypes: [] },
+      ])
+
+      await expect(service.deletePlan(operatorUser, 'plan1')).rejects.toBeInstanceOf(
+        DefaultTariffRequiredError,
+      )
+      expect(lifecycle.archiveTariffPlan).not.toHaveBeenCalled()
+    })
+
+    it('refuses a plan outside the caller operator scope before writing anything', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.tariffPlan.findFirst.mockResolvedValue(null)
+
+      await expect(service.deletePlan(operatorUser, 'plan-other')).rejects.toBeInstanceOf(
+        TariffPlanNotFoundError,
+      )
+      expect(tx.facilityTariffAssignment.deleteMany).not.toHaveBeenCalled()
+      expect(lifecycle.archiveTariffPlan).not.toHaveBeenCalled()
+    })
   })
 
   it('getAssignments dedupes facilities that back the plan via multiple rows', async () => {
@@ -661,12 +748,15 @@ describe('TariffService admin writes', () => {
 
       await service.deletePlan(operatorUser, 'plan1')
 
-      // p2 is NOT promoted; no replacement required.
-      expect(tx.tariffPlan.update).toHaveBeenCalledWith({
-        where: { id: 'plan1' },
-        data: { isActive: false },
-      })
-      expect(tx.tariffPlan.update.mock.calls.some((c) => c[0].where.id === 'p2')).toBe(false)
+      // p2 is NOT promoted; no replacement required. The plan still leaves the active set
+      // — by archiving, which is LifecycleService's write, not a flag flip here.
+      expect(tx.tariffPlan.update).not.toHaveBeenCalled()
+      expect(lifecycle.archiveTariffPlan).toHaveBeenCalledWith(
+        { id: operatorUser.id, role: operatorUser.role },
+        'plan1',
+        'Deleted by operator',
+        tx,
+      )
     })
 
     it('delete rejects without a replacement when 2+ others remain', async () => {
@@ -800,6 +890,7 @@ describe('TariffService.simulate', () => {
       prisma as unknown as PrismaService,
       scope as unknown as OperatorScopeService,
       {} as unknown as EntitlementService,
+      {} as unknown as LifecycleService,
     )
   })
 

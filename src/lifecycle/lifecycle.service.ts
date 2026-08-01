@@ -9,7 +9,7 @@ import {
   LifecycleTransitionError,
   OperatorHasActiveFacilitiesError,
 } from '../common/errors/domain.errors'
-import { unhonouredBookingsWhere } from '../facilities/facilities.service'
+import { unhonouredBookingsWhere } from '../booking/booking.predicates'
 import { anyLifecycleStatus } from '../prisma/lifecycle.extension'
 import { PrismaService } from '../prisma/prisma.service'
 import { EntitlementService } from '../subscriptions/entitlement.service'
@@ -122,18 +122,30 @@ export class LifecycleService {
    * enforced in memory (isPlanApplicable checks lifecycle) and the operator-default
    * partial unique index counts only lifecycle-ACTIVE rows — so archiving a default
    * frees the slot while keeping the exact state whose conflicts restore re-validates.
+   *
+   * `tx` folds the archive into a caller's own transaction. TariffService.deletePlan
+   * needs it: unassigning every facility and archiving the plan are one delete, and
+   * committing the first without the second silently reprices those facilities onto the
+   * operator default while the plan they pointed at is still listed.
    */
-  async archiveTariffPlan(actor: LifecycleActor, id: string, reason?: string): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
-      const row = await this.loadTariffPlan(tx, id, [LifecycleStatus.ACTIVE], 'archived')
-      await tx.tariffPlan.update({
+  async archiveTariffPlan(
+    actor: LifecycleActor,
+    id: string,
+    reason?: string,
+    tx?: Prisma.TransactionClient,
+  ): Promise<void> {
+    const run = async (client: Prisma.TransactionClient): Promise<void> => {
+      const row = await this.loadTariffPlan(client, id, [LifecycleStatus.ACTIVE], 'archived')
+      await client.tariffPlan.update({
         where: { id, lifecycleStatus: row.lifecycleStatus },
         data: this.write(actor, LifecycleStatus.ARCHIVED, reason),
       })
-      await this.audit(tx, actor, 'tariff_plan.archived', 'TariffPlan', id, {
+      await this.audit(client, actor, 'tariff_plan.archived', 'TariffPlan', id, {
         reason: reason ?? null,
       })
-    })
+    }
+
+    return tx ? run(tx) : this.prisma.$transaction(run)
   }
 
   async tombstoneTariffPlan(actor: LifecycleActor, id: string, reason?: string): Promise<void> {

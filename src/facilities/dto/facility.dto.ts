@@ -111,6 +111,10 @@ export const updateFacilitySchema = z
     isActive: z.boolean().optional(),
     isVerified: z.boolean().optional(),
     rank: z.number().int().optional(),
+    // Platform-admin only, enforced in the controller and again in the service. Absent
+    // from createFacilitySchema on purpose: every operator-created facility is BUSINESS,
+    // and only ingestion or a platform admin may say otherwise.
+    kind: z.nativeEnum(FacilityKind).optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: 'At least one field must be provided',

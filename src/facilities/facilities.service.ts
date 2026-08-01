@@ -1,15 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { computeDistanceMeters } from '@spark/maps'
 import type { OpeningHours, VehicleType as ContractVehicleType } from '@spark/types'
-import {
-  BookingStatus,
-  FacilityKind,
-  LifecycleStatus,
-  Prisma,
-  PromotionType,
-  VehicleType,
-} from '@prisma/client'
+import { FacilityKind, LifecycleStatus, Prisma, PromotionType, VehicleType } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
+import { unhonouredBookingsWhere } from '../booking/booking.predicates'
 import { BookingService } from '../booking/booking.service'
 import {
   OperatorScopeService,
@@ -22,11 +16,13 @@ import {
   FacilityDeactivationFailedError,
   FacilityFieldForbiddenError,
   FacilityHasActiveBookingsError,
+  FacilityKindChangeBlockedError,
   FacilityNotFoundError,
   TariffAssignmentMismatchError,
   TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import { InventoryService } from '../inventory/inventory.service'
+import { LifecycleService, type LifecycleActor } from '../lifecycle/lifecycle.service'
 import { PrismaService } from '../prisma/prisma.service'
 import { EntitlementService } from '../subscriptions/entitlement.service'
 import { TariffService, assignmentMismatchReason } from '../tariff/tariff.service'
@@ -58,20 +54,6 @@ import type {
 const MAX_POINTS = 250
 const CLUSTER_COLS = 12
 const CLUSTER_ROWS = 12
-
-// Bookings a deactivation would abandon: still to be honoured (CONFIRMED) or with a
-// vehicle currently inside (CHECKED_IN), and not yet over. Everything else is history.
-const UNHONOURED_BOOKING_STATUSES = [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN]
-
-// Shared with LifecycleService: archiving or tombstoning a facility must refuse for
-// exactly the same reason deactivating one does.
-export function unhonouredBookingsWhere(facilityId: string | string[]): Prisma.BookingWhereInput {
-  return {
-    facilityId: Array.isArray(facilityId) ? { in: facilityId } : facilityId,
-    status: { in: UNHONOURED_BOOKING_STATUSES },
-    endsAt: { gt: new Date() },
-  }
-}
 
 // Public visibility gate, shared by every public search query so the count, the point
 // prefilter and the cluster buckets can never disagree about what is publicly listable.
@@ -163,6 +145,30 @@ const PROMOTION_WEIGHT: Record<PromotionType, number> = {
   [PromotionType.STANDARD]: 1,
 }
 
+// One facility a bulk disable/delete decided it may shut down, with the booking numbers
+// behind the decision — the delete path needs them again to describe its archive.
+interface ClearedFacility {
+  facilityId: string
+  unhonoured: number
+  cancelled: number
+}
+
+function lifecycleActor(user: AuthUser): LifecycleActor {
+  return { id: user.id, role: user.role }
+}
+
+/**
+ * A delete emits exactly one audit row, the lifecycle's own `facility.archived` — so
+ * whether the delete was forced, and what it refunded on the way, has to ride in the
+ * reason. That is also the column the platform administrator's trash listing renders,
+ * which is precisely where someone deciding whether to restore needs to read it.
+ */
+function deleteReason(force: boolean, cancelled: number): string {
+  return force
+    ? `Deleted by operator (forced: ${cancelled} booking(s) cancelled and refunded)`
+    : 'Deleted by operator'
+}
+
 @Injectable()
 export class FacilitiesService {
   private readonly logger = new Logger(FacilitiesService.name)
@@ -174,6 +180,7 @@ export class FacilitiesService {
     private readonly operatorScope: OperatorScopeService,
     private readonly bookings: BookingService,
     private readonly entitlements: EntitlementService,
+    private readonly lifecycle: LifecycleService,
   ) {}
 
   async search(params: FacilitySearchParams): Promise<FacilitySearchResponse> {
@@ -638,21 +645,36 @@ export class FacilitiesService {
     const scope = await this.operatorScope.resolve(user)
     const existing = await this.prisma.facility.findFirst({
       where: { id, ...this.operatorScope.scopeWhere(scope) },
-      select: { id: true },
+      select: { id: true, kind: true },
     })
     if (!existing) throw new FacilityNotFoundError(id)
 
     if (scope.kind === 'operator') {
       if (dto.isVerified !== undefined) throw new FacilityFieldForbiddenError('isVerified')
       if (dto.rank !== undefined) throw new FacilityFieldForbiddenError('rank')
+      if (dto.kind !== undefined) throw new FacilityFieldForbiddenError('kind')
     }
 
     // Same invariant the delete path enforces — an edit must not be a side door around
     // it. No force here on purpose: shutting a facility down with live bookings is a
     // deliberate act with refunds attached, so it goes through DELETE ?force=true.
     if (dto.isActive === false) {
-      const unhonoured = await this.prisma.booking.count({ where: this.unhonouredWhere(id) })
+      const unhonoured = await this.prisma.booking.count({ where: unhonouredBookingsWhere(id) })
       if (unhonoured > 0) throw new FacilityHasActiveBookingsError(id, unhonoured)
+    }
+
+    // Only BUSINESS facilities are sellable — TariffService quotes nothing else, and
+    // getDetail/SavedFacilitiesService hide RESTRICTED entirely — so leaving that kind
+    // strands every stay already paid for. Deliberately no force twin of the delete path:
+    // the facility keeps operating, so there is nothing to refund against and the honest
+    // resolution is to let the outstanding stays finish.
+    const leavingBusiness =
+      dto.kind !== undefined &&
+      existing.kind === FacilityKind.BUSINESS &&
+      dto.kind !== FacilityKind.BUSINESS
+    if (leavingBusiness) {
+      const unhonoured = await this.prisma.booking.count({ where: unhonouredBookingsWhere(id) })
+      if (unhonoured > 0) throw new FacilityKindChangeBlockedError(id, dto.kind!, unhonoured)
     }
 
     const data: Prisma.FacilityUpdateInput = {}
@@ -674,10 +696,19 @@ export class FacilitiesService {
     if (dto.isActive !== undefined) data.isActive = dto.isActive
     if (dto.isVerified !== undefined) data.isVerified = dto.isVerified
     if (dto.rank !== undefined) data.rank = dto.rank
+    if (dto.kind !== undefined) data.kind = dto.kind
 
     const updated = await this.prisma.$transaction(async (tx) => {
       // `geog` regenerates automatically when lat/lng change (GENERATED ALWAYS column).
       const facility = await tx.facility.update({ where: { id }, data })
+
+      // A non-business facility cannot be priced, so every assignment row on it is dead
+      // state the moment the kind changes — and leaving it behind would silently put the
+      // old pricing back the instant an admin moved the facility to BUSINESS again. Same
+      // transaction as the kind change so the two can never disagree.
+      if (leavingBusiness) {
+        await tx.facilityTariffAssignment.deleteMany({ where: { facilityId: id } })
+      }
 
       await tx.auditLog.create({
         data: {
@@ -686,6 +717,9 @@ export class FacilitiesService {
           action: 'facility.updated',
           entityType: 'Facility',
           entityId: id,
+          ...(dto.kind !== undefined
+            ? { payload: { kindFrom: existing.kind, kindTo: dto.kind } }
+            : {}),
         },
       })
 
@@ -696,10 +730,14 @@ export class FacilitiesService {
   }
 
   /**
-   * Deactivates a facility, refusing while it still owes customers a place to park.
-   * Deactivation used to be a bare `isActive = false`, which left every future booking
-   * pointing at a facility that no longer operates: holdSlot blocks NEW bookings there,
-   * but the ones already paid for were simply abandoned.
+   * Deletes a facility, refusing while it still owes customers a place to park.
+   *
+   * "Delete" ARCHIVES: the row transitions to lifecycle ARCHIVED, which the Prisma
+   * lifecycle extension default-filters out of every operator-facing read, and turns up
+   * in the platform administrator's trash to be restored or tombstoned. It used to be a
+   * bare `isActive = false`, which left the "deleted" facility fully visible — and fully
+   * editable — to the operator that deleted it. The state change itself is
+   * LifecycleService's, not reimplemented here.
    *
    * `force` is the escape hatch, and it pays its way out: every unhonoured booking is
    * cancelled and refunded through BookingService.cancelBooking — the existing two-phase
@@ -717,7 +755,7 @@ export class FacilitiesService {
     if (!existing) throw new FacilityNotFoundError(id)
 
     const unhonoured = await this.prisma.booking.findMany({
-      where: this.unhonouredWhere(id),
+      where: unhonouredBookingsWhere(id),
       select: { id: true },
     })
 
@@ -735,25 +773,12 @@ export class FacilitiesService {
       }
     }
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.facility.update({ where: { id }, data: { isActive: false } })
-      await tx.auditLog.create({
-        data: {
-          actorId: user.id,
-          actorRole: user.role,
-          action: 'facility.deactivated',
-          entityType: 'Facility',
-          entityId: id,
-          payload: { forced: force, cancelledBookings: cancelled },
-        },
-      })
-    })
-  }
-
-  // Bookings that a deactivation would strand: not yet finished, and either paid and
-  // waiting (CONFIRMED) or with the vehicle already inside (CHECKED_IN).
-  private unhonouredWhere(facilityId: string | string[]): Prisma.BookingWhereInput {
-    return unhonouredBookingsWhere(facilityId)
+    // archiveFacility re-counts unhonoured bookings inside its own transaction, closing
+    // the window between the refund loop above and the state change. That re-check cannot
+    // trip on what this call just refunded — cancellation moves a booking out of
+    // CONFIRMED/CHECKED_IN — so anything it still finds was booked while we were
+    // refunding and genuinely must block.
+    await this.lifecycle.archiveFacility(lifecycleActor(user), id, deleteReason(force, cancelled))
   }
 
   /**
@@ -811,17 +836,17 @@ export class FacilitiesService {
   }
 
   /**
-   * Bulk deactivation, decided facility by facility. The old single `updateMany` flipped
+   * Bulk disable/delete, decided facility by facility. The old single `updateMany` flipped
    * every selected row regardless of what was booked there; a per-facility loop is the
    * price of the guard.
    *
-   * Honesty is the design constraint. A facility is deactivated only when it owes
-   * nothing, or when `force` cancelled and refunded everything it owed. Anything else is
-   * left ACTIVE and reported in `skipped` with its counts, so a partial force — three
-   * facilities cleared, the fourth stuck on a provider failure after refunding two of its
-   * five bookings — reads as exactly that rather than as a silent success. The call does
-   * not throw: the other facilities genuinely were deactivated, and rolling that back
-   * would mean un-refunding money.
+   * Honesty is the design constraint. A facility is cleared only when it owes nothing, or
+   * when `force` cancelled and refunded everything it owed. Anything else is left ACTIVE
+   * and reported in `skipped` with its counts, so a partial force — three facilities
+   * cleared, the fourth stuck on a provider failure after refunding two of its five
+   * bookings — reads as exactly that rather than as a silent success. The call does not
+   * throw: the other facilities genuinely were shut down, and rolling that back would mean
+   * un-refunding money.
    */
   private async bulkDeactivate(
     user: AuthUser,
@@ -831,7 +856,7 @@ export class FacilitiesService {
     force: boolean,
   ): Promise<BulkFacilityResult> {
     // ids are only a filter — scopeWhere is the authorization boundary, so an operator
-    // passing foreign ids simply deactivates none of them.
+    // passing foreign ids simply touches none of them.
     const scoped = await this.prisma.facility.findMany({
       where: { id: { in: ids }, ...scopeWhere },
       select: { id: true },
@@ -841,18 +866,18 @@ export class FacilitiesService {
 
     const grouped = await this.prisma.booking.groupBy({
       by: ['facilityId'],
-      where: this.unhonouredWhere(scopedIds),
+      where: unhonouredBookingsWhere(scopedIds),
       _count: { _all: true },
     })
     const unhonouredByFacility = new Map(grouped.map((g) => [g.facilityId, g._count._all]))
 
-    const clear: string[] = []
+    const clear: ClearedFacility[] = []
     const skipped: BulkFacilitySkipped[] = []
 
     for (const facilityId of scopedIds) {
       const unhonoured = unhonouredByFacility.get(facilityId) ?? 0
       if (unhonoured === 0) {
-        clear.push(facilityId)
+        clear.push({ facilityId, unhonoured: 0, cancelled: 0 })
         continue
       }
       if (!force) {
@@ -861,7 +886,7 @@ export class FacilitiesService {
       }
 
       const bookings = await this.prisma.booking.findMany({
-        where: this.unhonouredWhere(facilityId),
+        where: unhonouredBookingsWhere(facilityId),
         select: { id: true },
       })
       const outcome = await this.cancelAndRefund(
@@ -877,16 +902,28 @@ export class FacilitiesService {
         })
         continue
       }
-      clear.push(facilityId)
+      clear.push({ facilityId, unhonoured: bookings.length, cancelled: outcome.cancelled })
     }
 
+    // 'delete' must archive, exactly like the single-resource path, and archiving is
+    // per-row by construction: LifecycleService state-guards each transition in its own
+    // transaction and writes its own `facility.archived` row. So it runs here, before the
+    // transaction below, which is left holding only the batch summary. 'disable' is an
+    // unpublish, not a delete, and stays the one set-based flip it always was.
+    const archived = action === 'delete' ? await this.archiveEach(user, clear, force, skipped) : []
+
     const affected = await this.prisma.$transaction(async (tx) => {
-      const result = clear.length
-        ? await tx.facility.updateMany({
-            where: { id: { in: clear }, ...scopeWhere },
-            data: { isActive: false },
-          })
-        : { count: 0 }
+      const count =
+        action === 'delete'
+          ? archived.length
+          : clear.length
+            ? (
+                await tx.facility.updateMany({
+                  where: { id: { in: clear.map((c) => c.facilityId) }, ...scopeWhere },
+                  data: { isActive: false },
+                })
+              ).count
+            : 0
 
       await tx.auditLog.create({
         data: {
@@ -894,15 +931,46 @@ export class FacilitiesService {
           actorRole: user.role,
           action: `facility.bulk.${action}`,
           entityType: 'Facility',
-          entityId: `${result.count} of ${ids.length}`,
+          entityId: `${count} of ${ids.length}`,
           payload: { forced: force, skipped: skipped as unknown as Prisma.InputJsonValue },
         },
       })
 
-      return result.count
+      return count
     })
 
     return skipped.length > 0 ? { affected, skipped } : { affected }
+  }
+
+  /**
+   * Archives each cleared facility through LifecycleService, one transition at a time.
+   * A refusal here is a lost race — a booking taken while this batch was refunding, or a
+   * concurrent archive — so it is reported as a skip rather than thrown: the facilities
+   * already archived stay archived, and their refunds cannot be undone.
+   */
+  private async archiveEach(
+    user: AuthUser,
+    clear: ClearedFacility[],
+    force: boolean,
+    skipped: BulkFacilitySkipped[],
+  ): Promise<string[]> {
+    const archived: string[] = []
+    const actor = lifecycleActor(user)
+
+    for (const { facilityId, unhonoured, cancelled } of clear) {
+      try {
+        await this.lifecycle.archiveFacility(actor, facilityId, deleteReason(force, cancelled))
+        archived.push(facilityId)
+      } catch (error) {
+        skipped.push({ facilityId, reason: 'archive_failed', unhonoured, cancelled })
+        this.logger.error(
+          `Bulk delete could not archive facility ${facilityId}`,
+          error instanceof Error ? error.stack : String(error),
+        )
+      }
+    }
+
+    return archived
   }
 
   /**
