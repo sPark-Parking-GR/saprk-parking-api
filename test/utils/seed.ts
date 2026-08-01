@@ -254,6 +254,40 @@ export function seedSavedFacility(
   return prisma.savedFacility.create({ data: seed })
 }
 
+/**
+ * Grants a user the per-user management assignment every operator-facing facility and
+ * tariff-plan read now requires below platform admin. Resources created THROUGH the API get
+ * this row automatically in the create transaction; anything seeded straight through Prisma
+ * does not, so a fixture that skips it leaves its own operator staring at an empty list.
+ *
+ * `assignedBy` defaults to the assignee, matching what an auto-assign-on-create writes.
+ */
+export function seedFacilityManager(
+  prisma: PrismaClient,
+  seed: { facilityId: string; userId: string; assignedBy?: string },
+): Promise<unknown> {
+  return prisma.facilityManager.create({
+    data: {
+      facilityId: seed.facilityId,
+      userId: seed.userId,
+      assignedBy: seed.assignedBy ?? seed.userId,
+    },
+  })
+}
+
+export function seedTariffPlanManager(
+  prisma: PrismaClient,
+  seed: { tariffPlanId: string; userId: string; assignedBy?: string },
+): Promise<unknown> {
+  return prisma.tariffPlanManager.create({
+    data: {
+      tariffPlanId: seed.tariffPlanId,
+      userId: seed.userId,
+      assignedBy: seed.assignedBy ?? seed.userId,
+    },
+  })
+}
+
 export interface PaymentSeed {
   bookingId: string
   amountCents: number

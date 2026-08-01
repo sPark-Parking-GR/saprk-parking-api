@@ -259,6 +259,16 @@ export class FacilityKindChangeBlockedError extends DomainError {
   }
 }
 
+// One or more requested manager ids cannot hold the assignment. The WHOLE request is
+// refused and the offending ids are named: silently dropping them would report a grant
+// that did not happen, and the caller already supplied these ids for an operator they
+// administer, so echoing them back reveals nothing they could not already list.
+export class ManagerAssignmentRejectedError extends DomainError {
+  constructor(reason: string, userIds: string[]) {
+    super(`Manager assignment rejected — ${reason}: ${userIds.join(', ')}`)
+  }
+}
+
 // A caller asked for a report on an operator they do not belong to. The message names no
 // operator and reads the same whether or not the id exists, so the endpoint cannot be used
 // to enumerate tenants.

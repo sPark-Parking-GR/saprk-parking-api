@@ -47,6 +47,8 @@ describe('OperatorMembersService', () => {
     }
     parkingOperator: { findUnique: jest.Mock }
     user: { findUnique: jest.Mock; update: jest.Mock }
+    facilityManager: { deleteMany: jest.Mock }
+    tariffPlanManager: { deleteMany: jest.Mock }
     auditLog: { create: jest.Mock }
     $executeRaw: jest.Mock
     $transaction: jest.Mock
@@ -102,6 +104,8 @@ describe('OperatorMembersService', () => {
         findUnique: jest.fn().mockResolvedValue({ role: UserRole.OPERATOR_ADMIN }),
         update: jest.fn(),
       },
+      facilityManager: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      tariffPlanManager: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
       auditLog: { create: jest.fn() },
       $executeRaw: jest.fn(),
       $transaction: jest.fn(async (cb: (t: typeof prisma) => unknown) => cb(prisma)),
@@ -401,10 +405,72 @@ describe('OperatorMembersService', () => {
           action: 'operator_member.removed',
           entityType: 'OperatorMembership',
           entityId: 'mem-2',
-          payload: { operatorId: 'op-z', userId: 'user-2', role: OperatorMemberRole.STAFF },
+          payload: {
+            operatorId: 'op-z',
+            userId: 'user-2',
+            role: OperatorMemberRole.STAFF,
+            facilitiesRevoked: 0,
+            tariffPlansRevoked: 0,
+          },
           ipAddress: null,
         },
       })
+    })
+
+    it('revokes the removed member’s assignments for that operator only', async () => {
+      withCallerMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      targetMembership(OperatorMemberRole.STAFF)
+      prisma.facilityManager.deleteMany.mockResolvedValue({ count: 3 })
+      prisma.tariffPlanManager.deleteMany.mockResolvedValue({ count: 1 })
+
+      await service.remove(operatorUser, 'op-a', 'user-2')
+
+      expect(prisma.facilityManager.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-2', facility: { operatorId: 'op-a' } },
+      })
+      expect(prisma.tariffPlanManager.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-2', tariffPlan: { operatorId: 'op-a' } },
+      })
+      expect(prisma.auditLog.create.mock.calls[0]![0].data.payload).toMatchObject({
+        facilitiesRevoked: 3,
+        tariffPlansRevoked: 1,
+      })
+    })
+
+    it('revokes inside the same transaction as the membership delete', async () => {
+      withCallerMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      targetMembership(OperatorMemberRole.STAFF)
+
+      await service.remove(operatorUser, 'op-a', 'user-2')
+
+      // The mock $transaction passes the same client through, so proving they ran at all is
+      // proving they ran on the transaction client — a revoke outside it could leave the
+      // member with working access after a rolled-back removal.
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1)
+      expect(prisma.facilityManager.deleteMany).toHaveBeenCalledTimes(1)
+      expect(prisma.tariffPlanManager.deleteMany).toHaveBeenCalledTimes(1)
+    })
+
+    it('leaves assignments alone when the removal is refused', async () => {
+      withCallerMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      targetMembership(OperatorMemberRole.ADMIN)
+      prisma.operatorMembership.count.mockResolvedValue(0)
+
+      await expect(service.remove(operatorUser, 'op-a', 'user-2')).rejects.toBeInstanceOf(
+        LastOperatorAdminError,
+      )
+      expect(prisma.facilityManager.deleteMany).not.toHaveBeenCalled()
+      expect(prisma.tariffPlanManager.deleteMany).not.toHaveBeenCalled()
+    })
+
+    it('does not revoke on a role change — only leaving the operator does', async () => {
+      withCallerMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      targetMembership(OperatorMemberRole.STAFF)
+
+      await service.changeRole(operatorUser, 'op-a', 'user-2', OperatorMemberRole.ADMIN)
+
+      expect(prisma.facilityManager.deleteMany).not.toHaveBeenCalled()
+      expect(prisma.tariffPlanManager.deleteMany).not.toHaveBeenCalled()
     })
 
     it('throws OperatorMemberNotFoundError for a non-member', async () => {

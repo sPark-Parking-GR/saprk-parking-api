@@ -75,6 +75,13 @@ function makeRow(over: Record<string, unknown> = {}) {
   }
 }
 
+// The narrowing term every operator-facing facility/plan query must now carry. Written out
+// here so an assertion that lost it reads as a missing clause rather than a shape change.
+const managed = (operatorIds: string[], userId: string) => ({
+  operatorId: { in: operatorIds },
+  managers: { some: { userId } },
+})
+
 const validCreate: CreateFacilityDto = {
   name: 'Lot A',
   address: 'addr',
@@ -113,17 +120,17 @@ describe('FacilitiesService admin writes', () => {
     $transaction: jest.Mock
     $queryRaw: jest.Mock
   }
-  let scope: { resolve: jest.Mock; scopeWhere: jest.Mock }
+  // The REAL scope service, with only `resolve` stubbed. The where-builders are pure and
+  // security-critical, so mirroring them in a mock would let the predicate the tests assert
+  // on drift away from the one production runs.
+  let scope: OperatorScopeService
   let bookings: { cancelBooking: jest.Mock }
   let entitlements: { assertCanCreateFacility: jest.Mock }
   let lifecycle: { archiveFacility: jest.Mock }
   let service: FacilitiesService
 
   function setScope(s: OperatorScope) {
-    scope.resolve.mockResolvedValue(s)
-    scope.scopeWhere.mockReturnValue(
-      s.kind === 'platform' ? {} : { operatorId: { in: s.operatorIds } },
-    )
+    jest.spyOn(scope, 'resolve').mockResolvedValue(s)
   }
 
   let tx: {
@@ -135,6 +142,8 @@ describe('FacilitiesService admin writes', () => {
       count: jest.Mock
     }
     facilityTariffAssignment: { deleteMany: jest.Mock; create: jest.Mock; createMany: jest.Mock }
+    facilityManager: { createMany: jest.Mock }
+    operatorMembership: { findMany: jest.Mock }
     facilityOwnershipPeriod: { create: jest.Mock }
     auditLog: { create: jest.Mock }
     $executeRaw: jest.Mock
@@ -154,6 +163,8 @@ describe('FacilitiesService admin writes', () => {
         create: jest.fn(),
         createMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
+      facilityManager: { createMany: jest.fn() },
+      operatorMembership: { findMany: jest.fn().mockResolvedValue([]) },
       facilityOwnershipPeriod: { create: jest.fn() },
       auditLog: { create: jest.fn() },
       $executeRaw: jest.fn().mockResolvedValue(0),
@@ -189,7 +200,7 @@ describe('FacilitiesService admin writes', () => {
       $transaction: jest.fn(async (cb: (t: typeof tx) => unknown) => cb(tx)),
       $queryRaw: jest.fn().mockResolvedValue([{ count: 0 }]),
     }
-    scope = { resolve: jest.fn(), scopeWhere: jest.fn() }
+    scope = new OperatorScopeService(prisma as unknown as PrismaService)
     bookings = { cancelBooking: jest.fn() }
     entitlements = { assertCanCreateFacility: jest.fn().mockResolvedValue(undefined) }
     lifecycle = { archiveFacility: jest.fn().mockResolvedValue(undefined) }
@@ -197,7 +208,7 @@ describe('FacilitiesService admin writes', () => {
       prisma as unknown as PrismaService,
       {} as unknown as InventoryService,
       {} as unknown as TariffService,
-      scope as unknown as OperatorScopeService,
+      scope,
       bookings as unknown as BookingService,
       entitlements as unknown as EntitlementService,
       lifecycle as unknown as LifecycleService,
@@ -231,6 +242,49 @@ describe('FacilitiesService admin writes', () => {
     expect(tx.facilityOwnershipPeriod.create).toHaveBeenCalledWith({
       data: { facilityId: row.id, operatorId: 'op1', from: row.createdAt, to: null },
     })
+  })
+
+  it('auto-assigns the creator as manager in the create transaction', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
+    const row = makeRow()
+    prisma.facility.create.mockResolvedValue(row)
+
+    await service.create(operatorUser, { ...validCreate })
+
+    expect(tx.facilityManager.createMany).toHaveBeenCalledWith({
+      data: [{ facilityId: row.id, userId: operatorUser.id, assignedBy: operatorUser.id }],
+    })
+  })
+
+  /**
+   * A platform admin creating on a tenant's behalf gets no row of their own — they see
+   * everything already — but the facility must not land unmanaged, or the operator it was
+   * created FOR could not see it.
+   */
+  it('seeds a platform creator’s facility to the operator’s admins, not to themselves', async () => {
+    setScope({ kind: 'platform' })
+    const row = makeRow()
+    prisma.facility.create.mockResolvedValue(row)
+    tx.operatorMembership.findMany.mockResolvedValue([{ userId: 'u-a' }, { userId: 'u-b' }])
+
+    await service.create(platformUser, { ...validCreate, operatorId: 'op1' })
+
+    expect(tx.facilityManager.createMany).toHaveBeenCalledWith({
+      data: [
+        { facilityId: row.id, userId: 'u-a', assignedBy: platformUser.id },
+        { facilityId: row.id, userId: 'u-b', assignedBy: platformUser.id },
+      ],
+    })
+  })
+
+  it('writes no manager row when the target operator has no eligible admins', async () => {
+    setScope({ kind: 'platform' })
+    prisma.facility.create.mockResolvedValue(makeRow())
+    tx.operatorMembership.findMany.mockResolvedValue([])
+
+    await service.create(platformUser, { ...validCreate, operatorId: 'op1' })
+
+    expect(tx.facilityManager.createMany).not.toHaveBeenCalled()
   })
 
   it('operator create ignores a dto.operatorId and uses membership scope', async () => {
@@ -461,8 +515,30 @@ describe('FacilitiesService admin writes', () => {
     )
     expect(prisma.facility.findFirst.mock.calls[0]![0].where).toEqual({
       id: 'f-other',
-      operatorId: { in: ['op1'] },
+      ...managed(['op1'], operatorUser.id),
     })
+  })
+
+  it('an operator caller only reaches facilities assigned to them, not everything the operator owns', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
+    prisma.facility.findMany.mockResolvedValue([])
+
+    await service.adminList(operatorUser, { skip: 0, take: 20 })
+
+    expect(prisma.facility.findMany.mock.calls[0]![0].where).toEqual(
+      managed(['op1'], operatorUser.id),
+    )
+  })
+
+  it('a platform caller is exempt from the manager narrowing entirely', async () => {
+    setScope({ kind: 'platform' })
+    prisma.facility.findFirst.mockResolvedValue(makeRow())
+
+    await service.adminGetById(platformUser, 'f1')
+
+    const where = prisma.facility.findFirst.mock.calls[0]![0].where
+    expect(where.managers).toBeUndefined()
+    expect(where.operatorId).toBeUndefined()
   })
 
   it('platform list applies no operator scope and may filter by operatorId', async () => {
@@ -510,11 +586,38 @@ describe('FacilitiesService admin writes', () => {
 
       const sql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
       expect(sql.text).toContain('"operatorId" IN ($6,$7)')
-      expect(sql.values.slice(5)).toEqual(['op1', 'op2'])
+      expect(sql.values.slice(5)).toEqual(['op1', 'op2', operatorUser.id])
 
       const where = prisma.facility.findMany.mock.calls[0]![0].where
       expect(where.AND).toContainEqual({ operatorId: { in: ['op1', 'op2'] } })
       expect(JSON.stringify(where)).not.toContain('op3')
+    })
+
+    // The count and the cluster buckets are raw SQL, which no Prisma predicate reaches. If
+    // only the points path carried the manager term the map total would contradict the list.
+    it('narrows the raw SQL by manager too, with the user id bound not interpolated', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.$queryRaw.mockResolvedValue([{ count: 1 }])
+
+      await service.adminMap(operatorUser, { bounds })
+
+      const sql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
+      expect(sql.text).toContain(
+        'EXISTS (SELECT 1 FROM "FacilityManager" fm WHERE fm."facilityId" = "Facility"."id" AND fm."userId" = $7)',
+      )
+      expect(sql.text).not.toContain(operatorUser.id)
+      expect(sql.values).toEqual([23, 37, 24, 38, 'ACTIVE', 'op1', operatorUser.id])
+
+      const where = prisma.facility.findMany.mock.calls[0]![0].where
+      expect(where.AND).toContainEqual({ managers: { some: { userId: operatorUser.id } } })
+    })
+
+    it('leaves a platform caller unnarrowed in the raw SQL', async () => {
+      setScope({ kind: 'platform' })
+
+      await service.adminMap(platformUser, { bounds })
+
+      expect(sqlOf(prisma.$queryRaw.mock.calls[0]!).text).not.toContain('"FacilityManager"')
     })
 
     it('ignores a requested operatorId for an operator caller', async () => {
@@ -529,6 +632,7 @@ describe('FacilitiesService admin writes', () => {
         38,
         'ACTIVE',
         'op1',
+        operatorUser.id,
       ])
     })
 
@@ -652,6 +756,7 @@ describe('FacilitiesService admin writes', () => {
           { isVerified: false },
           { kind: 'BUSINESS' },
           { operatorId: { in: ['op1'] } },
+          { managers: { some: { userId: operatorUser.id } } },
         ],
       })
       expect(sqlOf(prisma.$queryRaw.mock.calls[0]!).values).toEqual([
@@ -666,6 +771,7 @@ describe('FacilitiesService admin writes', () => {
         false,
         'BUSINESS',
         'op1',
+        operatorUser.id,
       ])
     })
   })
@@ -704,7 +810,7 @@ describe('FacilitiesService admin writes', () => {
       )
       expect(prisma.facility.findFirst.mock.calls[0]![0].where).toEqual({
         id: 'f-other',
-        operatorId: { in: ['op1'] },
+        ...managed(['op1'], operatorUser.id),
       })
       expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
     })
@@ -899,7 +1005,7 @@ describe('FacilitiesService admin writes', () => {
 
       expect(res).toEqual({ affected: 2 })
       expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-        where: { id: { in: ['a', 'b'] }, operatorId: { in: ['op1'] } },
+        where: { id: { in: ['a', 'b'] }, ...managed(['op1'], operatorUser.id) },
         data: { isActive: false },
       })
       expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
@@ -944,7 +1050,7 @@ describe('FacilitiesService admin writes', () => {
         skipped: [{ facilityId: 'b', reason: 'unhonoured_bookings', unhonoured: 4, cancelled: 0 }],
       })
       expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-        where: { id: { in: ['a'] }, operatorId: { in: ['op1'] } },
+        where: { id: { in: ['a'] }, ...managed(['op1'], operatorUser.id) },
         data: { isActive: false },
       })
       expect(bookings.cancelBooking).not.toHaveBeenCalled()
@@ -1023,7 +1129,7 @@ describe('FacilitiesService admin writes', () => {
     await service.bulkUpdate(operatorUser, { ids: ['mine', 'foreign'], action: 'enable' })
 
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['mine', 'foreign'] }, operatorId: { in: ['op1'] } },
+      where: { id: { in: ['mine', 'foreign'] }, ...managed(['op1'], operatorUser.id) },
       data: { isActive: true },
     })
   })
@@ -1036,7 +1142,7 @@ describe('FacilitiesService admin writes', () => {
 
     expect(res).toEqual({ affected: 2 })
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['a', 'b'] }, operatorId: { in: ['op1'] } },
+      where: { id: { in: ['a', 'b'] }, ...managed(['op1'], operatorUser.id) },
       data: { isVerified: true },
     })
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
@@ -1053,7 +1159,7 @@ describe('FacilitiesService admin writes', () => {
     await service.bulkUpdate(operatorUser, { ids: ['a'], action: 'unpublish' })
 
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['a'] }, operatorId: { in: ['op1'] } },
+      where: { id: { in: ['a'] }, ...managed(['op1'], operatorUser.id) },
       data: { isVerified: false },
     })
   })
@@ -1068,11 +1174,13 @@ describe('FacilitiesService admin writes', () => {
 
       expect(prisma.facility.findFirst.mock.calls[0]![0].where).toEqual({
         id: 'f1',
-        operatorId: { in: ['op1'] },
+        ...managed(['op1'], operatorUser.id),
       })
+      // The plan side narrows on TariffPlanManager, so a caller cannot attach a plan they
+      // do not manage to a facility they do.
       expect(prisma.tariffPlan.findFirst.mock.calls[0]![0].where).toEqual({
         id: 'plan1',
-        operatorId: { in: ['op1'] },
+        ...managed(['op1'], operatorUser.id),
       })
       expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
         where: { facilityId: 'f1', vehicleType: 'CAR' },
@@ -1165,7 +1273,7 @@ describe('FacilitiesService admin writes', () => {
       // Every distinct plan id was ownership-checked in one query.
       expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where).toEqual({
         id: { in: ['planCar', 'planTruck'] },
-        operatorId: { in: ['op1'] },
+        ...managed(['op1'], operatorUser.id),
       })
       // One deleteMany clearing both targeted concrete slots on both scoped facilities.
       expect(tx.facilityTariffAssignment.deleteMany).toHaveBeenCalledWith({
@@ -1205,7 +1313,7 @@ describe('FacilitiesService admin writes', () => {
 
       expect(tx.facility.findMany.mock.calls[0]![0].where).toEqual({
         id: { in: ['mine', 'foreign'] },
-        operatorId: { in: ['op1'] },
+        ...managed(['op1'], operatorUser.id),
       })
       expect(tx.facilityTariffAssignment.createMany).toHaveBeenCalledWith({
         data: [{ facilityId: 'mine', tariffPlanId: 'plan1', vehicleType: 'CAR' }],

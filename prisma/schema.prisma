@@ -219,6 +219,8 @@ model User {
   invitesSent         OperatorInvite[]
   passwordResetTokens PasswordResetToken[]
   savedFacilities     SavedFacility[]
+  managedFacilities   FacilityManager[]
+  managedTariffPlans  TariffPlanManager[]
 
   @@index([email])
   @@index([lifecycleStatus, purgeAfter])
@@ -427,6 +429,7 @@ model Facility {
   promotionPlan    PromotionPlan?
   ownershipPeriods FacilityOwnershipPeriod[]
   savedBy          SavedFacility[]
+  managers         FacilityManager[]
 
   // Generated geography point (kept in sync with lat/lng by the database). Managed
   // via raw SQL in the migration; Prisma treats it as an opaque column.
@@ -507,6 +510,28 @@ model FacilityRule {
   @@unique([facilityId, ruleKey])
 }
 
+// Per-user management assignment, layered ON TOP of OperatorMembership rather than
+// replacing it: a member of the owning operator sees a facility only once they also hold a
+// row here. Platform admins are exempt entirely and never get rows.
+//
+// assignedBy is the acting user's id with no FK on purpose — same convention as
+// lifecycleChangedBy: it is an audit fact that must outlive the actor's row.
+//
+// The (userId) index is load-bearing, not decoration: `managers: { some: { userId } }` is
+// the narrowing predicate on every dashboard list, detail and map query.
+model FacilityManager {
+  facilityId String
+  userId     String
+  assignedAt DateTime @default(now())
+  assignedBy String
+
+  facility Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([facilityId, userId])
+  @@index([userId])
+}
+
 // ─── Tariff ───────────────────────────────────────────────────────────────────
 
 model TariffPlan {
@@ -550,6 +575,7 @@ model TariffPlan {
   tiers             RateTier[]
   windows           RateWindow[]
   caps              RateCap[]
+  managers          TariffPlanManager[]
 
   @@index([operatorId, isActive])
   @@index([lifecycleStatus, purgeAfter])
@@ -572,6 +598,22 @@ model FacilityTariffAssignment {
 
   @@unique([facilityId, vehicleType])
   @@index([tariffPlanId])
+}
+
+// The TariffPlan twin of FacilityManager — see that model for why the assignment exists,
+// why assignedBy carries no FK, and why the (userId) index is load-bearing. Two tables
+// rather than one polymorphic one so both sides keep real foreign keys and cascade deletes.
+model TariffPlanManager {
+  tariffPlanId String
+  userId       String
+  assignedAt   DateTime @default(now())
+  assignedBy   String
+
+  tariffPlan TariffPlan @relation(fields: [tariffPlanId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([tariffPlanId, userId])
+  @@index([userId])
 }
 
 // Partitions the 24h clock for time-of-day pricing (e.g. Day vs Night). With no

@@ -8,8 +8,8 @@ import { BookingService } from '../booking/booking.service'
 import {
   OperatorScopeService,
   targetOperatorId,
+  type ManagedScopeWhere,
   type OperatorScope,
-  type OperatorScopeWhere,
 } from '../common/authz/operator-scope.service'
 import {
   DomainError,
@@ -23,6 +23,7 @@ import {
 } from '../common/errors/domain.errors'
 import { InventoryService } from '../inventory/inventory.service'
 import { LifecycleService, type LifecycleActor } from '../lifecycle/lifecycle.service'
+import { initialManagerIds } from '../managers/initial-managers'
 import { PrismaService } from '../prisma/prisma.service'
 import { EntitlementService } from '../subscriptions/entitlement.service'
 import { TariffService, assignmentMismatchReason } from '../tariff/tariff.service'
@@ -75,6 +76,7 @@ type AdminMapFilter =
   | { on: 'isVerified'; value: boolean }
   | { on: 'kind'; value: FacilityKind }
   | { on: 'operators'; value: string[] }
+  | { on: 'manager'; userId: string }
   | { on: 'lifecycle'; value: LifecycleStatus }
 
 function adminFilterWhere(filter: AdminMapFilter): Prisma.FacilityWhereInput {
@@ -99,6 +101,8 @@ function adminFilterWhere(filter: AdminMapFilter): Prisma.FacilityWhereInput {
       return { kind: filter.value }
     case 'operators':
       return { operatorId: { in: filter.value } }
+    case 'manager':
+      return { managers: { some: { userId: filter.userId } } }
     case 'lifecycle':
       return { lifecycleStatus: filter.value }
   }
@@ -120,6 +124,8 @@ function adminFilterSql(filter: AdminMapFilter): Prisma.Sql {
       return Prisma.sql`"kind" = ${filter.value}::"FacilityKind"`
     case 'operators':
       return Prisma.sql`"operatorId" IN (${Prisma.join(filter.value)})`
+    case 'manager':
+      return Prisma.sql`EXISTS (SELECT 1 FROM "FacilityManager" fm WHERE fm."facilityId" = "Facility"."id" AND fm."userId" = ${filter.userId})`
     case 'lifecycle':
       return Prisma.sql`"lifecycleStatus" = ${filter.value}::"LifecycleStatus"`
   }
@@ -407,8 +413,8 @@ export class FacilitiesService {
 
   /**
    * Sets or clears ONE assignment row for a facility's concrete `(vehicleType)` slot. Both
-   * the facility and — when assigning — the plan must belong to the caller's operator scope;
-   * checking only one side would let an operator assign another operator's private plan to
+   * the facility and — when assigning — the plan must each be within the caller's managed
+   * scope; checking only one side would let an operator assign a plan they do not manage to
    * their facility (pricing leak), or point their plan at a foreign facility. The plan's
    * own `vehicleTypes` must not contradict the target slot. Delete-then-create (not upsert)
    * works around the Prisma compound whereUnique gotcha.
@@ -420,17 +426,16 @@ export class FacilitiesService {
     tariffPlanId: string | null,
   ): Promise<{ facilityId: string; vehicleType: VehicleType; tariffPlanId: string | null }> {
     const scope = await this.operatorScope.resolve(user)
-    const scopeWhere = this.operatorScope.scopeWhere(scope)
 
     const facility = await this.prisma.facility.findFirst({
-      where: { id: facilityId, ...scopeWhere },
+      where: { id: facilityId, ...this.operatorScope.facilityScopeWhere(scope, user) },
       select: { id: true },
     })
     if (!facility) throw new FacilityNotFoundError(facilityId)
 
     if (tariffPlanId !== null) {
       const plan = await this.prisma.tariffPlan.findFirst({
-        where: { id: tariffPlanId, ...scopeWhere },
+        where: { id: tariffPlanId, ...this.operatorScope.tariffPlanScopeWhere(scope, user) },
         select: { id: true, vehicleTypes: true },
       })
       if (!plan) throw new TariffPlanNotFoundError(tariffPlanId)
@@ -473,7 +478,7 @@ export class FacilitiesService {
   ): Promise<FacilityTariffAssignments> {
     const scope = await this.operatorScope.resolve(user)
     const facility = await this.prisma.facility.findFirst({
-      where: { id: facilityId, ...this.operatorScope.scopeWhere(scope) },
+      where: { id: facilityId, ...this.operatorScope.facilityScopeWhere(scope, user) },
       select: { id: true, operatorId: true },
     })
     if (!facility) throw new FacilityNotFoundError(facilityId)
@@ -529,7 +534,7 @@ export class FacilitiesService {
 
   async adminList(user: AuthUser, query: ListFacilitiesDto): Promise<AdminFacilityList> {
     const scope = await this.operatorScope.resolve(user)
-    const where = this.adminListWhere(scope, query)
+    const where = this.adminListWhere(scope, user, query)
 
     const [rows, total] = await Promise.all([
       this.prisma.facility.findMany({
@@ -566,7 +571,7 @@ export class FacilitiesService {
   async adminGetById(user: AuthUser, id: string): Promise<AdminFacility> {
     const scope = await this.operatorScope.resolve(user)
     const facility = await this.prisma.facility.findFirst({
-      where: { id, ...this.operatorScope.scopeWhere(scope) },
+      where: { id, ...this.operatorScope.facilityScopeWhere(scope, user) },
     })
     if (!facility) throw new FacilityNotFoundError(id)
     return this.toAdminFacility(facility)
@@ -625,6 +630,23 @@ export class FacilitiesService {
         data: { facilityId: facility.id, operatorId, from: facility.createdAt, to: null },
       })
 
+      // Below platform admin, visibility now requires a management assignment — so without
+      // this the creator could not see, open or edit what they just created. Same
+      // transaction as the insert, so an unmanageable facility can never exist.
+      const managerIds = await initialManagerIds(tx, operatorId, {
+        id: user.id,
+        isPlatformAdmin: scope.kind === 'platform',
+      })
+      if (managerIds.length > 0) {
+        await tx.facilityManager.createMany({
+          data: managerIds.map((userId) => ({
+            facilityId: facility.id,
+            userId,
+            assignedBy: user.id,
+          })),
+        })
+      }
+
       await tx.auditLog.create({
         data: {
           actorId: user.id,
@@ -644,7 +666,7 @@ export class FacilitiesService {
   async update(user: AuthUser, id: string, dto: UpdateFacilityDto): Promise<AdminFacility> {
     const scope = await this.operatorScope.resolve(user)
     const existing = await this.prisma.facility.findFirst({
-      where: { id, ...this.operatorScope.scopeWhere(scope) },
+      where: { id, ...this.operatorScope.facilityScopeWhere(scope, user) },
       select: { id: true, kind: true },
     })
     if (!existing) throw new FacilityNotFoundError(id)
@@ -749,7 +771,7 @@ export class FacilitiesService {
   async softDelete(user: AuthUser, id: string, force = false): Promise<void> {
     const scope = await this.operatorScope.resolve(user)
     const existing = await this.prisma.facility.findFirst({
-      where: { id, ...this.operatorScope.scopeWhere(scope) },
+      where: { id, ...this.operatorScope.facilityScopeWhere(scope, user) },
       select: { id: true },
     })
     if (!existing) throw new FacilityNotFoundError(id)
@@ -813,7 +835,7 @@ export class FacilitiesService {
 
   async bulkUpdate(user: AuthUser, dto: BulkFacilityDto): Promise<BulkFacilityResult> {
     const scope = await this.operatorScope.resolve(user)
-    const scopeWhere = this.operatorScope.scopeWhere(scope)
+    const scopeWhere = this.operatorScope.facilityScopeWhere(scope, user)
 
     // Verification is platform-only; operators cannot self-verify (mirrors `update`).
     if (dto.action === 'deploy' && scope.kind === 'operator') {
@@ -821,9 +843,17 @@ export class FacilitiesService {
     }
 
     // assignTariff carries a dynamic per-slot payload and its own multi-plan ownership
-    // check, so it can't route through the static bulkData / single-updateMany path.
+    // check, so it can't route through the static bulkData / single-updateMany path. The
+    // two predicates are separate because the plan side narrows on TariffPlanManager, not
+    // FacilityManager — a caller must manage both ends of the assignment.
     if (dto.action === 'assignTariff') {
-      return this.bulkAssignTariff(user, dto.ids, dto.assignments, scopeWhere)
+      return this.bulkAssignTariff(
+        user,
+        dto.ids,
+        dto.assignments,
+        scopeWhere,
+        this.operatorScope.tariffPlanScopeWhere(scope, user),
+      )
     }
 
     // Deactivation is per-facility (each has its own bookings to honour or refund), so it
@@ -852,7 +882,7 @@ export class FacilitiesService {
     user: AuthUser,
     action: 'disable' | 'delete',
     ids: string[],
-    scopeWhere: OperatorScopeWhere,
+    scopeWhere: ManagedScopeWhere,
     force: boolean,
   ): Promise<BulkFacilityResult> {
     // ids are only a filter — scopeWhere is the authorization boundary, so an operator
@@ -990,7 +1020,8 @@ export class FacilitiesService {
     user: AuthUser,
     ids: string[],
     assignments: { vehicleType: VehicleType; tariffPlanId: string | null }[],
-    scopeWhere: OperatorScopeWhere,
+    scopeWhere: ManagedScopeWhere,
+    planWhere: ManagedScopeWhere,
   ): Promise<BulkFacilityResult> {
     const planIds = [
       ...new Set(assignments.map((a) => a.tariffPlanId).filter((id): id is string => id !== null)),
@@ -998,7 +1029,7 @@ export class FacilitiesService {
 
     if (planIds.length > 0) {
       const owned = await this.prisma.tariffPlan.findMany({
-        where: { id: { in: planIds }, ...scopeWhere },
+        where: { id: { in: planIds }, ...planWhere },
         select: { id: true, vehicleTypes: true },
       })
       const ownedById = new Map(owned.map((p) => [p.id, p.vehicleTypes]))
@@ -1064,7 +1095,7 @@ export class FacilitiesService {
     user: AuthUser,
     action: BulkFacilityAction,
     ids: string[],
-    scopeWhere: OperatorScopeWhere,
+    scopeWhere: ManagedScopeWhere,
     data: Prisma.FacilityUncheckedUpdateManyInput,
   ): Promise<BulkFacilityResult> {
     // ids are only a filter — scopeWhere is the authorization boundary, so an operator
@@ -1107,7 +1138,7 @@ export class FacilitiesService {
 
   async adminMap(user: AuthUser, params: AdminMapParams): Promise<AdminMapResponse> {
     const scope = await this.operatorScope.resolve(user)
-    const filters = this.adminMapFilters(scope, params)
+    const filters = this.adminMapFilters(scope, user, params)
     const whereSql = this.adminMapSql(filters)
 
     const total = await this.countFacilities(whereSql)
@@ -1148,8 +1179,17 @@ export class FacilitiesService {
    * The admin map's filter set, resolved once per request. Operator scope stays sourced
    * from OperatorScopeService, so a caller's own memberships always win over a requested
    * `operatorId` — only a platform caller may narrow to an arbitrary operator.
+   *
+   * Both terms of the managed predicate are read off the SAME builder the list path uses
+   * and pushed as filters, so the Prisma points query, the raw count and the raw cluster
+   * buckets are narrowed identically — a map total that disagreed with the list would be
+   * the first symptom of one of the three renderings being forgotten.
    */
-  private adminMapFilters(scope: OperatorScope, params: AdminMapParams): AdminMapFilter[] {
+  private adminMapFilters(
+    scope: OperatorScope,
+    user: AuthUser,
+    params: AdminMapParams,
+  ): AdminMapFilter[] {
     // Lifecycle rides in the filter list so both renderings (Prisma where for points,
     // raw SQL for count/clusters) carry it — the SQL paths bypass the client extension.
     const filters: AdminMapFilter[] = [
@@ -1163,9 +1203,10 @@ export class FacilitiesService {
     }
     if (params.kind) filters.push({ on: 'kind', value: params.kind })
 
-    const scoped = this.operatorScope.scopeWhere(scope).operatorId?.in
-    if (scoped) filters.push({ on: 'operators', value: scoped })
+    const managed = this.operatorScope.facilityScopeWhere(scope, user)
+    if (managed.operatorId) filters.push({ on: 'operators', value: managed.operatorId.in })
     else if (params.operatorId) filters.push({ on: 'operators', value: [params.operatorId] })
+    if (managed.managers) filters.push({ on: 'manager', userId: managed.managers.some.userId })
 
     return filters
   }
@@ -1181,6 +1222,7 @@ export class FacilitiesService {
 
   private adminListWhere(
     scope: OperatorScope,
+    user: AuthUser,
     query: ListFacilitiesDto,
   ): Prisma.FacilityWhereInput {
     const filters: Prisma.FacilityWhereInput[] = []
@@ -1199,7 +1241,10 @@ export class FacilitiesService {
       filters.push({ operatorId: query.operatorId })
     }
 
-    return { ...this.operatorScope.scopeWhere(scope), ...(filters.length ? { AND: filters } : {}) }
+    return {
+      ...this.operatorScope.facilityScopeWhere(scope, user),
+      ...(filters.length ? { AND: filters } : {}),
+    }
   }
 
   private toAdminFacility(facility: {

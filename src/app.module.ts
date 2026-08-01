@@ -21,6 +21,7 @@ import { InventoryModule } from './inventory/inventory.module'
 import { InviteModule } from './invite/invite.module'
 import { JobsModule } from './jobs/jobs.module'
 import { createPinoHttpOptions } from './logger/logging.config'
+import { ManagersModule } from './managers/managers.module'
 import { MapsModule } from './maps/maps.module'
 import { NotificationsModule } from './notifications/notifications.module'
 import { OperatorsModule } from './operators/operators.module'
@@ -51,6 +52,7 @@ import { TariffModule } from './tariff/tariff.module'
     BookingModule,
     InviteModule,
     OperatorsModule,
+    ManagersModule,
     JobsModule,
     IngestionModule,
     AnalyticsModule,

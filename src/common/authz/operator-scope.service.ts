@@ -12,6 +12,21 @@ export type OperatorScope = { kind: 'platform' } | { kind: 'operator'; operatorI
 export type OperatorScopeWhere = { operatorId?: { in: string[] } }
 
 /**
+ * Visibility of one MANAGED resource (Facility, TariffPlan) for one caller: the operator
+ * term AND, for everyone below platform admin, the per-user management assignment.
+ *
+ * Both keys are REQUIRED — `| undefined` rather than `?` — so `OperatorScopeWhere`, which
+ * has only the operator term, is not assignable here. A facility or plan query that
+ * reaches for the plain `scopeWhere` therefore fails to compile instead of silently
+ * widening back to "everything this operator owns". Prisma treats an explicitly undefined
+ * filter key as absent, so the value spreads into a `where` unchanged.
+ */
+export interface ManagedScopeWhere {
+  operatorId: { in: string[] } | undefined
+  managers: { some: { userId: string } } | undefined
+}
+
+/**
  * The single operator a create lands in. A platform admin must always name one. An
  * operator caller with exactly one membership implies it (a stray body operatorId stays
  * ignored, as the DTOs document), but with several memberships there is no implied
@@ -51,7 +66,35 @@ export class OperatorScopeService {
     throw new OperatorContextRequiredError()
   }
 
+  /**
+   * Unmanaged operator scope. Still the right predicate for bookings, analytics, scan and
+   * the audit log, whose visibility is a tenancy question and nothing else. Facility and
+   * tariff-plan reads must NOT use it — see the two predicates below.
+   */
   scopeWhere(scope: OperatorScope): OperatorScopeWhere {
     return scope.kind === 'platform' ? {} : { operatorId: { in: scope.operatorIds } }
+  }
+
+  facilityScopeWhere(scope: OperatorScope, user: AuthUser): ManagedScopeWhere {
+    return managedScopeWhere(scope, user)
+  }
+
+  tariffPlanScopeWhere(scope: OperatorScope, user: AuthUser): ManagedScopeWhere {
+    return managedScopeWhere(scope, user)
+  }
+}
+
+/**
+ * Platform callers get the operator term alone (theirs is empty — they see everything).
+ * Everyone else — operator_admin and operator_staff alike — additionally has to hold a
+ * management assignment on the row. Both relations are named `managers`, so one builder
+ * serves both models; the two public methods stay separately named so a call site reads as
+ * the resource it queries.
+ */
+function managedScopeWhere(scope: OperatorScope, user: AuthUser): ManagedScopeWhere {
+  if (scope.kind === 'platform') return { operatorId: undefined, managers: undefined }
+  return {
+    operatorId: { in: scope.operatorIds },
+    managers: { some: { userId: user.id } },
   }
 }

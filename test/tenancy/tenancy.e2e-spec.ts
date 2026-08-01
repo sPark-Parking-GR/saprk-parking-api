@@ -7,10 +7,12 @@ import { truncateAll } from '../utils/db'
 import {
   seedBooking,
   seedFacility,
+  seedFacilityManager,
   seedOperator,
   seedOwnership,
   seedPayment,
   seedTariffPlan,
+  seedTariffPlanManager,
   seedUser,
 } from '../utils/seed'
 import { createTestApp } from '../utils/test-app'
@@ -69,6 +71,14 @@ describe('tenancy isolation (e2e)', () => {
       seedUser(prisma, { role: UserRole.OPERATOR_ADMIN, operatorId: operator.id }),
       seedUser(prisma),
       seedTariffPlan(prisma, { operatorId: operator.id, name: `${name} plan` }),
+    ])
+
+    // Prisma-seeded resources get no auto-assignment, so without these the tenant's own
+    // admin sees nothing and every isolation assertion below would pass for the wrong
+    // reason. This restores the visibility the operator scope alone used to give.
+    await Promise.all([
+      seedFacilityManager(prisma, { facilityId: facility.id, userId: admin.id }),
+      seedTariffPlanManager(prisma, { tariffPlanId: plan.id, userId: admin.id }),
     ])
 
     const booking = await seedBooking(prisma, {

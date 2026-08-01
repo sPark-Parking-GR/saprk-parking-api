@@ -11,7 +11,14 @@ import type { NestFastifyApplication } from '@nestjs/platform-fastify'
 import request from 'supertest'
 import { bearerToken } from '../utils/auth'
 import { truncateAll } from '../utils/db'
-import { seedBooking, seedFacility, seedOperator, seedTariffPlan, seedUser } from '../utils/seed'
+import {
+  seedBooking,
+  seedFacility,
+  seedFacilityManager,
+  seedOperator,
+  seedTariffPlan,
+  seedUser,
+} from '../utils/seed'
 import { createTestApp } from '../utils/test-app'
 import { resetThrottle } from '../utils/throttle'
 
@@ -56,6 +63,8 @@ describe('facility kind (e2e)', () => {
       seedUser(raw, { role: UserRole.OPERATOR_ADMIN, operatorId: operator.id }),
       seedUser(raw, { role: UserRole.PLATFORM_ADMIN }),
     ])
+    // Prisma-seeded facility, so the create endpoint's auto-assign never ran.
+    await seedFacilityManager(raw, { facilityId: facility.id, userId: operatorAdmin.id })
     operatorToken = bearerToken(operatorAdmin)
     platformToken = bearerToken(platformAdmin)
   })

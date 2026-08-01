@@ -9,8 +9,13 @@ import type {
   VehicleType,
 } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
-import { OperatorScopeService, targetOperatorId } from '../common/authz/operator-scope.service'
+import {
+  OperatorScopeService,
+  targetOperatorId,
+  type OperatorScope,
+} from '../common/authz/operator-scope.service'
 import { LifecycleService } from '../lifecycle/lifecycle.service'
+import { initialManagerIds } from '../managers/initial-managers'
 import { anyLifecycleStatus } from '../prisma/lifecycle.extension'
 import {
   DefaultTariffRequiredError,
@@ -259,7 +264,7 @@ export class TariffService {
     const scope = await this.operatorScope.resolve(user)
 
     const plans = await this.prisma.tariffPlan.findMany({
-      where: { ...this.operatorScope.scopeWhere(scope) },
+      where: { ...this.operatorScope.tariffPlanScopeWhere(scope, user) },
       orderBy: { createdAt: 'asc' },
       select: {
         id: true,
@@ -365,6 +370,23 @@ export class TariffService {
 
       await this.writeSchedule(tx, plan.id, draft)
 
+      // Below platform admin, visibility now requires a management assignment — without
+      // this the creator could not open or edit the plan they just wrote. Same transaction
+      // as the insert.
+      const managerIds = await initialManagerIds(tx, operatorId, {
+        id: user.id,
+        isPlatformAdmin: scope.kind === 'platform',
+      })
+      if (managerIds.length > 0) {
+        await tx.tariffPlanManager.createMany({
+          data: managerIds.map((userId) => ({
+            tariffPlanId: plan.id,
+            userId,
+            assignedBy: user.id,
+          })),
+        })
+      }
+
       await tx.auditLog.create({
         data: {
           actorId: user.id,
@@ -387,7 +409,7 @@ export class TariffService {
     draft: TariffDraftDto,
     newDefaultPlanId?: string,
   ): Promise<TariffPlanDetail> {
-    await this.assertPlanOwned(user, planId)
+    const scope = await this.assertPlanOwned(user, planId)
     this.validateDraft(draft)
 
     const draftVehicleTypes = draft.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v])
@@ -421,9 +443,25 @@ export class TariffService {
         const willUnsetDefault = !draft.isDefault
         const willDeactivate = !draft.isActive
         if (willDeactivate) {
-          await this.guardDefaultRemoval(tx, existing.operatorId, planId, false, newDefaultPlanId)
+          await this.guardDefaultRemoval(
+            tx,
+            user,
+            scope,
+            existing.operatorId,
+            planId,
+            false,
+            newDefaultPlanId,
+          )
         } else if (willUnsetDefault) {
-          await this.guardDefaultRemoval(tx, existing.operatorId, planId, true, newDefaultPlanId)
+          await this.guardDefaultRemoval(
+            tx,
+            user,
+            scope,
+            existing.operatorId,
+            planId,
+            true,
+            newDefaultPlanId,
+          )
         }
       } else if (draft.isDefault) {
         // Promoting this plan to default (it wasn't one before) — clear whichever other
@@ -499,7 +537,7 @@ export class TariffService {
    * runs before the archive, never after.
    */
   async deletePlan(user: AuthUser, planId: string, newDefaultPlanId?: string): Promise<void> {
-    await this.assertPlanOwned(user, planId)
+    const scope = await this.assertPlanOwned(user, planId)
 
     await this.prisma.$transaction(async (tx) => {
       const existing = await tx.tariffPlan.findFirst({
@@ -511,7 +549,15 @@ export class TariffService {
       // Deletion always removes the plan from the active set, so if it was the operator's
       // active default a replacement must be promoted once other active plans remain.
       if (existing.isDefault && existing.isActive) {
-        await this.guardDefaultRemoval(tx, existing.operatorId, planId, false, newDefaultPlanId)
+        await this.guardDefaultRemoval(
+          tx,
+          user,
+          scope,
+          existing.operatorId,
+          planId,
+          false,
+          newDefaultPlanId,
+        )
       }
 
       await tx.facilityTariffAssignment.deleteMany({ where: { tariffPlanId: planId } })
@@ -525,8 +571,17 @@ export class TariffService {
     })
   }
 
+  /**
+   * Which facilities this plan prices. Every facility term is narrowed by
+   * `facilityScopeWhere` and not merely by the plan's operator: this is a facility LISTING,
+   * and reaching it through the plan side must not name — or count — a facility the caller
+   * could not open directly. The consequence is that both numbers describe the caller's own
+   * scope rather than the whole tenant, which is the only reading consistent with every
+   * other surface they can see.
+   */
   async getAssignments(user: AuthUser, planId: string): Promise<PlanAssignments> {
-    await this.assertPlanOwned(user, planId)
+    const scope = await this.assertPlanOwned(user, planId)
+    const facilityWhere = this.operatorScope.facilityScopeWhere(scope, user)
 
     const plan = await this.prisma.tariffPlan.findFirstOrThrow({
       where: { id: planId },
@@ -536,7 +591,7 @@ export class TariffService {
     // A plan can back several rows on the same facility (one per vehicle type), so dedupe
     // by facilityId — this summary counts distinct facilities with an explicit row, not rows.
     const rows = await this.prisma.facilityTariffAssignment.findMany({
-      where: { tariffPlanId: planId },
+      where: { tariffPlanId: planId, facility: facilityWhere },
       select: { facility: { select: { id: true, name: true } } },
     })
 
@@ -551,18 +606,22 @@ export class TariffService {
     // extra queries for non-default plans (this endpoint is hit often).
     let implicitFacilityCount = 0
     if (plan.isDefault) {
+      // AND rather than a spread: facilityWhere carries its own `operatorId`, undefined for
+      // a platform caller, which would otherwise wipe the plan's operator out of the filter.
+      const operatorFacilities: Prisma.FacilityWhereInput = {
+        AND: [{ operatorId: plan.operatorId }, facilityWhere],
+      }
+
       const facilityCounts = await this.prisma.facilityTariffAssignment.groupBy({
         by: ['facilityId'],
-        where: { facility: { operatorId: plan.operatorId } },
+        where: { facility: operatorFacilities },
         _count: { vehicleType: true },
       })
       const fullyCoveredIds = new Set(
         facilityCounts.filter((f) => f._count.vehicleType >= 4).map((f) => f.facilityId),
       )
-      const totalOperatorFacilities = await this.prisma.facility.count({
-        where: { operatorId: plan.operatorId },
-      })
-      implicitFacilityCount = totalOperatorFacilities - fullyCoveredIds.size
+      const visibleFacilities = await this.prisma.facility.count({ where: operatorFacilities })
+      implicitFacilityCount = visibleFacilities - fullyCoveredIds.size
     }
 
     return {
@@ -575,6 +634,12 @@ export class TariffService {
 
   async simulate(user: AuthUser, input: SimulateDto): Promise<SimulateResult> {
     // Nothing persisted is touched; keep a scope resolution for role/tenancy consistency.
+    //
+    // Deliberately NOT narrowed by management assignment. The input is a free-standing
+    // draft with no plan id — it is what the editor calls while a plan is being written,
+    // including a brand new one that exists nowhere yet. There is no stored row to check a
+    // manager against, and refusing the caller instead would make it impossible to price a
+    // plan before creating it. Nothing about a submitted draft is readable back out.
     await this.operatorScope.resolve(user)
 
     const { draft, startsAt, endsAt } = input
@@ -673,24 +738,42 @@ export class TariffService {
    * default). Otherwise a valid, catch-all `newDefaultPlanId` must be promoted; the
    * partial unique index is the concurrency guard — a concurrent promotion loses with a
    * P2002 which we translate to DefaultTariffRequiredError.
+   *
+   * Two different scopes on purpose. The remaining-active COUNT is operator-wide, because
+   * the invariant it protects is: whether the tenant is left without a default has nothing
+   * to do with who manages what. The CANDIDATE, by contrast, is a caller-supplied id
+   * addressing one specific plan, and promoting it rewrites the fallback price of every
+   * facility in the operator — so it is narrowed like any other plan the caller names, and
+   * a plan they do not manage answers not-found rather than being quietly promoted.
    */
   private async guardDefaultRemoval(
     tx: Prisma.TransactionClient,
+    user: AuthUser,
+    scope: OperatorScope,
     operatorId: string,
     planId: string,
     planStaysActive: boolean,
     newDefaultPlanId: string | undefined,
   ): Promise<void> {
-    const others = await tx.tariffPlan.findMany({
+    const remainingActive = await tx.tariffPlan.count({
       where: { operatorId, isActive: true, id: { not: planId } },
-      select: { id: true, vehicleTypes: true },
     })
-    const remainingActive = planStaysActive ? others.length + 1 : others.length
-    if (remainingActive <= 1) return
+    if ((planStaysActive ? remainingActive + 1 : remainingActive) <= 1) return
 
     if (!newDefaultPlanId) throw new DefaultTariffRequiredError()
 
-    const candidate = others.find((o) => o.id === newDefaultPlanId)
+    // AND rather than a spread: the managed predicate carries its own `operatorId` term,
+    // which for a platform caller is `undefined` and would otherwise overwrite the explicit
+    // one and let a candidate from a different operator through.
+    const candidate = await tx.tariffPlan.findFirst({
+      where: {
+        AND: [
+          { id: newDefaultPlanId, operatorId, isActive: true },
+          this.operatorScope.tariffPlanScopeWhere(scope, user),
+        ],
+      },
+      select: { vehicleTypes: true },
+    })
     if (!candidate) throw new TariffPlanNotFoundError(newDefaultPlanId)
     if (!canBeDefault(candidate.vehicleTypes)) {
       throw new DomainError(
@@ -716,13 +799,23 @@ export class TariffService {
     }
   }
 
-  private async assertPlanOwned(user: AuthUser, planId: string): Promise<void> {
+  /**
+   * The gate behind plan detail, update, delete and assignments. "Owned" now means owned by
+   * an operator in scope AND managed by the caller — a plan the caller's operator owns but
+   * nobody assigned them answers not-found, exactly as a foreign plan does, so the two
+   * cannot be told apart.
+   *
+   * Returns the resolved scope so callers that go on to narrow something else (a default
+   * candidate, the facilities using the plan) do not resolve it a second time.
+   */
+  private async assertPlanOwned(user: AuthUser, planId: string): Promise<OperatorScope> {
     const scope = await this.operatorScope.resolve(user)
     const plan = await this.prisma.tariffPlan.findFirst({
-      where: { id: planId, ...this.operatorScope.scopeWhere(scope) },
+      where: { id: planId, ...this.operatorScope.tariffPlanScopeWhere(scope, user) },
       select: { id: true },
     })
     if (!plan) throw new TariffPlanNotFoundError(planId)
+    return scope
   }
 
   private validateDraft(draft: TariffDraftDto): void {

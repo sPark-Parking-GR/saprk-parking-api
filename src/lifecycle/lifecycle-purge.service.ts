@@ -344,6 +344,12 @@ export class LifecyclePurgeService {
     })
     await tx.vehicle.deleteMany({ where: { userId: id } })
     await tx.passwordResetToken.deleteMany({ where: { userId: id } })
+    // The User row SURVIVES this path, so the ON DELETE CASCADE on these two never fires.
+    // Left behind, a purged account's management assignments stay live grants on real
+    // facilities and plans. Only removed at PURGE: an ARCHIVED user is coming back, and a
+    // restore that returned them to an empty dashboard would be a silent demotion.
+    await tx.facilityManager.deleteMany({ where: { userId: id } })
+    await tx.tariffPlanManager.deleteMany({ where: { userId: id } })
   }
 
   // The uid is about to be nulled and is stored nowhere else; logging it is the ops

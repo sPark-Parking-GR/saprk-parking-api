@@ -15,8 +15,10 @@ import { truncateAll } from '../utils/db'
 import {
   seedBooking,
   seedFacility,
+  seedFacilityManager,
   seedOperator,
   seedTariffPlan,
+  seedTariffPlanManager,
   seedUser,
 } from '../utils/seed'
 import { createTestApp } from '../utils/test-app'
@@ -98,6 +100,9 @@ describe('operator delete archives into the admin trash (e2e)', () => {
 
     beforeEach(async () => {
       facility = await seedFacility(raw, { operatorId: operator.id, ...CENTRE, name: 'Lot A' })
+      // Seeded through Prisma, so the auto-assign the create endpoint would have done has
+      // to be done by hand — otherwise the operator admin cannot reach their own facility.
+      await seedFacilityManager(raw, { facilityId: facility.id, userId: operatorAdmin.id })
     })
 
     it('DELETE archives the facility and unpublishes it', async () => {
@@ -185,11 +190,9 @@ describe('operator delete archives into the admin trash (e2e)', () => {
         status: BookingStatus.CONFIRMED,
       })
 
-      await authed(
-        'delete',
-        `${API}/facilities/${facility.id}?force=true`,
-        operatorToken,
-      ).expect(204)
+      await authed('delete', `${API}/facilities/${facility.id}?force=true`, operatorToken).expect(
+        204,
+      )
 
       expect((await raw.booking.findUniqueOrThrow({ where: { id: booking.id } })).status).toBe(
         BookingStatus.CANCELLED,
@@ -233,6 +236,8 @@ describe('operator delete archives into the admin trash (e2e)', () => {
       facility = await seedFacility(raw, { operatorId: operator.id, ...CENTRE })
       const plan = await seedTariffPlan(raw, { operatorId: operator.id, name: 'Standard' })
       planId = plan.id
+      await seedFacilityManager(raw, { facilityId: facility.id, userId: operatorAdmin.id })
+      await seedTariffPlanManager(raw, { tariffPlanId: planId, userId: operatorAdmin.id })
       await raw.facilityTariffAssignment.create({
         data: { facilityId: facility.id, tariffPlanId: planId, vehicleType: VehicleType.CAR },
       })

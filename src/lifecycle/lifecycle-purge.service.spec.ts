@@ -22,6 +22,8 @@ type MockPrisma = {
   promotionPlan: { count: jest.Mock }
   vehicle: { deleteMany: jest.Mock }
   passwordResetToken: { deleteMany: jest.Mock }
+  facilityManager: { deleteMany: jest.Mock }
+  tariffPlanManager: { deleteMany: jest.Mock }
   auditLog: { create: jest.Mock }
   $transaction: jest.Mock
 }
@@ -47,6 +49,8 @@ function makePrisma(): MockPrisma {
     promotionPlan: { count: jest.fn().mockResolvedValue(0) },
     vehicle: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
     passwordResetToken: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
+    facilityManager: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
+    tariffPlanManager: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
     $transaction: jest.fn(),
   }
@@ -166,6 +170,29 @@ describe('LifecyclePurgeService', () => {
     )
     expect(prisma.vehicle.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
     expect(prisma.passwordResetToken.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
+  })
+
+  // The row survives, so the FK cascade never fires — left behind, the assignments would
+  // stay live grants belonging to an account that no longer exists in any meaningful sense.
+  it('removes the purged user’s management assignments, which no cascade would reach', async () => {
+    const prisma = makePrisma()
+    prisma.user.findMany.mockResolvedValue([{ id: 'u1', firebaseUid: null }])
+
+    await makeService(prisma).purgeDue(NOW)
+
+    expect(prisma.facilityManager.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
+    expect(prisma.tariffPlanManager.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
+  })
+
+  it('leaves assignments intact for a user it refuses to purge', async () => {
+    const prisma = makePrisma()
+    prisma.user.findMany.mockResolvedValue([{ id: 'u1', firebaseUid: null }])
+    prisma.booking.count.mockResolvedValue(1)
+
+    await makeService(prisma).purgeDue(NOW)
+
+    expect(prisma.facilityManager.deleteMany).not.toHaveBeenCalled()
+    expect(prisma.tariffPlanManager.deleteMany).not.toHaveBeenCalled()
   })
 
   it('skips a user with unsettled bookings', async () => {

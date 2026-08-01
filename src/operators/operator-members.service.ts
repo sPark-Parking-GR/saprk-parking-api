@@ -92,11 +92,13 @@ export class OperatorMembersService {
       }
 
       await tx.operatorMembership.delete({ where: { id: membership.id } })
+      const revoked = await this.revokeManagedAssignments(tx, operatorId, userId)
       await this.reconcileUserRole(tx, userId)
       await this.recordAudit(tx, actor, 'operator_member.removed', membership.id, {
         operatorId,
         userId,
         role: membership.role,
+        ...revoked,
       })
     })
   }
@@ -153,6 +155,35 @@ export class OperatorMembersService {
       where: { operatorId, role: OperatorMemberRole.ADMIN, userId: { not: userId } },
     })
     if (remainingAdmins === 0) throw new LastOperatorAdminError(operatorId)
+  }
+
+  /**
+   * A management assignment must not outlive the membership it hangs off. The manager
+   * predicate is `operator IN scope AND assigned to me`, so a removed member is already
+   * shut out by the operator half — but the rows would sit there as live grants waiting to
+   * take effect the moment the same person was invited back, which is not what anyone
+   * re-inviting them would be agreeing to. Deleted in the same transaction as the
+   * membership so the two can never disagree.
+   *
+   * Scoped to THIS operator's resources only: a multi-operator user keeps everything they
+   * manage elsewhere. Archived facilities and plans are included — the relation filter is
+   * not touched by the lifecycle extension, which is what we want here, since a restore
+   * must not quietly hand access back to someone who has since left.
+   */
+  private async revokeManagedAssignments(
+    tx: Prisma.TransactionClient,
+    operatorId: string,
+    userId: string,
+  ): Promise<{ facilitiesRevoked: number; tariffPlansRevoked: number }> {
+    // Sequential, not Promise.all: an interactive transaction is one connection, and every
+    // other write in this service queues on it the same way.
+    const facilities = await tx.facilityManager.deleteMany({
+      where: { userId, facility: { operatorId } },
+    })
+    const tariffPlans = await tx.tariffPlanManager.deleteMany({
+      where: { userId, tariffPlan: { operatorId } },
+    })
+    return { facilitiesRevoked: facilities.count, tariffPlansRevoked: tariffPlans.count }
   }
 
   /**
