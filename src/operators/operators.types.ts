@@ -50,6 +50,7 @@ export interface OperatorSummary {
   id: string
   name: string
   status: string
+  lifecycleStatus: string
   facilityCount: number
   memberCount: number
   createdAt: Date
