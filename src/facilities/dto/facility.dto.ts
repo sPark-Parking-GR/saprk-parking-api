@@ -79,18 +79,42 @@ export const createFacilitySchema = z
     address: z.string().min(1).max(300),
     lat: z.number().min(-90).max(90),
     lng: z.number().min(-180).max(180),
-    totalCapacity: z.number().int().positive().max(100_000),
-    onlineQuota: z.number().int().nonnegative().max(100_000),
-    vehicleTypes: z.array(lowercaseVehicleEnum).min(1),
+    // Required for a BUSINESS facility (the default kind, enforced below). Optional
+    // for any other kind: those are catalog-only and never bookable, so the service
+    // defaults an absent value (uncapped capacity, every vehicle type, 24h) instead.
+    totalCapacity: z.number().int().positive().max(100_000).optional(),
+    onlineQuota: z.number().int().nonnegative().max(100_000).optional(),
+    vehicleTypes: z.array(lowercaseVehicleEnum).min(1).optional(),
     heightRestrictionCm: z.number().int().positive().max(1_000).nullable().optional(),
-    openingHours: openingHoursSchema,
+    openingHours: openingHoursSchema.optional(),
     amenities: z.array(z.string().min(1).max(60)).max(50).default([]),
     cancellationPolicy: z.string().max(2_000).default(''),
     operatorId: z.string().min(1).optional(),
+    // Platform-admin only, enforced in the controller and again in the service. Absent
+    // entirely, every created facility defaults to BUSINESS.
+    kind: z.nativeEnum(FacilityKind).optional(),
   })
-  .refine((data) => data.onlineQuota <= data.totalCapacity, {
-    message: 'onlineQuota cannot exceed totalCapacity',
-    path: ['onlineQuota'],
+  .refine(
+    (data) =>
+      data.onlineQuota === undefined ||
+      data.totalCapacity === undefined ||
+      data.onlineQuota <= data.totalCapacity,
+    { message: 'onlineQuota cannot exceed totalCapacity', path: ['onlineQuota'] },
+  )
+  .superRefine((data, ctx) => {
+    if ((data.kind ?? FacilityKind.BUSINESS) !== FacilityKind.BUSINESS) return
+    if (data.totalCapacity === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Required', path: ['totalCapacity'] })
+    }
+    if (data.onlineQuota === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Required', path: ['onlineQuota'] })
+    }
+    if (data.vehicleTypes === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Required', path: ['vehicleTypes'] })
+    }
+    if (data.openingHours === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Required', path: ['openingHours'] })
+    }
   })
 
 export type CreateFacilityDto = z.infer<typeof createFacilitySchema>

@@ -25,6 +25,7 @@ import {
   FacilityDeactivationFailedError,
   FacilityFieldForbiddenError,
   FacilityHasActiveBookingsError,
+  FacilityHasNoOperatorError,
   FacilityKindChangeBlockedError,
   FacilityNotBookableError,
   FacilityNotFoundError,
@@ -195,6 +196,7 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof SubscriptionPlanCodeTakenError ||
       exception instanceof SubscriptionPlanInUseError ||
       exception instanceof FacilityHasActiveBookingsError ||
+      exception instanceof FacilityHasNoOperatorError ||
       exception instanceof FacilityKindChangeBlockedError ||
       exception instanceof AccountHasUnsettledBookingsError ||
       exception instanceof InviteAlreadyAcceptedError ||

@@ -3,6 +3,7 @@ import { LifecycleStatus, OperatorMemberRole, UserRole } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
 import { OperatorScopeService } from '../common/authz/operator-scope.service'
 import {
+  FacilityHasNoOperatorError,
   FacilityNotFoundError,
   ManagerAssignmentRejectedError,
   TariffPlanNotFoundError,
@@ -191,6 +192,14 @@ describe('ResourceManagersService', () => {
         id: 'f-other',
         operatorId: { in: ['op1'] },
       })
+    })
+
+    it('refuses managers for an operator-less facility, even for a platform admin', async () => {
+      prisma.facility.findFirst.mockResolvedValue({ operatorId: null })
+
+      await expect(service.listFacilityManagers(platformAdmin, 'f-unassigned')).rejects.toBeInstanceOf(
+        FacilityHasNoOperatorError,
+      )
     })
 
     it('answers not-found for a foreign tariff plan', async () => {

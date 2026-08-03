@@ -1,6 +1,7 @@
 import type { AuthUser } from '@spark/types'
 import { Prisma, type FacilityKind } from '@prisma/client'
 import { FacilitiesService } from './facilities.service'
+import type { FacilityClusterIndexService } from './facility-cluster-index.service'
 import type { BookingService } from '../booking/booking.service'
 import {
   OperatorScopeService,
@@ -212,6 +213,7 @@ describe('FacilitiesService admin writes', () => {
       bookings as unknown as BookingService,
       entitlements as unknown as EntitlementService,
       lifecycle as unknown as LifecycleService,
+      {} as unknown as FacilityClusterIndexService,
     )
   })
 
@@ -296,12 +298,111 @@ describe('FacilitiesService admin writes', () => {
     expect(prisma.facility.create.mock.calls[0]![0].data.operatorId).toBe('op1')
   })
 
-  it('platform create requires operatorId', async () => {
-    setScope({ kind: 'platform' })
+  describe('facility kind on create (platform-admin only)', () => {
+    it('operator create cannot set kind', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
 
-    await expect(service.create(platformUser, { ...validCreate })).rejects.toThrow(
-      'operatorId required',
+      await expect(
+        service.create(operatorUser, { ...validCreate, kind: 'FREE_PUBLIC' as FacilityKind }),
+      ).rejects.toBeInstanceOf(FacilityFieldForbiddenError)
+      expect(prisma.facility.create).not.toHaveBeenCalled()
+    })
+
+    it('platform create honours an explicit kind', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.create.mockResolvedValue(makeRow({ kind: 'FREE_PUBLIC' as FacilityKind }))
+
+      await service.create(platformUser, {
+        ...validCreate,
+        operatorId: 'op1',
+        kind: 'FREE_PUBLIC' as FacilityKind,
+      })
+
+      expect(prisma.facility.create.mock.calls[0]![0].data.kind).toBe('FREE_PUBLIC')
+    })
+
+    it('defaults to BUSINESS when kind is omitted', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.create.mockResolvedValue(makeRow())
+
+      await service.create(operatorUser, { ...validCreate })
+
+      expect(prisma.facility.create.mock.calls[0]![0].data.kind).toBe('BUSINESS')
+    })
+
+    it('a non-BUSINESS create defaults capacity, vehicles and hours when omitted', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.create.mockResolvedValue(makeRow({ kind: 'FREE_PUBLIC' as FacilityKind }))
+
+      await service.create(platformUser, {
+        name: 'Free lot',
+        address: 'addr',
+        lat: 37.98,
+        lng: 23.73,
+        amenities: [],
+        cancellationPolicy: '',
+        operatorId: 'op1',
+        kind: 'FREE_PUBLIC' as FacilityKind,
+      })
+
+      const data = prisma.facility.create.mock.calls[0]![0].data
+      expect(data.totalCapacity).toBe(100_000)
+      expect(data.onlineQuota).toBe(100_000)
+      expect(data.vehicleTypes).toEqual(['CAR', 'MOTORCYCLE', 'VAN', 'TRUCK'])
+      expect(data.openingHoursJson).toEqual({ is24h: true })
+    })
+
+    it('a non-BUSINESS create still honours explicit capacity/vehicles/hours when given', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.create.mockResolvedValue(makeRow({ kind: 'RESTRICTED' as FacilityKind }))
+
+      await service.create(platformUser, {
+        ...validCreate,
+        totalCapacity: 12,
+        onlineQuota: 3,
+        vehicleTypes: ['motorcycle'],
+        openingHours: { is24h: false, schedule: { monday: { open: '09:00', close: '18:00' } } },
+        operatorId: 'op1',
+        kind: 'RESTRICTED' as FacilityKind,
+      })
+
+      const data = prisma.facility.create.mock.calls[0]![0].data
+      expect(data.totalCapacity).toBe(12)
+      expect(data.onlineQuota).toBe(3)
+      expect(data.vehicleTypes).toEqual(['MOTORCYCLE'])
+      expect(data.openingHoursJson).toEqual({
+        is24h: false,
+        schedule: { monday: { open: '09:00', close: '18:00' } },
+      })
+    })
+  })
+
+  it('platform create with no operatorId creates an operator-less facility', async () => {
+    setScope({ kind: 'platform' })
+    prisma.facility.create.mockResolvedValue(makeRow({ operatorId: null }))
+
+    await service.create(platformUser, { ...validCreate })
+
+    expect(prisma.facility.create.mock.calls[0]![0].data.operatorId).toBeNull()
+    // No operator to lock, no quota to check, no ownership period to open, no members
+    // to draw managers from.
+    expect(tx.$executeRaw).not.toHaveBeenCalled()
+    expect(entitlements.assertCanCreateFacility).not.toHaveBeenCalled()
+    expect(tx.facilityOwnershipPeriod.create).not.toHaveBeenCalled()
+    expect(tx.facilityManager.createMany).not.toHaveBeenCalled()
+    expect(tx.auditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ action: 'facility.created' }) }),
     )
+  })
+
+  it('operator create still ignores a blank operatorId and resolves via membership', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
+    prisma.facility.create.mockResolvedValue(makeRow())
+
+    await service.create(operatorUser, { ...validCreate })
+
+    expect(prisma.facility.create.mock.calls[0]![0].data.operatorId).toBe('op1')
+    expect(entitlements.assertCanCreateFacility).toHaveBeenCalledWith('op1', tx)
   })
 
   it('multi-operator create without operatorId is refused, not guessed', async () => {
@@ -1470,11 +1571,38 @@ describe('facility DTO validation', () => {
     expect(updateFacilitySchema.safeParse({ kind: 'NOT_A_KIND' }).success).toBe(false)
   })
 
-  // Create stays BUSINESS: a kind in the body must be dropped, never honoured.
-  it('strips kind from a create body', () => {
-    const res = createFacilitySchema.safeParse({ ...validCreate, kind: 'FREE_PUBLIC' })
+  it('accepts a valid FacilityKind on create and rejects anything else', () => {
+    const ok = createFacilitySchema.safeParse({ ...validCreate, kind: 'FREE_PUBLIC' })
+    expect(ok.success).toBe(true)
+    if (ok.success) expect(ok.data.kind).toBe('FREE_PUBLIC')
+
+    expect(createFacilitySchema.safeParse({ ...validCreate, kind: 'business' }).success).toBe(
+      false,
+    )
+    expect(createFacilitySchema.safeParse({ ...validCreate, kind: 'NOT_A_KIND' }).success).toBe(
+      false,
+    )
+  })
+
+  const minimalCreate = {
+    name: 'Lot A',
+    address: 'addr',
+    lat: 37.98,
+    lng: 23.73,
+    amenities: [],
+    cancellationPolicy: '',
+  }
+
+  it('still requires capacity, vehicles and hours when kind is BUSINESS or omitted', () => {
+    expect(createFacilitySchema.safeParse(minimalCreate).success).toBe(false)
+    expect(
+      createFacilitySchema.safeParse({ ...minimalCreate, kind: 'BUSINESS' }).success,
+    ).toBe(false)
+  })
+
+  it('does not require capacity, vehicles or hours for a non-BUSINESS kind', () => {
+    const res = createFacilitySchema.safeParse({ ...minimalCreate, kind: 'FREE_PUBLIC' })
     expect(res.success).toBe(true)
-    if (res.success) expect('kind' in res.data).toBe(false)
   })
 
   it('defaults amenities and cancellationPolicy on create', () => {

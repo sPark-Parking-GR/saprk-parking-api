@@ -391,7 +391,7 @@ export class LifecycleImpactService {
           select: { lifecycleStatus: true, purgeAfter: true, operatorId: true, isActive: true },
         })
         if (!row) throw new LifecycleResourceNotFoundError(entityType, id)
-        return row
+        return { ...row, operatorId: row.operatorId ?? undefined }
       }
       case 'tariff-plan': {
         const row = await tx.tariffPlan.findFirst({

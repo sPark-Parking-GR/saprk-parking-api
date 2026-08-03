@@ -376,7 +376,10 @@ model OperatorMembership {
 
 model Facility {
   id                  String   @id @default(cuid())
-  operatorId          String
+  // Nullable: a platform admin may create a facility with no operator assigned yet.
+  // Deleting an operator that already owns facilities must still fail rather than
+  // orphan them, so onDelete stays Restrict (unlike OperatorInvite's SetNull).
+  operatorId          String?
   name                String
   address             String
   lat                 Decimal  @db.Decimal(10, 7)
@@ -420,7 +423,7 @@ model Facility {
   lifecycleReason    String?
   purgeAfter         DateTime?
 
-  operator         ParkingOperator            @relation(fields: [operatorId], references: [id])
+  operator         ParkingOperator?           @relation(fields: [operatorId], references: [id], onDelete: Restrict)
   tariffAssignments FacilityTariffAssignment[]
   images           FacilityImage[]
   rules            FacilityRule[]

@@ -259,6 +259,15 @@ export class FacilityKindChangeBlockedError extends DomainError {
   }
 }
 
+// An operator-less facility has no owning operator to draw ADMIN members from, so there
+// is no operator scope to authorize a manager assignment against. Distinct from
+// FacilityNotFoundError: the resource exists, it just cannot have managers yet.
+export class FacilityHasNoOperatorError extends DomainError {
+  constructor(facilityId: string) {
+    super(`Facility ${facilityId} has no operator assigned yet and cannot have managers`)
+  }
+}
+
 // One or more requested manager ids cannot hold the assignment. The WHOLE request is
 // refused and the offending ids are named: silently dropping them would report a grant
 // that did not happen, and the caller already supplied these ids for an operator they

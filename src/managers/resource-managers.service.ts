@@ -4,6 +4,7 @@ import type { AuthUser } from '@spark/types'
 import { OperatorScopeService } from '../common/authz/operator-scope.service'
 import { RequestContext } from '../common/context/request-context'
 import {
+  FacilityHasNoOperatorError,
   FacilityNotFoundError,
   ManagerAssignmentRejectedError,
   TariffPlanNotFoundError,
@@ -154,6 +155,7 @@ export class ResourceManagersService {
       select: { operatorId: true },
     })
     if (!facility) throw new FacilityNotFoundError(facilityId)
+    if (facility.operatorId === null) throw new FacilityHasNoOperatorError(facilityId)
 
     return this.assertMayAdminister(actor, facility.operatorId)
   }

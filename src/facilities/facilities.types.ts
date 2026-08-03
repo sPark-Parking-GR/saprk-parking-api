@@ -34,7 +34,7 @@ export interface FacilityTariffAssignments {
 
 export interface AdminFacility {
   id: string
-  operatorId: string
+  operatorId: string | null
   kind: FacilityKind
   name: string
   address: string
@@ -64,8 +64,8 @@ export interface AdminFacilityListItem {
   isVerified: boolean
   kind: FacilityKind
   source: IngestSource | null
-  operatorId: string
-  operatorName: string
+  operatorId: string | null
+  operatorName: string | null
   createdAt: Date
   updatedAt: Date
 }

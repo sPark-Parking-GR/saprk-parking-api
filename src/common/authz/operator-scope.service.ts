@@ -27,15 +27,36 @@ export interface ManagedScopeWhere {
 }
 
 /**
- * The single operator a create lands in. A platform admin must always name one. An
- * operator caller with exactly one membership implies it (a stray body operatorId stays
- * ignored, as the DTOs document), but with several memberships there is no implied
- * tenant — the caller must name one they belong to, or the create is refused rather
- * than silently landing in an arbitrary operator.
+ * The single operator a create lands in. By default a platform admin must always name
+ * one — every existing call site (tariff plans, operator-managed resources) keeps that
+ * behavior and the non-nullable `string` return type unchanged. Only a caller that
+ * passes `{ required: false }` (facility creation, where a platform admin may
+ * deliberately leave a facility unassigned) gets `null` back instead of a thrown error.
+ *
+ * An operator caller with exactly one membership implies it (a stray body operatorId
+ * stays ignored, as the DTOs document), but with several memberships there is no
+ * implied tenant — the caller must name one they belong to, or the create is refused
+ * rather than silently landing in an arbitrary operator. This part is unaffected by
+ * `required`: an operator caller always resolves to a real operator or throws.
  */
-export function targetOperatorId(scope: OperatorScope, requested: string | undefined): string {
+export function targetOperatorId(scope: OperatorScope, requested: string | undefined): string
+export function targetOperatorId(
+  scope: OperatorScope,
+  requested: string | undefined,
+  options: { required: false },
+): string | null
+export function targetOperatorId(
+  scope: OperatorScope,
+  requested: string | undefined,
+  options?: { required?: boolean },
+): string | null {
+  const required = options?.required ?? true
+
   if (scope.kind === 'platform') {
-    if (!requested) throw new DomainError('operatorId required')
+    if (!requested) {
+      if (required) throw new DomainError('operatorId required')
+      return null
+    }
     return requested
   }
 

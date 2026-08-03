@@ -7,6 +7,7 @@ import {
   DomainError,
   FacilityDeactivationFailedError,
   FacilityHasActiveBookingsError,
+  FacilityHasNoOperatorError,
   FacilityKindChangeBlockedError,
   FacilityNotBookableError,
 } from '../errors/domain.errors'
@@ -55,6 +56,14 @@ describe('DomainExceptionFilter', () => {
     const { host, reply } = makeHost()
 
     filter.catch(new FacilityKindChangeBlockedError('f1', 'FREE_PUBLIC', 2), host)
+
+    expect(reply.status).toHaveBeenCalledWith(HttpStatus.CONFLICT)
+  })
+
+  it('maps FacilityHasNoOperatorError to 409 — a resource-state refusal, not bad input', () => {
+    const { host, reply } = makeHost()
+
+    filter.catch(new FacilityHasNoOperatorError('f1'), host)
 
     expect(reply.status).toHaveBeenCalledWith(HttpStatus.CONFLICT)
   })

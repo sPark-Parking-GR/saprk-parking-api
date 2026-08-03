@@ -3,7 +3,7 @@ import { TariffService } from './tariff.service'
 import { priceStay } from './pricing-engine'
 import type { CompiledPlan, CompiledCap } from './tariff.types'
 import type { OperatorScopeService } from '../common/authz/operator-scope.service'
-import { DomainError } from '../common/errors/domain.errors'
+import { DomainError, NoApplicableTariffError } from '../common/errors/domain.errors'
 import type { LifecycleService } from '../lifecycle/lifecycle.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { EntitlementService } from '../subscriptions/entitlement.service'
@@ -465,6 +465,29 @@ describe('TariffService.computeTotalsByFacility', () => {
     expect(totals.get('f2')).toBe(800)
     expect(totals.get('f3')).toBe(1200)
   })
+
+  it('an operator-less facility with an explicit row still prices, excluded from the defaults query', async () => {
+    prisma.facility.findMany.mockResolvedValue([
+      facilityWithPlan('f1', dbPlan(400), null as unknown as string),
+      facilityNoRow('f2', 'op1'),
+    ])
+    prisma.tariffPlan.findMany.mockResolvedValue([dbPlan(600, { operatorId: 'op1' })])
+
+    const totals = await service.computeTotalsByFacility(['f1', 'f2'], startsAt, endsAt, CAR)
+
+    expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where.operatorId).toEqual({ in: ['op1'] })
+    expect(totals.get('f1')).toBe(800)
+    expect(totals.get('f2')).toBe(1200)
+  })
+
+  it('an operator-less facility with no explicit row is omitted, not crashed', async () => {
+    prisma.facility.findMany.mockResolvedValue([facilityNoRow('f1', null as unknown as string)])
+
+    const totals = await service.computeTotalsByFacility(['f1'], startsAt, endsAt, CAR)
+
+    expect(totals.has('f1')).toBe(false)
+    expect(prisma.tariffPlan.findMany).not.toHaveBeenCalled()
+  })
 })
 
 describe('TariffService.computeQuote', () => {
@@ -489,6 +512,36 @@ describe('TariffService.computeQuote', () => {
       }),
     ).rejects.toBeInstanceOf(DomainError)
     expect(prisma.facility.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('an operator-less facility with no explicit assignment is refused, not crashed', async () => {
+    const prisma = {
+      facility: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'f1',
+          operatorId: null,
+          tariffAssignments: [],
+        }),
+      },
+      tariffPlan: { findFirst: jest.fn() },
+    }
+    const service = new TariffService(
+      prisma as unknown as PrismaService,
+      {} as unknown as OperatorScopeService,
+      {} as unknown as EntitlementService,
+      {} as unknown as LifecycleService,
+    )
+
+    await expect(
+      service.computeQuote({
+        facilityId: 'f1',
+        startsAt: new Date('2026-06-18T10:00:00Z'),
+        endsAt: new Date('2026-06-18T12:00:00Z'),
+        vehicleType: CAR,
+      }),
+    ).rejects.toBeInstanceOf(NoApplicableTariffError)
+    // No operator to resolve a default plan from — the query is skipped entirely.
+    expect(prisma.tariffPlan.findFirst).not.toHaveBeenCalled()
   })
 })
 

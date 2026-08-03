@@ -716,7 +716,11 @@ export class BookingService {
     if (!booking) throw new BookingNotFoundError(bookingId)
     // Same not-found masking as transitionByOperator: an operator must not be able to
     // probe for bookings outside their own facilities.
-    if (scope.kind === 'operator' && !scope.operatorIds.includes(booking.facility.operatorId)) {
+    if (
+      scope.kind === 'operator' &&
+      (booking.facility.operatorId === null ||
+        !scope.operatorIds.includes(booking.facility.operatorId))
+    ) {
       throw new BookingNotFoundError(bookingId)
     }
     if (booking.status !== BookingStatus.CHECKED_IN) {
@@ -892,7 +896,11 @@ export class BookingService {
     // a 403, and that distinct status is itself the existence leak this method prevents.
     if (this.isStaff(user)) {
       const scope = await this.operatorScope.resolve(user)
-      if (scope.kind === 'platform' || scope.operatorIds.includes(booking.facility.operatorId)) {
+      if (
+        scope.kind === 'platform' ||
+        (booking.facility.operatorId !== null &&
+          scope.operatorIds.includes(booking.facility.operatorId))
+      ) {
         return
       }
     }
@@ -927,7 +935,11 @@ export class BookingService {
       if (!booking) throw new BookingNotFoundError(bookingId)
       // Cross-operator access is reported as not-found so an operator cannot probe
       // for bookings outside their own facilities.
-      if (scope.kind === 'operator' && !scope.operatorIds.includes(booking.facility.operatorId)) {
+      if (
+        scope.kind === 'operator' &&
+        (booking.facility.operatorId === null ||
+          !scope.operatorIds.includes(booking.facility.operatorId))
+      ) {
         throw new BookingNotFoundError(bookingId)
       }
       if (booking.status !== from) {

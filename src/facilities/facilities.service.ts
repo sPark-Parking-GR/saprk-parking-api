@@ -33,6 +33,7 @@ import type {
   ListFacilitiesDto,
   UpdateFacilityDto,
 } from './dto/facility.dto'
+import { FacilityClusterIndexService } from './facility-cluster-index.service'
 import type {
   AdminFacility,
   AdminFacilityList,
@@ -55,6 +56,12 @@ import type {
 const MAX_POINTS = 250
 const CLUSTER_COLS = 12
 const CLUSTER_ROWS = 12
+
+// The mobile map's render budget: above this many facilities in view the response
+// switches to clusters. Fixed regardless of zoom or dataset size, and deliberately well
+// under the ~100 individual native markers at which the map was measured to stutter —
+// MAX_POINTS (250) was far past that, so a 100-250 result set rendered as raw points.
+const SEARCH_RENDER_BUDGET = 60
 
 // Public visibility gate, shared by every public search query so the count, the point
 // prefilter and the cluster buckets can never disagree about what is publicly listable.
@@ -145,6 +152,15 @@ const VEHICLE_FROM_PRISMA: Record<VehicleType, ContractVehicleType> = {
   [VehicleType.TRUCK]: 'truck',
 }
 
+// A non-BUSINESS facility is catalog-only and never bookable, so its capacity, vehicle
+// list and opening hours are decorative rather than load-bearing. These are what the
+// create path falls back to when a platform admin picks a non-BUSINESS kind without
+// specifying them: uncapped (the schema's own max) rather than a real limit, every
+// vehicle type rather than a chosen subset, and open 24h rather than a schedule.
+const UNCAPPED_FACILITY_CAPACITY = 100_000
+const ALL_CONTRACT_VEHICLE_TYPES: ContractVehicleType[] = ['car', 'motorcycle', 'van', 'truck']
+const ALWAYS_OPEN_HOURS: OpeningHours = { is24h: true }
+
 const PROMOTION_WEIGHT: Record<PromotionType, number> = {
   [PromotionType.PREMIUM]: 3,
   [PromotionType.FEATURED]: 2,
@@ -187,16 +203,24 @@ export class FacilitiesService {
     private readonly bookings: BookingService,
     private readonly entitlements: EntitlementService,
     private readonly lifecycle: LifecycleService,
+    private readonly clusterIndex: FacilityClusterIndexService,
   ) {}
 
   async search(params: FacilitySearchParams): Promise<FacilitySearchResponse> {
-    const { bounds } = params
+    const { bounds, vehicleType } = params
     const whereSql = this.searchWhereSql(params)
 
     const total = await this.countFacilities(whereSql)
 
-    if (bounds && total > MAX_POINTS) {
-      const clusters = await this.gridClusters(whereSql, bounds)
+    // The index is keyed and built on the visibility predicate ALONE — no bounds — so one
+    // build serves every viewport at every zoom. `total` still comes from the bounded
+    // count, because it describes what is in view, not what the index holds.
+    if (bounds && total > SEARCH_RENDER_BUDGET) {
+      const clusters = await this.clusterIndex.getClusters(
+        vehicleType ?? 'all',
+        this.visibilityWhereSql(vehicleType),
+        bounds,
+      )
       return { mode: 'clusters', points: [], clusters, total }
     }
 
@@ -270,7 +294,7 @@ export class FacilitiesService {
    * (exact rectangle when bounds are given, otherwise exact radius) and the vehicle-class
    * filter. Sharing it is what makes `total` describe exactly the set the points path
    * returns — counting without the vehicle filter used to overstate it and could flip the
-   * response into cluster mode on a set that fits in `MAX_POINTS`.
+   * response into cluster mode on a set that fits in `SEARCH_RENDER_BUDGET`.
    */
   private searchWhereSql(params: {
     lat: number
@@ -285,16 +309,29 @@ export class FacilitiesService {
       ? Prisma.sql`ST_Intersects("geog", ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326)::geography)`
       : Prisma.sql`ST_DWithin("geog", ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, ${radiusMeters})`
 
+    return Prisma.sql`${this.visibilityWhereSql(vehicleType)} AND ${spatial}`
+  }
+
+  /**
+   * The area-independent half of the public predicate. Factored out because the cluster
+   * index is built over the WHOLE listable dataset and queried per viewport, so it needs
+   * this without any spatial term — and building it separately would let the index cluster
+   * a different set than the count and points describe.
+   */
+  private visibilityWhereSql(vehicleType?: VehicleType): Prisma.Sql {
     const vehicle = vehicleType
       ? Prisma.sql`AND ${vehicleType}::"VehicleType" = ANY("vehicleTypes")`
       : Prisma.empty
 
-    return Prisma.sql`${PUBLIC_VISIBLE_SQL} AND ${spatial} ${vehicle}`
+    return Prisma.sql`${PUBLIC_VISIBLE_SQL} ${vehicle}`
   }
 
   /**
    * Facility ids matching the search predicate, resolved by the GiST index on the
-   * generated `geog` column.
+   * generated `geog` column. Capped at the same render budget the points/clusters switch
+   * uses: with bounds the cap is unreachable (the caller already proved the set fits),
+   * and without them it is what stops a wide radius from returning more markers than the
+   * client can draw. NOT `MAX_POINTS` — that one belongs to the admin map alone.
    */
   private async spatialCandidateIds(params: FacilitySearchParams): Promise<string[]> {
     const { lat, lng, bounds } = params
@@ -307,7 +344,7 @@ export class FacilitiesService {
       SELECT id FROM "Facility"
       WHERE ${this.searchWhereSql(params)}
       ${nearestFirst}
-      LIMIT ${MAX_POINTS}`
+      LIMIT ${SEARCH_RENDER_BUDGET}`
     return rows.map((r) => r.id)
   }
 
@@ -326,6 +363,12 @@ export class FacilitiesService {
    * Aggregates the facilities matching `where` into a fixed 12x12 grid of the visible
    * rectangle. The bucketing runs in SQL over the GiST-indexed `geog` column: a zoomed-out
    * view can match the whole ingested dataset, which must never be hydrated into memory.
+   *
+   * ADMIN MAP ONLY. The public search moved to FacilityClusterIndexService, whose
+   * hierarchy merges smoothly across zoom levels instead of re-bucketing per viewport.
+   * The admin map cannot follow: free-text search, the isActive/isVerified toggles, kind
+   * and operator scope multiply into far too many predicates to precompute an index per
+   * combination, and this grid needs no cache at all.
    */
   private async gridClusters(where: Prisma.Sql, bounds: MapBounds): Promise<FacilityCluster[]> {
     const cellLng = (bounds.east - bounds.west) / CLUSTER_COLS
@@ -483,15 +526,19 @@ export class FacilitiesService {
     })
     if (!facility) throw new FacilityNotFoundError(facilityId)
 
+    // An operator-less facility has no operator to resolve a default plan from — every
+    // vehicle type falls through to 'none' unless explicitly assigned.
     const [rows, defaultPlan] = await Promise.all([
       this.prisma.facilityTariffAssignment.findMany({
         where: { facilityId },
         select: { vehicleType: true, tariffPlanId: true, tariffPlan: { select: { name: true } } },
       }),
-      this.prisma.tariffPlan.findFirst({
-        where: { operatorId: facility.operatorId, isDefault: true, isActive: true },
-        select: { id: true, name: true },
-      }),
+      facility.operatorId !== null
+        ? this.prisma.tariffPlan.findFirst({
+            where: { operatorId: facility.operatorId, isDefault: true, isActive: true },
+            select: { id: true, name: true },
+          })
+        : null,
     ])
 
     const explicitByType = new Map(rows.map((r) => [r.vehicleType, r]))
@@ -563,7 +610,7 @@ export class FacilitiesService {
 
     const items: AdminFacilityListItem[] = rows.map(({ operator, ...r }) => ({
       ...r,
-      operatorName: operator.name,
+      operatorName: operator?.name ?? null,
     }))
     return { items, total, skip: query.skip, take: query.take }
   }
@@ -580,13 +627,21 @@ export class FacilitiesService {
   async create(user: AuthUser, dto: CreateFacilityDto): Promise<AdminFacility> {
     const scope = await this.operatorScope.resolve(user)
 
-    const operatorId = targetOperatorId(scope, dto.operatorId)
+    // A platform admin may leave a facility unassigned (operatorId stays null); every
+    // other caller must always resolve to a real operator or the create is refused.
+    const operatorId = targetOperatorId(scope, dto.operatorId, { required: false })
 
-    const operator = await this.prisma.parkingOperator.findUnique({
-      where: { id: operatorId },
-      select: { id: true },
-    })
-    if (!operator) throw new DomainError('operatorId required')
+    if (operatorId !== null) {
+      const operator = await this.prisma.parkingOperator.findUnique({
+        where: { id: operatorId },
+        select: { id: true },
+      })
+      if (!operator) throw new DomainError('operatorId required')
+    }
+
+    if (scope.kind === 'operator' && dto.kind !== undefined) {
+      throw new FacilityFieldForbiddenError('kind')
+    }
 
     const created = await this.prisma.$transaction(async (tx) => {
       // Lock the operator row so two concurrent creates serialize on the same operator,
@@ -595,25 +650,29 @@ export class FacilitiesService {
       // thing preventing two simultaneous creates from both passing a quota of one — it
       // used to be belt-and-suspenders behind the unique index and is now the primary
       // control. The assert must therefore stay inside this transaction, after the lock.
-      await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${operatorId} FOR UPDATE`
-
-      await this.entitlements.assertCanCreateFacility(operatorId, tx)
+      // An operator-less facility has no operator row to lock and no quota to check.
+      if (operatorId !== null) {
+        await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${operatorId} FOR UPDATE`
+        await this.entitlements.assertCanCreateFacility(operatorId, tx)
+      }
 
       // `geog` is a GENERATED ALWAYS column; the database derives it from lat/lng,
       // so no raw write is needed (and one would be rejected by Postgres).
       const facility = await tx.facility.create({
         data: {
           operatorId,
-          kind: FacilityKind.BUSINESS,
+          kind: dto.kind ?? FacilityKind.BUSINESS,
           name: dto.name,
           address: dto.address,
           lat: new Prisma.Decimal(dto.lat),
           lng: new Prisma.Decimal(dto.lng),
-          totalCapacity: dto.totalCapacity,
-          onlineQuota: dto.onlineQuota,
-          vehicleTypes: dto.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v]),
+          totalCapacity: dto.totalCapacity ?? UNCAPPED_FACILITY_CAPACITY,
+          onlineQuota: dto.onlineQuota ?? UNCAPPED_FACILITY_CAPACITY,
+          vehicleTypes: (dto.vehicleTypes ?? ALL_CONTRACT_VEHICLE_TYPES).map(
+            (v) => VEHICLE_TO_PRISMA[v],
+          ),
           heightRestrictionCm: dto.heightRestrictionCm ?? null,
-          openingHoursJson: dto.openingHours as unknown as Prisma.InputJsonValue,
+          openingHoursJson: (dto.openingHours ?? ALWAYS_OPEN_HOURS) as unknown as Prisma.InputJsonValue,
           amenities: dto.amenities,
           cancellationPolicy: dto.cancellationPolicy,
           isActive: false,
@@ -625,26 +684,33 @@ export class FacilitiesService {
       // Analytics attributes money through FacilityOwnershipPeriod, never through
       // Facility.operatorId, and the attribution join is an inner one: a facility with no
       // open period earns revenue that no report can see. Same transaction as the insert,
-      // so a facility can never exist without one.
-      await tx.facilityOwnershipPeriod.create({
-        data: { facilityId: facility.id, operatorId, from: facility.createdAt, to: null },
-      })
+      // so a facility can never exist without one — except an operator-less facility,
+      // which has no owner to attribute revenue to until one claims or is assigned it.
+      if (operatorId !== null) {
+        await tx.facilityOwnershipPeriod.create({
+          data: { facilityId: facility.id, operatorId, from: facility.createdAt, to: null },
+        })
+      }
 
       // Below platform admin, visibility now requires a management assignment — so without
       // this the creator could not see, open or edit what they just created. Same
-      // transaction as the insert, so an unmanageable facility can never exist.
-      const managerIds = await initialManagerIds(tx, operatorId, {
-        id: user.id,
-        isPlatformAdmin: scope.kind === 'platform',
-      })
-      if (managerIds.length > 0) {
-        await tx.facilityManager.createMany({
-          data: managerIds.map((userId) => ({
-            facilityId: facility.id,
-            userId,
-            assignedBy: user.id,
-          })),
+      // transaction as the insert, so an unmanageable facility can never exist. An
+      // operator-less facility has no operator to draw managers from, so it stays
+      // platform-admin-only until it is assigned one.
+      if (operatorId !== null) {
+        const managerIds = await initialManagerIds(tx, operatorId, {
+          id: user.id,
+          isPlatformAdmin: scope.kind === 'platform',
         })
+        if (managerIds.length > 0) {
+          await tx.facilityManager.createMany({
+            data: managerIds.map((userId) => ({
+              facilityId: facility.id,
+              userId,
+              assignedBy: user.id,
+            })),
+          })
+        }
       }
 
       await tx.auditLog.create({
@@ -1249,7 +1315,7 @@ export class FacilitiesService {
 
   private toAdminFacility(facility: {
     id: string
-    operatorId: string
+    operatorId: string | null
     kind: FacilityKind
     name: string
     address: string

@@ -105,9 +105,12 @@ export class LifecycleService {
       // a create and must clear the same entitlement check — the operator may now be on a
       // multi-facility plan. Lock the operator row first: the partial unique index that
       // used to backstop this was dropped with the one-facility cap, so this lock is the
-      // only thing serialising a restore against a concurrent create.
-      await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${row.operatorId} FOR UPDATE`
-      await this.entitlements.assertCanCreateFacility(row.operatorId, tx)
+      // only thing serialising a restore against a concurrent create. An operator-less
+      // facility has no operator row to lock and no quota to check.
+      if (row.operatorId !== null) {
+        await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${row.operatorId} FOR UPDATE`
+        await this.entitlements.assertCanCreateFacility(row.operatorId, tx)
+      }
 
       await tx.facility.update({
         where: { id, lifecycleStatus: row.lifecycleStatus },

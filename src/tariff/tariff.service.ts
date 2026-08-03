@@ -136,7 +136,7 @@ export class TariffService {
     if (!facility) throw new FacilityNotFoundError(facilityId)
 
     let plan: PlanWithSchedule | null = facility.tariffAssignments[0]?.tariffPlan ?? null
-    if (!plan) {
+    if (!plan && facility.operatorId !== null) {
       plan = await this.prisma.tariffPlan.findFirst({
         where: { operatorId: facility.operatorId, isDefault: true, isActive: true },
         include: scheduleInclude,
@@ -234,7 +234,11 @@ export class TariffService {
       },
     })
 
-    const operatorIds = [...new Set(facilities.map((f) => f.operatorId))]
+    // Operator-less facilities never have a default plan to resolve — only their own
+    // explicit per-vehicle-type assignment (already fetched above) can price them.
+    const operatorIds = [
+      ...new Set(facilities.map((f) => f.operatorId).filter((id): id is string => id !== null)),
+    ]
     const defaults = operatorIds.length
       ? await this.prisma.tariffPlan.findMany({
           where: { operatorId: { in: operatorIds }, isDefault: true, isActive: true },
@@ -247,7 +251,7 @@ export class TariffService {
     for (const facility of facilities) {
       const plan =
         facility.tariffAssignments[0]?.tariffPlan ??
-        defaultsByOperator.get(facility.operatorId) ??
+        (facility.operatorId !== null ? defaultsByOperator.get(facility.operatorId) : null) ??
         null
       if (!plan || !isPlanApplicable(plan, startsAt, vehicleType)) continue
       try {

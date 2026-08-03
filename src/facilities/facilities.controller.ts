@@ -94,6 +94,9 @@ export class FacilitiesController {
     return this.facilities.bulkUpdate(user, body)
   }
 
+  // `kind` decides whether a facility is sellable at all, so it is platform-only. Gated
+  // here on the role and again in the service on the resolved operator scope, per the
+  // both-layers rule — neither check is load-bearing alone.
   @Roles('operator_admin', 'platform_admin')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post()
@@ -101,6 +104,9 @@ export class FacilitiesController {
     @Body(new ZodValidationPipe(createFacilitySchema)) body: CreateFacilityDto,
     @CurrentUser() user: AuthUser,
   ) {
+    if (body.kind !== undefined && user.role !== 'platform_admin') {
+      throw new FacilityFieldForbiddenError('kind')
+    }
     return this.facilities.create(user, body)
   }
 
