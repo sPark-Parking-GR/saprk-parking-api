@@ -7,6 +7,7 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module'
 import { TariffModule } from '../tariff/tariff.module'
 import { FacilitiesController } from './facilities.controller'
 import { FacilitiesService } from './facilities.service'
+import { FacilityClusterIndexService } from './facility-cluster-index.service'
 import { SavedFacilitiesController } from './saved-facilities.controller'
 import { SavedFacilitiesService } from './saved-facilities.service'
 
@@ -21,7 +22,12 @@ import { SavedFacilitiesService } from './saved-facilities.service'
 @Module({
   imports: [InventoryModule, TariffModule, BookingModule, SubscriptionsModule, LifecycleModule],
   controllers: [FacilitiesController, SavedFacilitiesController],
-  providers: [FacilitiesService, SavedFacilitiesService, OperatorScopeService],
+  providers: [
+    FacilitiesService,
+    FacilityClusterIndexService,
+    SavedFacilitiesService,
+    OperatorScopeService,
+  ],
   exports: [FacilitiesService, OperatorScopeService],
 })
 export class FacilitiesModule {}

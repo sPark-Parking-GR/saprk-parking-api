@@ -1,5 +1,6 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common'
 import { PrismaClient } from '@prisma/client'
+import { facilityClusterInvalidationExtension } from './facility-cluster-invalidation.extension'
 import { lifecycleExtension } from './lifecycle.extension'
 
 @Injectable()
@@ -16,9 +17,15 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   // lifecycle extension (see lifecycle.extension.ts for exactly what it does and does
   // not cover), so no call site can forget the filter. The extended client proxies the
   // original instance, so the Nest lifecycle hooks and retry state below keep working.
+  //
+  // Chained, not merged: extensions apply outermost-last, so the cluster invalidation
+  // sees the args the lifecycle filter already rewrote — which is what it wants, since it
+  // only reacts to the write actually sent to the database.
   constructor() {
     super()
-    return this.$extends(lifecycleExtension) as unknown as this
+    return this.$extends(lifecycleExtension).$extends(
+      facilityClusterInvalidationExtension,
+    ) as unknown as this
   }
 
   async onModuleInit() {

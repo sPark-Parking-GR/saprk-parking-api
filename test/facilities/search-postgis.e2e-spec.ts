@@ -11,8 +11,10 @@ const CENTRE = { lat: 37.9838, lng: 23.7275 }
 const STARTS_AT = new Date('2026-09-01T10:00:00.000Z')
 const ENDS_AT = new Date('2026-09-01T12:00:00.000Z')
 
-// FacilitiesService switches to grid clusters above MAX_POINTS (250) matches in bounds.
-const MAX_POINTS = 250
+// Public search switches to the supercluster index above SEARCH_RENDER_BUDGET (60) matches
+// in bounds (see FacilitiesService.search / SEARCH_RENDER_BUDGET). adminMap is unaffected
+// and still gates on the separate MAX_POINTS (250) grid, but this file never exercises it.
+const SEARCH_RENDER_BUDGET = 60
 
 const TIGHT_BOUNDS: MapBounds = {
   north: CENTRE.lat + 0.01,
@@ -181,8 +183,8 @@ describe('facility search PostGIS (e2e)', () => {
     expect(result.total).toBe(1)
   })
 
-  describe('grid clustering', () => {
-    const CLUSTERED = MAX_POINTS + 11
+  describe('cluster mode (supercluster index)', () => {
+    const CLUSTERED = SEARCH_RENDER_BUDGET + 11
 
     beforeEach(async () => {
       const cellLat = (TIGHT_BOUNDS.north - TIGHT_BOUNDS.south) / 12
@@ -190,8 +192,9 @@ describe('facility search PostGIS (e2e)', () => {
 
       await prisma.facility.createMany({
         data: Array.from({ length: CLUSTERED }, (_, index) => {
-          // Walk the 12x12 grid so the fixture spans many cells, keeping every point a
-          // little inside its cell so floating-point edges cannot reassign it.
+          // Walk a 12x12 grid so the fixture spans many cells instead of one repeated
+          // point; the supercluster index this feeds re-merges them on its own terms, not
+          // by this layout, so no assertion below depends on the exact spacing.
           const column = index % 12
           const row = Math.floor(index / 12) % 12
           return {
@@ -213,7 +216,7 @@ describe('facility search PostGIS (e2e)', () => {
       })
     })
 
-    it('switches to clusters above the point ceiling and preserves the total', async () => {
+    it('switches to clusters above the render budget and preserves the total', async () => {
       const result = await facilities.search(searchParams({ bounds: TIGHT_BOUNDS }))
 
       expect(result.mode).toBe('clusters')
@@ -224,15 +227,14 @@ describe('facility search PostGIS (e2e)', () => {
       expect(clustered).toBe(CLUSTERED)
     })
 
-    it('buckets into the 12x12 grid with centroids inside the requested rectangle', async () => {
+    it('merges nearby facilities into fewer clusters, each centred inside the requested rectangle', async () => {
       const { clusters } = await facilities.search(searchParams({ bounds: TIGHT_BOUNDS }))
 
-      expect(clusters.length).toBeGreaterThan(1)
-      expect(clusters.length).toBeLessThanOrEqual(144)
+      expect(clusters.length).toBeGreaterThan(0)
+      expect(clusters.length).toBeLessThan(CLUSTERED)
       expect(new Set(clusters.map((c) => c.id)).size).toBe(clusters.length)
 
       for (const cluster of clusters) {
-        expect(cluster.id).toMatch(/^c_(?:[0-9]|1[01])_(?:[0-9]|1[01])$/)
         expect(cluster.lat).toBeGreaterThanOrEqual(TIGHT_BOUNDS.south)
         expect(cluster.lat).toBeLessThanOrEqual(TIGHT_BOUNDS.north)
         expect(cluster.lng).toBeGreaterThanOrEqual(TIGHT_BOUNDS.west)
