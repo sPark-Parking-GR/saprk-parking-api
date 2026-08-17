@@ -178,9 +178,7 @@ describe('facility kind (e2e)', () => {
     expect(await raw.facilityTariffAssignment.count({ where: { facilityId: facility.id } })).toBe(1)
   })
 
-  // Create stays BUSINESS: `kind` is not part of createFacilitySchema, so a body carrying
-  // one is stripped rather than honoured.
-  it('create ignores a kind in the body', async () => {
+  it('create defaults to BUSINESS when no kind is given', async () => {
     const otherOperator = await seedOperator(raw)
     const res = await request(app.getHttpServer())
       .post(`${API}/facilities`)
@@ -195,10 +193,46 @@ describe('facility kind (e2e)', () => {
         onlineQuota: 5,
         vehicleTypes: ['car'],
         openingHours: { is24h: true },
-        kind: FacilityKind.FREE_PUBLIC,
       })
       .expect(201)
 
     expect((res.body as { kind: FacilityKind }).kind).toBe(FacilityKind.BUSINESS)
+  })
+
+  it('a platform admin may create a facility with a non-BUSINESS kind directly', async () => {
+    const otherOperator = await seedOperator(raw)
+    const res = await request(app.getHttpServer())
+      .post(`${API}/facilities`)
+      .set('authorization', `Bearer ${platformToken}`)
+      .send({
+        operatorId: otherOperator.id,
+        name: 'New Lot',
+        address: '2 Test Street',
+        lat: CENTRE.lat,
+        lng: CENTRE.lng,
+        kind: FacilityKind.FREE_PUBLIC,
+      })
+      .expect(201)
+
+    expect((res.body as { kind: FacilityKind }).kind).toBe(FacilityKind.FREE_PUBLIC)
+  })
+
+  it('an operator admin may not set a kind on create', async () => {
+    await request(app.getHttpServer())
+      .post(`${API}/facilities`)
+      .set('authorization', `Bearer ${operatorToken}`)
+      .send({
+        operatorId: operator.id,
+        name: 'New Lot',
+        address: '2 Test Street',
+        lat: CENTRE.lat,
+        lng: CENTRE.lng,
+        totalCapacity: 10,
+        onlineQuota: 5,
+        vehicleTypes: ['car'],
+        openingHours: { is24h: true },
+        kind: FacilityKind.FREE_PUBLIC,
+      })
+      .expect(403)
   })
 })
