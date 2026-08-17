@@ -6,7 +6,7 @@ import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { AuditService } from './audit.service'
 import { listAuditLogSchema, type ListAuditLogDto } from './dto/audit.dto'
 
-@Controller('audit-log')
+@Controller('admin/audit-log')
 export class AuditController {
   constructor(private readonly audit: AuditService) {}
 

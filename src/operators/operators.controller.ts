@@ -4,7 +4,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { RequirePermission } from '../auth/decorators/require-permission.decorator'
 import { OperatorsService } from './operators.service'
 
-@Controller('operators')
+@Controller('admin/operators')
 export class OperatorsController {
   constructor(private readonly operators: OperatorsService) {}
 

@@ -109,24 +109,24 @@ describe('platform permission gates (e2e)', () => {
   }
 
   const endpoints: Endpoint[] = [
-    { name: 'GET /audit-log', method: 'get', path: () => '/audit-log', admitted: 200 },
-    { name: 'GET /operators', method: 'get', path: () => '/operators', admitted: 200 },
+    { name: 'GET /admin/audit-log', method: 'get', path: () => '/admin/audit-log', admitted: 200 },
+    { name: 'GET /admin/operators', method: 'get', path: () => '/admin/operators', admitted: 200 },
     {
-      name: 'GET /operators/:id',
+      name: 'GET /admin/operators/:id',
       method: 'get',
-      path: () => `/operators/${verifiedOperatorId}`,
+      path: () => `/admin/operators/${verifiedOperatorId}`,
       admitted: 200,
     },
     {
-      name: 'POST /operators/:id/suspend',
+      name: 'POST /admin/operators/:id/suspend',
       method: 'post',
-      path: () => `/operators/${verifiedOperatorId}/suspend`,
+      path: () => `/admin/operators/${verifiedOperatorId}/suspend`,
       admitted: 204,
     },
     {
-      name: 'POST /operators/:id/reactivate',
+      name: 'POST /admin/operators/:id/reactivate',
       method: 'post',
-      path: () => `/operators/${suspendedOperatorId}/reactivate`,
+      path: () => `/admin/operators/${suspendedOperatorId}/reactivate`,
       admitted: 204,
     },
     {

@@ -7,6 +7,7 @@ import { AdminModule } from './admin/admin.module'
 import { AnalyticsModule } from './analytics/analytics.module'
 import { AuditModule } from './audit/audit.module'
 import { AuthModule } from './auth/auth.module'
+import { AdminRouteGuard } from './auth/guards/admin-route.guard'
 import { AuthGuard } from './auth/guards/auth.guard'
 import { PermissionGuard } from './auth/guards/permission.guard'
 import { RolesGuard } from './auth/guards/roles.guard'
@@ -72,6 +73,11 @@ import { TariffModule } from './tariff/tariff.module'
     // permissions existed. Every global guard must return true for a handler to run, so a
     // route carrying both @Roles and @RequirePermission is a strict intersection by
     // construction — neither guard can ever re-admit a caller the other refused.
+    // AdminRouteGuard sits between them for the same coarse-before-fine reason: it is the
+    // only guard that decides from the URL rather than from decorators, so it must not be
+    // reachable before request.user exists, and it should refuse an operator on /admin/*
+    // before either decorator-driven guard gets a say.
+    { provide: APP_GUARD, useClass: AdminRouteGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_GUARD, useClass: PermissionGuard },
     { provide: APP_INTERCEPTOR, useClass: RequestContextInterceptor },
