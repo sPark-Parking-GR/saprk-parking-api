@@ -185,6 +185,23 @@ describe('TariffService admin writes', () => {
     )
   }
 
+  function listRow(over: Record<string, unknown> = {}) {
+    return {
+      id: 'plan1',
+      operatorId: 'op2',
+      operator: { name: 'Beta Parking' },
+      name: 'Standard',
+      isActive: true,
+      isDefault: false,
+      validFrom: null,
+      validTo: null,
+      vehicleTypes: ['CAR'],
+      version: 1,
+      updatedAt: new Date('2026-06-18T00:00:00Z'),
+      ...over,
+    }
+  }
+
   function persistedPlan(over: Record<string, unknown> = {}) {
     return {
       id: 'plan1',
@@ -327,7 +344,7 @@ describe('TariffService admin writes', () => {
     setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.tariffPlan.findMany.mockResolvedValue([])
 
-    await service.listPlans(operatorUser)
+    await service.listPlans(operatorUser, {})
 
     expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where).toEqual(
       managed(['op1'], operatorUser.id),
@@ -338,11 +355,37 @@ describe('TariffService admin writes', () => {
     setScope({ kind: 'platform' })
     prisma.tariffPlan.findMany.mockResolvedValue([])
 
-    await service.listPlans(platformUser)
+    await service.listPlans(platformUser, {})
 
     const where = prisma.tariffPlan.findMany.mock.calls[0]![0].where
     expect(where.managers).toBeUndefined()
     expect(where.operatorId).toBeUndefined()
+    expect(where.AND).toBeUndefined()
+  })
+
+  it('narrows a platform caller to one operator when operatorId is supplied', async () => {
+    setScope({ kind: 'platform' })
+    prisma.tariffPlan.findMany.mockResolvedValue([listRow()])
+
+    const result = await service.listPlans(platformUser, { operatorId: 'op2' })
+
+    const where = prisma.tariffPlan.findMany.mock.calls[0]![0].where
+    expect(where.AND).toEqual([{ operatorId: 'op2' }])
+    expect(result.items).toEqual([
+      expect.objectContaining({ id: 'plan1', operatorId: 'op2', operatorName: 'Beta Parking' }),
+    ])
+  })
+
+  it('ignores operatorId from an operator caller — scope alone decides visibility', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
+    prisma.tariffPlan.findMany.mockResolvedValue([listRow({ operatorId: 'op1', name: 'Mine' })])
+
+    const result = await service.listPlans(operatorUser, { operatorId: 'op2' })
+
+    expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where).toEqual(
+      managed(['op1'], operatorUser.id),
+    )
+    expect(result.items).toEqual([expect.objectContaining({ id: 'plan1', operatorId: 'op1' })])
   })
 
   it('auto-assigns the creator as manager in the create transaction', async () => {
@@ -468,7 +511,7 @@ describe('TariffService admin writes', () => {
     setScope({ kind: 'operator', operatorIds: ['op1', 'op2'] })
     prisma.tariffPlan.findMany.mockResolvedValue([])
 
-    await service.listPlans(operatorUser)
+    await service.listPlans(operatorUser, {})
 
     expect(prisma.tariffPlan.findMany.mock.calls[0]![0].where).toEqual(
       managed(['op1', 'op2'], operatorUser.id),

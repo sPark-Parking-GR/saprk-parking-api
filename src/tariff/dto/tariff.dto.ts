@@ -177,6 +177,13 @@ export const simulateSchema = z.object({
 
 export type SimulateDto = z.infer<typeof simulateSchema>
 
+export const listTariffPlansSchema = z.object({
+  // Only honored for platform-admin callers; operator callers stay narrowed by their scope.
+  operatorId: z.string().min(1).optional(),
+})
+
+export type ListTariffPlansDto = z.infer<typeof listTariffPlansSchema>
+
 export const planParamSchema = z.object({
   planId: z.string().min(1),
 })

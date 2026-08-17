@@ -6,8 +6,10 @@ import { Roles } from '../auth/decorators/roles.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { TariffService } from './tariff.service'
 import {
+  listTariffPlansSchema,
   simulateSchema,
   tariffDraftSchema,
+  type ListTariffPlansDto,
   type SimulateDto,
   type TariffDraftDto,
 } from './dto/tariff.dto'
@@ -18,8 +20,11 @@ export class TariffController {
   constructor(private readonly tariff: TariffService) {}
 
   @Get()
-  list(@CurrentUser() user: AuthUser) {
-    return this.tariff.listPlans(user)
+  list(
+    @Query(new ZodValidationPipe(listTariffPlansSchema)) query: ListTariffPlansDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.tariff.listPlans(user, query)
   }
 
   @Throttle({ default: { limit: 30, ttl: 60_000 } })

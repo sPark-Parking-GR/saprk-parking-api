@@ -37,6 +37,7 @@ import {
   UNIT_TO_PRISMA,
   VEHICLE_FROM_PRISMA,
   VEHICLE_TO_PRISMA,
+  type ListTariffPlansDto,
   type SimulateDto,
   type TariffDraftDto,
 } from './dto/tariff.dto'
@@ -264,14 +265,19 @@ export class TariffService {
     return totals
   }
 
-  async listPlans(user: AuthUser): Promise<{ items: TariffPlanListItem[] }> {
+  async listPlans(
+    user: AuthUser,
+    query: ListTariffPlansDto,
+  ): Promise<{ items: TariffPlanListItem[] }> {
     const scope = await this.operatorScope.resolve(user)
 
     const plans = await this.prisma.tariffPlan.findMany({
-      where: { ...this.operatorScope.tariffPlanScopeWhere(scope, user) },
+      where: this.listWhere(scope, user, query),
       orderBy: { createdAt: 'asc' },
       select: {
         id: true,
+        operatorId: true,
+        operator: { select: { name: true } },
         name: true,
         isActive: true,
         isDefault: true,
@@ -285,6 +291,8 @@ export class TariffService {
 
     const items = plans.map((p) => ({
       id: p.id,
+      operatorId: p.operatorId,
+      operatorName: p.operator.name,
       name: p.name,
       isActive: p.isActive,
       isDefault: p.isDefault,
@@ -296,6 +304,22 @@ export class TariffService {
     }))
 
     return { items }
+  }
+
+  // A supplied operatorId narrows a platform admin's cross-operator list. For an operator
+  // caller it is ignored outright: their scope term already restricts them, and honoring it
+  // would read as a working filter on plans they can never see.
+  private listWhere(
+    scope: OperatorScope,
+    user: AuthUser,
+    query: ListTariffPlansDto,
+  ): Prisma.TariffPlanWhereInput {
+    return {
+      ...this.operatorScope.tariffPlanScopeWhere(scope, user),
+      ...(scope.kind === 'platform' && query.operatorId
+        ? { AND: [{ operatorId: query.operatorId }] }
+        : {}),
+    }
   }
 
   async getPlanDetail(user: AuthUser, planId: string): Promise<TariffPlanDetail> {

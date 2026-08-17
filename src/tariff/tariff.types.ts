@@ -96,6 +96,8 @@ export interface PriceResult {
 
 export interface TariffPlanListItem {
   id: string
+  operatorId: string
+  operatorName: string
   name: string
   isActive: boolean
   isDefault: boolean

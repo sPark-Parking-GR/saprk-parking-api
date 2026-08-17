@@ -195,6 +195,37 @@ describe('tenancy isolation (e2e)', () => {
     it('refuses to read another operator plan', async () => {
       await get(`/tariff-plans/${beta.tariffPlanId}`, alpha.token).expect(404)
     })
+
+    it('ignores a requested operatorId that the caller does not belong to', async () => {
+      const response = await get(
+        `/tariff-plans?operatorId=${beta.operatorId}`,
+        alpha.token,
+      ).expect(200)
+
+      expect(response.body.items.map((item: { id: string }) => item.id)).toEqual([
+        alpha.tariffPlanId,
+      ])
+    })
+
+    it('narrows a platform admin to one operator and names the owner of every plan', async () => {
+      const all = await get('/tariff-plans', platformToken).expect(200)
+      expect(all.body.items.map((item: { id: string }) => item.id).sort()).toEqual(
+        [alpha.tariffPlanId, beta.tariffPlanId].sort(),
+      )
+
+      const narrowed = await get(
+        `/tariff-plans?operatorId=${beta.operatorId}`,
+        platformToken,
+      ).expect(200)
+
+      expect(narrowed.body.items).toEqual([
+        expect.objectContaining({
+          id: beta.tariffPlanId,
+          operatorId: beta.operatorId,
+          operatorName: 'Beta',
+        }),
+      ])
+    })
   })
 
   describe('analytics', () => {
