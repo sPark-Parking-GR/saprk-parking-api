@@ -36,6 +36,7 @@ const BOOKING_ACTOR_ROLES: UserRole[] = [
   'operator_staff',
   'operator_admin',
   'platform_admin',
+  'super_admin',
 ]
 
 @Controller('bookings')
@@ -72,7 +73,7 @@ export class BookingController {
     return this.tickets.verify(user, body)
   }
 
-  @Roles('operator_staff', 'operator_admin', 'platform_admin')
+  @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
   @Get()
   list(
     @Query(new ZodValidationPipe(listBookingsSchema)) query: ListBookingsDto,

@@ -2,7 +2,13 @@ import { createHash, randomBytes } from 'crypto'
 import { ForbiddenException, Inject, Injectable, Logger } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import type { IAuthProvider } from '@spark/auth'
-import { hasPlatformPermission, type AuthResult, type AuthUser, type UserRole } from '@spark/types'
+import {
+  hasPlatformPermission,
+  isPlatformRole,
+  type AuthResult,
+  type AuthUser,
+  type UserRole,
+} from '@spark/types'
 import {
   InviteStatus,
   OperatorInviteKind,
@@ -104,7 +110,7 @@ export class InviteService {
   async createMember(actor: AuthUser, dto: CreateMemberInviteDto): Promise<InviteIssued> {
     // Controller already gates on @Roles('operator_admin', 'platform_admin'); re-check in
     // the service layer per the both-layers authorization rule.
-    if (actor.role !== 'operator_admin' && actor.role !== 'platform_admin') {
+    if (actor.role !== 'operator_admin' && !isPlatformRole(actor.role)) {
       throw new ForbiddenException('Only operator admins may invite operator members')
     }
     const operatorId = await this.access.resolveAdministrable(actor, dto.operatorId)
@@ -225,7 +231,7 @@ export class InviteService {
   async list(actor: AuthUser): Promise<InviteSummary[]> {
     // Controller already gates on @Roles(...); re-check in the service layer per the
     // both-layers authorization rule.
-    if (actor.role !== 'platform_admin' && actor.role !== 'operator_admin') {
+    if (!isPlatformRole(actor.role) && actor.role !== 'operator_admin') {
       throw new ForbiddenException('Only platform and operator admins may view operator invites')
     }
 
@@ -428,7 +434,7 @@ export class InviteService {
     invite: { kind: OperatorInviteKind; operatorId: string | null },
   ): Promise<void> {
     if (invite.kind === OperatorInviteKind.MEMBER) {
-      if (actor.role !== 'operator_admin' && actor.role !== 'platform_admin') {
+      if (actor.role !== 'operator_admin' && !isPlatformRole(actor.role)) {
         throw new ForbiddenException('Only operator admins may manage operator member invites')
       }
       // An operator that was deleted out from under the invite leaves nobody who could

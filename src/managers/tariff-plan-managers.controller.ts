@@ -8,7 +8,7 @@ import { replaceManagersSchema, type ReplaceManagersDto } from './dto/managers.d
 import { ResourceManagersService } from './resource-managers.service'
 
 // See FacilityManagersController for why these live on the resource and not under /admin.
-@Roles('operator_admin', 'platform_admin')
+@Roles('operator_admin', 'platform_admin', 'super_admin')
 @Controller('tariff-plans')
 export class TariffPlanManagersController {
   constructor(private readonly managers: ResourceManagersService) {}

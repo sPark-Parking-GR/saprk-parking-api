@@ -102,10 +102,13 @@ describe('LifecycleApprovalService — requesting a purge', () => {
 
     await makeService(prisma).request(REQUESTER, 'facility', 'f1', 'decommissioned')
 
+    // Both administrative roles hold platform:tenant.purge, and the approver set is derived
+    // from the permission map rather than hardcoded — so a super admin counts as the second
+    // pair of eyes for a platform admin's request, and vice versa.
     expect(prisma.user.count).toHaveBeenCalledWith({
       where: {
         id: { not: REQUESTER.id },
-        role: { in: [UserRole.PLATFORM_ADMIN] },
+        role: { in: [UserRole.PLATFORM_ADMIN, UserRole.SUPER_ADMIN] },
         deletedAt: null,
         lifecycleStatus: LifecycleStatus.ACTIVE,
       },

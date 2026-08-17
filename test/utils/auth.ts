@@ -8,6 +8,7 @@ const CONTRACT_ROLE: Record<PrismaUserRole, UserRole> = {
   [PrismaUserRole.OPERATOR_STAFF]: 'operator_staff',
   [PrismaUserRole.OPERATOR_ADMIN]: 'operator_admin',
   [PrismaUserRole.PLATFORM_ADMIN]: 'platform_admin',
+  [PrismaUserRole.SUPER_ADMIN]: 'super_admin',
 }
 
 export function authUser(user: { id: string; email: string; role: PrismaUserRole }): AuthUser {

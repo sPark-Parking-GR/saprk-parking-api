@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common'
 import { OperatorMemberRole, OperatorStatus, UserRole, type Prisma } from '@prisma/client'
-import type { AuthUser } from '@spark/types'
+import { isPlatformRole, type AuthUser } from '@spark/types'
 import { RequestContext } from '../common/context/request-context'
 import { PrismaService } from '../prisma/prisma.service'
 import { OperatorAccessService } from './operator-access.service'
@@ -11,6 +11,9 @@ import {
   SelfRoleChangeError,
   type OperatorMemberSummary,
 } from './operators.types'
+
+/** Global roles that outrank operator membership and are never derived from it. */
+const ADMINISTRATIVE_ROLES: UserRole[] = [UserRole.PLATFORM_ADMIN, UserRole.SUPER_ADMIN]
 
 @Injectable()
 export class OperatorMembersService {
@@ -107,7 +110,7 @@ export class OperatorMembersService {
     // Controller already gates on @Roles('operator_admin', 'platform_admin'); re-check in
     // the service layer per the both-layers authorization rule. resolveAdministrable then
     // does the tenancy half — the role check alone says nothing about WHICH operator.
-    if (actor.role !== 'operator_admin' && actor.role !== 'platform_admin') {
+    if (actor.role !== 'operator_admin' && !isPlatformRole(actor.role)) {
       throw new ForbiddenException('Only operator admins may manage operator members')
     }
     return this.access.resolveAdministrable(actor, requestedOperatorId)
@@ -203,9 +206,10 @@ export class OperatorMembersService {
 
     const data: Prisma.UserUpdateInput = { sessionsValidFrom: new Date() }
 
-    // A platform admin's role is not derived from operator memberships and must never be
-    // downgraded by losing one.
-    if (user.role !== UserRole.PLATFORM_ADMIN) {
+    // An administrative role is not derived from operator memberships and must never be
+    // downgraded by losing one. Missing SUPER_ADMIN here would silently demote the platform
+    // owner to USER the moment they were removed from any operator.
+    if (!ADMINISTRATIVE_ROLES.includes(user.role)) {
       const memberships = await tx.operatorMembership.findMany({
         where: { userId },
         select: { role: true },

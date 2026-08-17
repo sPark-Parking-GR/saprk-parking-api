@@ -10,7 +10,7 @@ import { ResourceManagersService } from './resource-managers.service'
 // On the resource rather than under /admin: operator admins legitimately use this to
 // delegate to their own staff, so it is not a platform-only surface. operator_staff is
 // excluded here and again in the service — they may never change an assignment.
-@Roles('operator_admin', 'platform_admin')
+@Roles('operator_admin', 'platform_admin', 'super_admin')
 @Controller('facilities')
 export class FacilityManagersController {
   constructor(private readonly managers: ResourceManagersService) {}

@@ -20,11 +20,11 @@ export interface BootstrapAdminUserInput {
   emailVerified: boolean
 }
 
-// Deliberately has no membership method: a platform admin is global, never scoped to
-// an operator, so the port makes an operator membership unrepresentable rather than
-// merely unused.
+// Deliberately has no membership method: a super admin is global, never scoped to an
+// operator, so the port makes an operator membership unrepresentable rather than merely
+// unused.
 export interface BootstrapAdminStore {
-  countPlatformAdmins(): Promise<number>
+  countSuperAdmins(): Promise<number>
   findUserByEmail(email: string): Promise<{ id: string; role: UserRole } | null>
   createUser(input: BootstrapAdminUserInput): Promise<{ id: string }>
 }
@@ -70,16 +70,24 @@ export function parseBootstrapEnv(env: Record<string, string | undefined>): Boot
   return result.data
 }
 
-export async function bootstrapPlatformAdmin(
+/**
+ * Creates the platform owner: the first SUPER_ADMIN, the only role permitted to act on user
+ * accounts.
+ *
+ * Gates on SUPER_ADMIN rather than PLATFORM_ADMIN deliberately. An existing deployment may
+ * already have platform admins and still need its first super admin, so counting platform
+ * admins here would make the tier unreachable on exactly the installs that need it most.
+ */
+export async function bootstrapSuperAdmin(
   store: BootstrapAdminStore,
   input: { email: string; displayName?: string },
 ): Promise<BootstrapAdminResult> {
-  const existingAdmins = await store.countPlatformAdmins()
+  const existingAdmins = await store.countSuperAdmins()
   if (existingAdmins > 0) {
     throw new BootstrapAdminRefusedError(
-      `Refusing to run: ${existingAdmins} PLATFORM_ADMIN account(s) already exist. ` +
-        'This command bootstraps the first platform administrator only — issue further ' +
-        'access through an existing platform admin.',
+      `Refusing to run: ${existingAdmins} SUPER_ADMIN account(s) already exist. ` +
+        'This command bootstraps the first super administrator only — issue further ' +
+        'access through an existing super admin.',
     )
   }
 
@@ -87,7 +95,7 @@ export async function bootstrapPlatformAdmin(
   if (existing) {
     throw new BootstrapAdminRefusedError(
       `Refusing to run: ${input.email} already exists with role ${existing.role}. ` +
-        'Promoting an existing account to PLATFORM_ADMIN is a privilege escalation and ' +
+        'Promoting an existing account to SUPER_ADMIN is a privilege escalation and ' +
         'will not happen as a side effect of this command. Use a fresh address.',
     )
   }
@@ -97,7 +105,7 @@ export async function bootstrapPlatformAdmin(
     email: input.email,
     displayName: input.displayName ?? null,
     passwordHash: await hashPassword(password),
-    role: UserRole.PLATFORM_ADMIN,
+    role: UserRole.SUPER_ADMIN,
     emailVerified: true,
   })
 
@@ -106,7 +114,7 @@ export async function bootstrapPlatformAdmin(
 
 export function createPrismaStore(prisma: PrismaClient): BootstrapAdminStore {
   return {
-    countPlatformAdmins: () => prisma.user.count({ where: { role: UserRole.PLATFORM_ADMIN } }),
+    countSuperAdmins: () => prisma.user.count({ where: { role: UserRole.SUPER_ADMIN } }),
     findUserByEmail: (email) =>
       prisma.user.findUnique({ where: { email }, select: { id: true, role: true } }),
     createUser: (input) => prisma.user.create({ data: input, select: { id: true } }),
@@ -116,12 +124,12 @@ export function createPrismaStore(prisma: PrismaClient): BootstrapAdminStore {
 function report(result: BootstrapAdminResult): void {
   // WHY direct stdout instead of the structured logger: the generated password exists
   // only inside this process and has to reach the operator running the command. Routing
-  // it through the logger would persist a live platform-admin credential into log
-  // storage. This is a one-shot operator-run CLI, not an application code path.
+  // it through the logger would persist a live super-admin credential into log storage.
+  // This is a one-shot operator-run CLI, not an application code path.
   process.stdout.write(
     [
       '',
-      'Platform administrator created.',
+      'Super administrator created.',
       '',
       `  email:    ${result.email}`,
       `  user id:  ${result.id}`,
@@ -140,7 +148,7 @@ async function main(): Promise<void> {
 
   try {
     report(
-      await bootstrapPlatformAdmin(createPrismaStore(prisma), {
+      await bootstrapSuperAdmin(createPrismaStore(prisma), {
         email: env.BOOTSTRAP_ADMIN_EMAIL,
         displayName: env.BOOTSTRAP_ADMIN_NAME,
       }),

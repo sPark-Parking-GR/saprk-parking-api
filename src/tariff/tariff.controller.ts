@@ -14,7 +14,7 @@ import {
   type TariffDraftDto,
 } from './dto/tariff.dto'
 
-@Roles('operator_admin', 'platform_admin')
+@Roles('operator_admin', 'platform_admin', 'super_admin')
 @Controller('tariff-plans')
 export class TariffController {
   constructor(private readonly tariff: TariffService) {}

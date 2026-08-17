@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common'
 import { Throttle } from '@nestjs/throttler'
 import type { AuthUser } from '@spark/types'
+import { isPlatformRole } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { Public } from '../auth/decorators/public.decorator'
@@ -55,7 +56,7 @@ export class FacilitiesController {
     })
   }
 
-  @Roles('operator_staff', 'operator_admin', 'platform_admin')
+  @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
   @Get()
   list(
     @Query(new ZodValidationPipe(listFacilitiesSchema)) query: ListFacilitiesDto,
@@ -64,7 +65,7 @@ export class FacilitiesController {
     return this.facilities.adminList(user, query)
   }
 
-  @Roles('operator_staff', 'operator_admin', 'platform_admin')
+  @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @Get('map')
   adminMap(
@@ -78,13 +79,13 @@ export class FacilitiesController {
     })
   }
 
-  @Roles('operator_staff', 'operator_admin', 'platform_admin')
+  @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
   @Get(':id/manage')
   manage(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.facilities.adminGetById(user, id)
   }
 
-  @Roles('operator_admin', 'platform_admin')
+  @Roles('operator_admin', 'platform_admin', 'super_admin')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Patch('bulk')
   bulk(
@@ -97,26 +98,26 @@ export class FacilitiesController {
   // `kind` decides whether a facility is sellable at all, so it is platform-only. Gated
   // here on the role and again in the service on the resolved operator scope, per the
   // both-layers rule — neither check is load-bearing alone.
-  @Roles('operator_admin', 'platform_admin')
+  @Roles('operator_admin', 'platform_admin', 'super_admin')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post()
   create(
     @Body(new ZodValidationPipe(createFacilitySchema)) body: CreateFacilityDto,
     @CurrentUser() user: AuthUser,
   ) {
-    if (body.kind !== undefined && user.role !== 'platform_admin') {
+    if (body.kind !== undefined && !isPlatformRole(user.role)) {
       throw new FacilityFieldForbiddenError('kind')
     }
     return this.facilities.create(user, body)
   }
 
-  @Roles('operator_staff', 'operator_admin', 'platform_admin')
+  @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
   @Get(':id/tariff-assignments')
   tariffAssignments(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.facilities.getTariffAssignments(user, id)
   }
 
-  @Roles('operator_admin', 'platform_admin')
+  @Roles('operator_admin', 'platform_admin', 'super_admin')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Patch(':id/tariff-plan')
   assignTariff(
@@ -130,7 +131,7 @@ export class FacilitiesController {
   // `kind` decides whether a facility is sellable at all, so it is platform-only. Gated
   // here on the role and again in the service on the resolved operator scope, per the
   // both-layers rule — neither check is load-bearing alone.
-  @Roles('operator_admin', 'platform_admin')
+  @Roles('operator_admin', 'platform_admin', 'super_admin')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Patch(':id')
   update(
@@ -138,13 +139,13 @@ export class FacilitiesController {
     @Body(new ZodValidationPipe(updateFacilitySchema)) body: UpdateFacilityDto,
     @CurrentUser() user: AuthUser,
   ) {
-    if (body.kind !== undefined && user.role !== 'platform_admin') {
+    if (body.kind !== undefined && !isPlatformRole(user.role)) {
       throw new FacilityFieldForbiddenError('kind')
     }
     return this.facilities.update(user, id, body)
   }
 
-  @Roles('operator_admin', 'platform_admin')
+  @Roles('operator_admin', 'platform_admin', 'super_admin')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Delete(':id')
   @HttpCode(204)

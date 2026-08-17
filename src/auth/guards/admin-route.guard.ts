@@ -1,10 +1,9 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common'
 import { ApplicationConfig } from '@nestjs/core'
-import type { UserRole } from '@spark/types'
+import { isPlatformRole } from '@spark/types'
 import type { AuthenticatedRequest } from '../../common/types/request'
 
 const ADMIN_SEGMENT = '/admin'
-const PLATFORM_ADMIN: UserRole = 'platform_admin'
 
 /**
  * Backstop for the `/admin/*` surface. RolesGuard and PermissionGuard are opt-in: a route
@@ -23,7 +22,11 @@ export class AdminRouteGuard implements CanActivate {
 
     if (!this.isAdminRoute(request.url)) return true
 
-    if (request.user?.role !== PLATFORM_ADMIN) {
+    // Admits the whole administrative tier, not one role: this is a floor that keeps
+    // undecorated admin routes off the operator surface, NOT the place that distinguishes
+    // platform_admin from super_admin. That distinction is per-route, and lives in the
+    // @RequirePermission decorators and the services behind them.
+    if (!request.user || !isPlatformRole(request.user.role)) {
       throw new ForbiddenException('Insufficient permissions')
     }
 

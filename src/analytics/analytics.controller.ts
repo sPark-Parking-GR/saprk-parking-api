@@ -14,7 +14,12 @@ import {
   type TopFacilitiesDto,
 } from './dto/analytics.dto'
 
-const REPORTING_ROLES: UserRole[] = ['operator_staff', 'operator_admin', 'platform_admin']
+const REPORTING_ROLES: UserRole[] = [
+  'operator_staff',
+  'operator_admin',
+  'platform_admin',
+  'super_admin',
+]
 
 // Aggregates over the whole payment history are the most expensive reads in the API and
 // a dashboard fires at most a handful per page load, so they get a quarter of the untuned

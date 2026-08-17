@@ -8,7 +8,7 @@ import {
   QuoteExpiredError,
   RefundFailedError,
 } from '../common/errors/domain.errors'
-import type { AuthUser } from '@spark/types'
+import { isPlatformRole, type AuthUser } from '@spark/types'
 import { Prisma } from '@prisma/client'
 import { OperatorScopeService, type OperatorScope } from '../common/authz/operator-scope.service'
 import { InventoryService } from '../inventory/inventory.service'
@@ -911,11 +911,7 @@ export class BookingService {
   }
 
   private isStaff(user: AuthUser): boolean {
-    return (
-      user.role === 'operator_staff' ||
-      user.role === 'operator_admin' ||
-      user.role === 'platform_admin'
-    )
+    return user.role === 'operator_staff' || user.role === 'operator_admin' || isPlatformRole(user.role)
   }
 
   private async transitionByOperator(

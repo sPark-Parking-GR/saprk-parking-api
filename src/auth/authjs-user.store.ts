@@ -9,6 +9,7 @@ const TO_PRISMA: Record<ContractRole, UserRole> = {
   operator_staff: UserRole.OPERATOR_STAFF,
   operator_admin: UserRole.OPERATOR_ADMIN,
   platform_admin: UserRole.PLATFORM_ADMIN,
+  super_admin: UserRole.SUPER_ADMIN,
 }
 
 const FROM_PRISMA: Record<UserRole, ContractRole> = {
@@ -16,6 +17,7 @@ const FROM_PRISMA: Record<UserRole, ContractRole> = {
   [UserRole.OPERATOR_STAFF]: 'operator_staff',
   [UserRole.OPERATOR_ADMIN]: 'operator_admin',
   [UserRole.PLATFORM_ADMIN]: 'platform_admin',
+  [UserRole.SUPER_ADMIN]: 'super_admin',
 }
 
 interface UserRow {

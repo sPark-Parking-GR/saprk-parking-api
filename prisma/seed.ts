@@ -168,10 +168,25 @@ async function seedUsers(athensOperatorId: string, thessOperatorId: string): Pro
     displayName: string
     membership?: { operatorId: string; role: OperatorMemberRole }
   }> = [
+    // TWO super admins, not one: every rule that protects a super admin needs a second one
+    // to act as approver, so a single-super-admin seed would make those paths unreachable
+    // in development and leave them exercised only in tests.
     {
       email: 'superadmin@spark.gr',
-      role: UserRole.PLATFORM_ADMIN,
+      role: UserRole.SUPER_ADMIN,
       displayName: 'Platform Super Admin',
+    },
+    {
+      email: 'superadmin.two@spark.gr',
+      role: UserRole.SUPER_ADMIN,
+      displayName: 'Second Super Admin',
+    },
+    // Holds every platform:* capability but no identity:* one — the account to sign in as
+    // when checking that the user-management surface is genuinely out of reach.
+    {
+      email: 'platformadmin@spark.gr',
+      role: UserRole.PLATFORM_ADMIN,
+      displayName: 'Platform Admin',
     },
     {
       email: 'admin.athens@spark.gr',

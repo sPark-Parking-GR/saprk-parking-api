@@ -40,6 +40,7 @@ const TO_PRISMA_ROLE: Record<ContractRole, PrismaUserRole> = {
   operator_staff: PrismaUserRole.OPERATOR_STAFF,
   operator_admin: PrismaUserRole.OPERATOR_ADMIN,
   platform_admin: PrismaUserRole.PLATFORM_ADMIN,
+  super_admin: PrismaUserRole.SUPER_ADMIN,
 }
 
 // Derived from the permission map rather than hardcoded to PLATFORM_ADMIN, so introducing
@@ -114,6 +115,20 @@ export class LifecycleApprovalService {
     })
 
     return toView(approval)
+  }
+
+  /**
+   * Reads an approval's target WITHOUT deciding it, so a caller's authority over that
+   * resource type can be checked before claim() mutates anything. Returns null for an
+   * unknown id rather than throwing: the caller defers to claim()/reject() so a missing
+   * approval keeps producing ApprovalNotFoundError from the one place that owns that error.
+   */
+  async resourceTypeOf(approvalId: string): Promise<string | null> {
+    const row = await this.prisma.pendingApproval.findUnique({
+      where: { id: approvalId },
+      select: { resourceType: true },
+    })
+    return row?.resourceType ?? null
   }
 
   async list(): Promise<ApprovalList> {

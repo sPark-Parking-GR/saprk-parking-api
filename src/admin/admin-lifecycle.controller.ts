@@ -1,5 +1,14 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common'
-import type { AuthUser } from '@spark/types'
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common'
+import { hasPlatformPermission, type AuthUser, type PlatformPermission } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { RequirePermission } from '../auth/decorators/require-permission.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
@@ -18,6 +27,29 @@ import { LifecycleAdminService } from '../lifecycle/lifecycle-admin.service'
 import type { LifecycleResourceType } from '../lifecycle/lifecycle.types'
 
 const resourceTypeParam = new ZodValidationPipe(resourceTypeSchema)
+
+/**
+ * The controller half of the platform_admin / super_admin boundary, mirroring
+ * LifecycleAdminService.assertMayTouchUsers per the both-layers authorization rule.
+ *
+ * @RequirePermission cannot express this: which permission a call needs depends on a PATH
+ * PARAMETER, not on the route. `user` is one of the four resource types this surface is
+ * generic over, so without this check the tenant permissions every platform admin holds
+ * would reach every account on the platform.
+ *
+ * The two approval routes are gated in the service only — an approval names its resource in
+ * the row rather than the URL, so there is nothing here to read.
+ */
+function assertMayTouchUsers(
+  user: AuthUser,
+  resourceType: LifecycleResourceType,
+  permission: PlatformPermission,
+): void {
+  if (resourceType !== 'user') return
+  if (!hasPlatformPermission(user.role, permission)) {
+    throw new ForbiddenException('Only super admins may act on user accounts')
+  }
+}
 
 /**
  * Three permission tiers on one resource, and the split is the point: reading the trash is
@@ -73,6 +105,7 @@ export class AdminLifecycleController {
     @Query(new ZodValidationPipe(impactQuerySchema)) query: ImpactQueryDto,
     @CurrentUser() user: AuthUser,
   ) {
+    assertMayTouchUsers(user, resourceType, 'identity:user.read')
     return this.admin.previewImpact(user, resourceType, id, query.action)
   }
 
@@ -85,6 +118,7 @@ export class AdminLifecycleController {
     @Body(new ZodValidationPipe(reasonRequiredSchema)) body: ReasonRequiredDto,
     @CurrentUser() user: AuthUser,
   ) {
+    assertMayTouchUsers(user, resourceType, 'identity:user.lifecycle')
     return this.admin.archive(user, resourceType, id, body.reason)
   }
 
@@ -97,6 +131,7 @@ export class AdminLifecycleController {
     @Body(new ZodValidationPipe(reasonOptionalSchema)) body: ReasonOptionalDto,
     @CurrentUser() user: AuthUser,
   ) {
+    assertMayTouchUsers(user, resourceType, 'identity:user.lifecycle')
     return this.admin.restore(user, resourceType, id, body.reason)
   }
 
@@ -109,6 +144,7 @@ export class AdminLifecycleController {
     @Body(new ZodValidationPipe(reasonRequiredSchema)) body: ReasonRequiredDto,
     @CurrentUser() user: AuthUser,
   ) {
+    assertMayTouchUsers(user, resourceType, 'identity:user.lifecycle')
     return this.admin.tombstone(user, resourceType, id, body.reason)
   }
 
@@ -123,6 +159,7 @@ export class AdminLifecycleController {
     @Body(new ZodValidationPipe(reasonRequiredSchema)) body: ReasonRequiredDto,
     @CurrentUser() user: AuthUser,
   ) {
+    assertMayTouchUsers(user, resourceType, 'identity:user.lifecycle')
     return this.admin.requestPurge(user, resourceType, id, body.reason)
   }
 }

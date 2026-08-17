@@ -80,11 +80,18 @@ describe('admin lifecycle over HTTP (e2e)', () => {
     resetThrottle(app)
   })
 
-  /** Three purge-capable admins, so the two-person rule has room to be exercised. */
+  /**
+   * Three purge-capable admins, so the two-person rule has room to be exercised.
+   *
+   * SUPER_ADMIN rather than PLATFORM_ADMIN because this suite drives the lifecycle over
+   * every resource type INCLUDING `user`, and only a super admin may act on an account.
+   * Super admins hold every platform:* capability too, so the other three resource types
+   * behave identically. The platform admin's refusal is asserted separately below.
+   */
   async function seedAdmins(): Promise<void> {
-    requester = await seedUser(raw, { role: UserRole.PLATFORM_ADMIN })
-    approver = await seedUser(raw, { role: UserRole.PLATFORM_ADMIN })
-    secondApprover = await seedUser(raw, { role: UserRole.PLATFORM_ADMIN })
+    requester = await seedUser(raw, { role: UserRole.SUPER_ADMIN })
+    approver = await seedUser(raw, { role: UserRole.SUPER_ADMIN })
+    secondApprover = await seedUser(raw, { role: UserRole.SUPER_ADMIN })
     requesterToken = bearerToken(requester)
     approverToken = bearerToken(approver)
     secondApproverToken = bearerToken(secondApprover)
@@ -192,6 +199,110 @@ describe('admin lifecycle over HTTP (e2e)', () => {
     )
   })
 
+  /**
+   * The platform_admin / super_admin boundary, end to end over HTTP.
+   *
+   * Platform admins deliberately keep every platform:* capability, so this surface —
+   * generic over its resource type, with `user` as one of the four — is the ONLY place the
+   * two tiers differ. Asserted per verb rather than by one representative, and paired with
+   * a proof that the other three resource types are untouched, because a fix that walled
+   * off accounts by breaking ordinary tenant administration would be a regression.
+   */
+  describe('the user-account boundary', () => {
+    let platformToken: string
+    let superToken: string
+    let targetId: string
+
+    beforeEach(async () => {
+      const [platformAdmin, superAdmin, target] = await Promise.all([
+        seedUser(raw, { role: UserRole.PLATFORM_ADMIN }),
+        seedUser(raw, { role: UserRole.SUPER_ADMIN }),
+        seedUser(raw, { role: UserRole.USER }),
+      ])
+      platformToken = bearerToken(platformAdmin)
+      superToken = bearerToken(superAdmin)
+      targetId = target.id
+    })
+
+    function accountEndpoints() {
+      return [
+        { name: 'GET impact', call: (t: string) => get(`/user/${targetId}/impact`, t) },
+        {
+          name: 'POST archive',
+          call: (t: string) => post(`/user/${targetId}/archive`, t, { reason: 'boundary test' }),
+        },
+        { name: 'POST restore', call: (t: string) => post(`/user/${targetId}/restore`, t, {}) },
+        {
+          name: 'POST tombstone',
+          call: (t: string) => post(`/user/${targetId}/tombstone`, t, { reason: 'boundary test' }),
+        },
+        {
+          name: 'POST purge',
+          call: (t: string) => post(`/user/${targetId}/purge`, t, { reason: 'boundary test' }),
+        },
+      ]
+    }
+
+    it.each(accountEndpoints().map((e, index) => [e.name, index] as const))(
+      '%s on an account is refused to a platform admin',
+      async (_name, index) => {
+        await accountEndpoints()[index]!.call(platformToken).expect(403)
+      },
+    )
+
+    it('leaves the account untouched after every refusal', async () => {
+      for (const endpoint of accountEndpoints()) {
+        await endpoint.call(platformToken).expect(403)
+      }
+
+      const target = await raw.user.findUniqueOrThrow({ where: { id: targetId } })
+      expect(target.lifecycleStatus).toBe(LifecycleStatus.ACTIVE)
+      expect(target.sessionsValidFrom).toBeNull()
+      expect(await raw.pendingApproval.count()).toBe(0)
+    })
+
+    it('admits a super admin to the same account routes', async () => {
+      await get(`/user/${targetId}/impact`, superToken).expect(200)
+      await post(`/user/${targetId}/archive`, superToken, { reason: 'boundary test' }).expect(204)
+
+      const archived = await raw.user.findUniqueOrThrow({ where: { id: targetId } })
+      expect(archived.lifecycleStatus).toBe(LifecycleStatus.ARCHIVED)
+    })
+
+    it('hides archived accounts from a platform admin browsing the trash', async () => {
+      await post(`/user/${targetId}/archive`, superToken, { reason: 'boundary test' }).expect(204)
+
+      const theirs = await get('/trash', platformToken).expect(200)
+      expect(theirs.body.items).toHaveLength(0)
+      expect(theirs.body.total).toBe(0)
+
+      // Refused outright when named, rather than silently empty.
+      await get('/trash?resourceType=user', platformToken).expect(403)
+
+      const ours = await get('/trash', superToken).expect(200)
+      expect(ours.body.items).toHaveLength(1)
+      expect(ours.body.items[0]).toMatchObject({ resourceType: 'user', id: targetId })
+    })
+
+    it('keeps tenant administration working for a platform admin', async () => {
+      const operator = await seedOperator(raw)
+      const facility = await seedFacility(raw, { operatorId: operator.id, ...CENTRE })
+      // A second, empty operator: archiving one that still owns an active facility is
+      // refused by the impact dry run, which is a tenant invariant unrelated to this gate.
+      const bare = await seedOperator(raw)
+
+      await get(`/facility/${facility.id}/impact`, platformToken).expect(200)
+      await post(`/facility/${facility.id}/archive`, platformToken, {
+        reason: 'still allowed',
+      }).expect(204)
+      await post(`/facility/${facility.id}/restore`, platformToken, {}).expect(204)
+      await post(`/operator/${bare.id}/archive`, platformToken, {
+        reason: 'still allowed',
+      }).expect(204)
+      await get('/approvals', platformToken).expect(200)
+    })
+  })
+
   describe('resourceType validation', () => {
     beforeEach(seedAdmins)
 
@@ -247,7 +358,7 @@ describe('admin lifecycle over HTTP (e2e)', () => {
         where: { action: 'facility.archived' },
       })
       expect(archiveAudit.actorId).toBe(requester.id)
-      expect(archiveAudit.actorRole).toBe('platform_admin')
+      expect(archiveAudit.actorRole).toBe('super_admin')
       expect(archiveAudit.entityType).toBe('Facility')
       expect(archiveAudit.entityId).toBe(facility.id)
       expect(archiveAudit.payload).toMatchObject({ reason: 'seasonal closure' })

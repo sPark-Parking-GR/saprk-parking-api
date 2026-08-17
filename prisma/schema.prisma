@@ -11,11 +11,16 @@ datasource db {
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
 
+// Ascending authority. SUPER_ADMIN differs from PLATFORM_ADMIN by the identity:* family
+// alone — it is the only role that may act on user accounts. Deliberately uncapped; what
+// constrains the tier is who may grant it (an existing super admin, or the bootstrap CLI
+// for the first one) and the two-person rule on acting against one, not a headcount.
 enum UserRole {
   USER
   OPERATOR_STAFF
   OPERATOR_ADMIN
   PLATFORM_ADMIN
+  SUPER_ADMIN
 }
 
 enum VehicleType {

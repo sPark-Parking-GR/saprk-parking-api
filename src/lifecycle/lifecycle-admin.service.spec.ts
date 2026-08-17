@@ -16,6 +16,13 @@ const PLATFORM: AuthUser = {
   emailVerified: true,
 }
 
+const SUPER: AuthUser = {
+  id: 'super-1',
+  email: 'owner@spark.invalid',
+  role: 'super_admin',
+  emailVerified: true,
+}
+
 const OPERATOR: AuthUser = {
   id: 'op-admin',
   email: 'op@spark.invalid',
@@ -66,9 +73,21 @@ function makeHarness(report: ImpactReport = CLEAN) {
     list: jest.fn().mockResolvedValue({ items: [], total: 0 }),
     claim: jest.fn(),
     reject: jest.fn().mockResolvedValue({ id: 'ap-1' }),
+    resourceTypeOf: jest.fn().mockResolvedValue('facility'),
   }
   const purge = { purgeOne: jest.fn().mockResolvedValue(undefined) }
-  const prisma = {}
+  // Only listTrash touches Prisma here, and it reads one delegate per resource type — which
+  // is exactly what lets a test assert that the `user` delegate was never queried at all.
+  const delegate = () => ({
+    findMany: jest.fn().mockResolvedValue([]),
+    count: jest.fn().mockResolvedValue(0),
+  })
+  const prisma = {
+    facility: delegate(),
+    tariffPlan: delegate(),
+    parkingOperator: delegate(),
+    user: delegate(),
+  }
 
   const service = new LifecycleAdminService(
     prisma as unknown as PrismaService,
@@ -78,7 +97,7 @@ function makeHarness(report: ImpactReport = CLEAN) {
     purge as unknown as LifecyclePurgeService,
   )
 
-  return { service, lifecycle, impact, approvals, purge }
+  return { service, lifecycle, impact, approvals, purge, prisma }
 }
 
 describe('LifecycleAdminService — service-layer authorization', () => {
@@ -107,6 +126,123 @@ describe('LifecycleAdminService — service-layer authorization', () => {
     expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
     expect(approvals.request).not.toHaveBeenCalled()
   })
+})
+
+/**
+ * The platform_admin / super_admin boundary.
+ *
+ * This surface is generic over its resource type and `user` is one of the four, so without
+ * these checks every platform admin would reach every account on the platform through it.
+ * Since platform admins deliberately keep every platform:* capability, this is the ONLY
+ * thing separating the two tiers — hence a case per verb rather than one representative.
+ */
+describe('LifecycleAdminService — the user-account boundary', () => {
+  it.each([
+    ['archive', (s: LifecycleAdminService, a: AuthUser) => s.archive(a, 'user', 'u1', 'why')],
+    ['restore', (s: LifecycleAdminService, a: AuthUser) => s.restore(a, 'user', 'u1')],
+    ['tombstone', (s: LifecycleAdminService, a: AuthUser) => s.tombstone(a, 'user', 'u1', 'why')],
+    ['purge', (s: LifecycleAdminService, a: AuthUser) => s.requestPurge(a, 'user', 'u1', 'why')],
+    [
+      'impact preview',
+      (s: LifecycleAdminService, a: AuthUser) => s.previewImpact(a, 'user', 'u1', 'archive'),
+    ],
+  ] as const)('refuses %s of a user account to a platform admin', async (_name, call) => {
+    const { service, lifecycle, approvals } = makeHarness()
+
+    await expect(call(service, PLATFORM)).rejects.toBeInstanceOf(ForbiddenException)
+
+    expect(lifecycle.archiveUser).not.toHaveBeenCalled()
+    expect(lifecycle.restoreUser).not.toHaveBeenCalled()
+    expect(lifecycle.tombstoneUser).not.toHaveBeenCalled()
+    expect(approvals.request).not.toHaveBeenCalled()
+  })
+
+  it.each(['facility', 'tariff-plan', 'operator'] as const)(
+    'leaves %s administration untouched for a platform admin',
+    async (type) => {
+      const { service } = makeHarness()
+
+      await expect(service.archive(PLATFORM, type, 'x1', 'why')).resolves.toBeUndefined()
+      await expect(service.restore(PLATFORM, type, 'x1')).resolves.toBeUndefined()
+      await expect(service.tombstone(PLATFORM, type, 'x1', 'why')).resolves.toBeUndefined()
+    },
+  )
+
+  it('lets a super admin run the full lifecycle on an account', async () => {
+    const { service, lifecycle } = makeHarness()
+
+    await service.archive(SUPER, 'user', 'u1', 'abuse report')
+    await service.restore(SUPER, 'user', 'u1')
+    await service.tombstone(SUPER, 'user', 'u1', 'abuse report')
+
+    expect(lifecycle.archiveUser).toHaveBeenCalled()
+    expect(lifecycle.restoreUser).toHaveBeenCalled()
+    expect(lifecycle.tombstoneUser).toHaveBeenCalled()
+  })
+
+  it('withholds deleted accounts from a platform admin browsing the trash', async () => {
+    const { service, prisma } = makeHarness()
+
+    await service.listTrash(PLATFORM, { skip: 0, take: 20 })
+
+    expect(prisma.user.findMany).not.toHaveBeenCalled()
+    expect(prisma.user.count).not.toHaveBeenCalled()
+    expect(prisma.facility.findMany).toHaveBeenCalled()
+  })
+
+  it('refuses a platform admin who asks for deleted accounts by name', async () => {
+    const { service, prisma } = makeHarness()
+
+    // A 403 rather than an empty page: silently returning nothing would read as
+    // "no deleted accounts exist", which is a different and untrue claim.
+    await expect(
+      service.listTrash(PLATFORM, { skip: 0, take: 20, resourceType: 'user' }),
+    ).rejects.toBeInstanceOf(ForbiddenException)
+
+    expect(prisma.user.findMany).not.toHaveBeenCalled()
+  })
+
+  it('shows a super admin the deleted accounts', async () => {
+    const { service, prisma } = makeHarness()
+
+    await service.listTrash(SUPER, { skip: 0, take: 20 })
+
+    expect(prisma.user.findMany).toHaveBeenCalled()
+  })
+
+  it('withholds pending account purges from a platform admin', async () => {
+    const { service, approvals } = makeHarness()
+    approvals.list.mockResolvedValue({
+      items: [
+        { id: 'ap-1', resourceType: 'user', resourceId: 'u1' },
+        { id: 'ap-2', resourceType: 'facility', resourceId: 'f1' },
+      ],
+      total: 2,
+    })
+
+    const seen = await service.listApprovals(PLATFORM)
+
+    expect(seen.items.map((a) => a.id)).toEqual(['ap-2'])
+    expect(seen.total).toBe(1)
+  })
+
+  it.each([
+    ['approve', (s: LifecycleAdminService) => s.approve(PLATFORM, 'ap-1')],
+    ['reject', (s: LifecycleAdminService) => s.reject(PLATFORM, 'ap-1', 'no')],
+  ] as const)(
+    'refuses to let a platform admin %s an account purge decided by its row, not its URL',
+    async (_name, call) => {
+      const { service, approvals, purge } = makeHarness()
+      approvals.resourceTypeOf.mockResolvedValue('user')
+
+      await expect(call(service)).rejects.toBeInstanceOf(ForbiddenException)
+
+      // Refused BEFORE the approval is consumed, so the request survives for a super admin.
+      expect(approvals.claim).not.toHaveBeenCalled()
+      expect(approvals.reject).not.toHaveBeenCalled()
+      expect(purge.purgeOne).not.toHaveBeenCalled()
+    },
+  )
 })
 
 describe('LifecycleAdminService — blockers versus warnings', () => {
@@ -149,28 +285,33 @@ describe('LifecycleAdminService — blockers versus warnings', () => {
 })
 
 describe('LifecycleAdminService — dispatch', () => {
+  // The actor differs by row on purpose: only super_admin may reach the `user` resource,
+  // which is the whole platform_admin / super_admin boundary.
   it.each([
-    ['facility', 'archiveFacility', 'tombstoneFacility'],
-    ['tariff-plan', 'archiveTariffPlan', 'tombstoneTariffPlan'],
-    ['operator', 'archiveOperator', 'tombstoneOperator'],
-    ['user', 'archiveUser', 'tombstoneUser'],
-  ] as const)('routes %s to its own lifecycle methods', async (type, archiveFn, tombstoneFn) => {
-    const { service, lifecycle } = makeHarness()
+    ['facility', 'archiveFacility', 'tombstoneFacility', PLATFORM],
+    ['tariff-plan', 'archiveTariffPlan', 'tombstoneTariffPlan', PLATFORM],
+    ['operator', 'archiveOperator', 'tombstoneOperator', PLATFORM],
+    ['user', 'archiveUser', 'tombstoneUser', SUPER],
+  ] as const)(
+    'routes %s to its own lifecycle methods',
+    async (type, archiveFn, tombstoneFn, actor) => {
+      const { service, lifecycle } = makeHarness()
 
-    await service.archive(PLATFORM, type, 'x1', 'because')
-    await service.tombstone(PLATFORM, type, 'x1', 'because')
+      await service.archive(actor, type, 'x1', 'because')
+      await service.tombstone(actor, type, 'x1', 'because')
 
-    expect(lifecycle[archiveFn]).toHaveBeenCalledWith(
-      { id: PLATFORM.id, role: PLATFORM.role },
-      'x1',
-      'because',
-    )
-    expect(lifecycle[tombstoneFn]).toHaveBeenCalledWith(
-      { id: PLATFORM.id, role: PLATFORM.role },
-      'x1',
-      'because',
-    )
-  })
+      expect(lifecycle[archiveFn]).toHaveBeenCalledWith(
+        { id: actor.id, role: actor.role },
+        'x1',
+        'because',
+      )
+      expect(lifecycle[tombstoneFn]).toHaveBeenCalledWith(
+        { id: actor.id, role: actor.role },
+        'x1',
+        'because',
+      )
+    },
+  )
 
   it('purge requests an approval instead of destroying anything', async () => {
     const { service, approvals, purge } = makeHarness()
@@ -200,6 +341,8 @@ describe('LifecycleAdminService — dispatch', () => {
       createdAt: new Date(),
       updatedAt: new Date(),
     })
+
+    approvals.resourceTypeOf.mockResolvedValue('tariff-plan')
 
     const outcome = await service.approve(PLATFORM, 'ap-1')
 

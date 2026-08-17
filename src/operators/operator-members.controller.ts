@@ -7,7 +7,7 @@ import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { changeMemberRoleSchema, type ChangeMemberRoleDto } from './dto/operator-members.dto'
 import { OperatorMembersService } from './operator-members.service'
 
-@Roles('operator_admin', 'platform_admin')
+@Roles('operator_admin', 'platform_admin', 'super_admin')
 @Controller('operators/:operatorId/members')
 export class OperatorMembersController {
   constructor(private readonly members: OperatorMembersService) {}

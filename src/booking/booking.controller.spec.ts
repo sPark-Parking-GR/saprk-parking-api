@@ -69,6 +69,7 @@ describe('BookingController authentication boundary', () => {
         'operator_staff',
         'operator_admin',
         'platform_admin',
+        'super_admin',
       ])
     },
   )

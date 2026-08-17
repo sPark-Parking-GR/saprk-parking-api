@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common'
-import type { AuthUser } from '@spark/types'
+import { isPlatformRole, type AuthUser } from '@spark/types'
 import { PrismaService } from '../../prisma/prisma.service'
 import {
   DomainError,
@@ -71,7 +71,10 @@ export class OperatorScopeService {
   constructor(private readonly prisma: PrismaService) {}
 
   async resolve(user: AuthUser): Promise<OperatorScope> {
-    if (user.role === 'platform_admin') return { kind: 'platform' }
+    // The whole administrative tier is unscoped. A super admin holds no OperatorMembership,
+    // so falling through would raise OperatorContextRequiredError and refuse them on every
+    // operator-scoped route in the API.
+    if (isPlatformRole(user.role)) return { kind: 'platform' }
 
     if (user.role === 'operator_admin' || user.role === 'operator_staff') {
       // A user may belong to several operators; every one of them is in scope, so a

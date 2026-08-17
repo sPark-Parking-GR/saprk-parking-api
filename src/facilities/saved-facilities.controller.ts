@@ -10,7 +10,13 @@ import { SavedFacilitiesService } from './saved-facilities.service'
 // A bookmark hangs off an account, so every account role may hold one; there is nothing
 // operator-scoped about it. Anonymous callers are excluded — there would be nowhere to
 // store the bookmark.
-const ACCOUNT_ROLES: UserRole[] = ['user', 'operator_staff', 'operator_admin', 'platform_admin']
+const ACCOUNT_ROLES: UserRole[] = [
+  'user',
+  'operator_staff',
+  'operator_admin',
+  'platform_admin',
+  'super_admin',
+]
 
 @Controller('saved-facilities')
 export class SavedFacilitiesController {

@@ -2,7 +2,7 @@ import { UserRole } from '@prisma/client'
 import { verifyPassword } from '@spark/auth'
 import {
   BootstrapAdminRefusedError,
-  bootstrapPlatformAdmin,
+  bootstrapSuperAdmin,
   generatePassword,
   parseBootstrapEnv,
   type BootstrapAdminStore,
@@ -15,7 +15,7 @@ function makeStore(
   const created: BootstrapAdminUserInput[] = []
   return {
     created,
-    countPlatformAdmins: jest.fn().mockResolvedValue(0),
+    countSuperAdmins: jest.fn().mockResolvedValue(0),
     findUserByEmail: jest.fn().mockResolvedValue(null),
     createUser: jest.fn(async (input: BootstrapAdminUserInput) => {
       created.push(input)
@@ -25,11 +25,11 @@ function makeStore(
   }
 }
 
-describe('bootstrapPlatformAdmin', () => {
-  it('creates a verified PLATFORM_ADMIN when no platform admin exists', async () => {
+describe('bootstrapSuperAdmin', () => {
+  it('creates a verified SUPER_ADMIN when no super admin exists', async () => {
     const store = makeStore()
 
-    const result = await bootstrapPlatformAdmin(store, {
+    const result = await bootstrapSuperAdmin(store, {
       email: 'founder@spark.gr',
       displayName: 'Founder',
     })
@@ -40,7 +40,7 @@ describe('bootstrapPlatformAdmin', () => {
     expect(store.created[0]).toMatchObject({
       email: 'founder@spark.gr',
       displayName: 'Founder',
-      role: UserRole.PLATFORM_ADMIN,
+      role: UserRole.SUPER_ADMIN,
       emailVerified: true,
     })
   })
@@ -48,7 +48,7 @@ describe('bootstrapPlatformAdmin', () => {
   it('stores a null displayName when none is supplied', async () => {
     const store = makeStore()
 
-    await bootstrapPlatformAdmin(store, { email: 'founder@spark.gr' })
+    await bootstrapSuperAdmin(store, { email: 'founder@spark.gr' })
 
     expect(store.created[0]?.displayName).toBeNull()
   })
@@ -60,7 +60,7 @@ describe('bootstrapPlatformAdmin', () => {
   it('hashes the generated password with the shared @spark/auth hasher', async () => {
     const store = makeStore()
 
-    const result = await bootstrapPlatformAdmin(store, { email: 'founder@spark.gr' })
+    const result = await bootstrapSuperAdmin(store, { email: 'founder@spark.gr' })
     const stored = store.created[0]?.passwordHash ?? ''
 
     expect(stored).not.toContain(result.password)
@@ -69,13 +69,13 @@ describe('bootstrapPlatformAdmin', () => {
     await expect(verifyPassword('wrong', stored)).resolves.toBe(false)
   }, 30_000)
 
-  it('refuses and creates nothing when a platform admin already exists', async () => {
-    const store = makeStore({ countPlatformAdmins: jest.fn().mockResolvedValue(1) })
+  it('refuses and creates nothing when a super admin already exists', async () => {
+    const store = makeStore({ countSuperAdmins: jest.fn().mockResolvedValue(1) })
 
     await expect(
-      bootstrapPlatformAdmin(store, { email: 'second@spark.gr' }),
+      bootstrapSuperAdmin(store, { email: 'second@spark.gr' }),
     ).rejects.toBeInstanceOf(BootstrapAdminRefusedError)
-    await expect(bootstrapPlatformAdmin(store, { email: 'second@spark.gr' })).rejects.toThrow(
+    await expect(bootstrapSuperAdmin(store, { email: 'second@spark.gr' })).rejects.toThrow(
       /already exist/i,
     )
     expect(store.createUser).not.toHaveBeenCalled()
@@ -87,16 +87,16 @@ describe('bootstrapPlatformAdmin', () => {
       findUserByEmail: jest.fn().mockResolvedValue({ id: 'user_9', role: UserRole.OPERATOR_ADMIN }),
     })
 
-    await expect(bootstrapPlatformAdmin(store, { email: 'staff@spark.gr' })).rejects.toThrow(
+    await expect(bootstrapSuperAdmin(store, { email: 'staff@spark.gr' })).rejects.toThrow(
       /privilege escalation/i,
     )
     expect(store.createUser).not.toHaveBeenCalled()
   })
 
-  it('checks for existing platform admins before it looks at the target email', async () => {
+  it('checks for existing super admins before it looks at the target email', async () => {
     const order: string[] = []
     const store = makeStore({
-      countPlatformAdmins: jest.fn(async () => {
+      countSuperAdmins: jest.fn(async () => {
         order.push('count')
         return 0
       }),
@@ -106,7 +106,7 @@ describe('bootstrapPlatformAdmin', () => {
       }),
     })
 
-    await bootstrapPlatformAdmin(store, { email: 'founder@spark.gr' })
+    await bootstrapSuperAdmin(store, { email: 'founder@spark.gr' })
 
     expect(order).toEqual(['count', 'find'])
   })

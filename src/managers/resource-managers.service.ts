@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common'
 import { LifecycleStatus, UserRole, type OperatorMemberRole, type Prisma } from '@prisma/client'
-import type { AuthUser } from '@spark/types'
+import { isPlatformRole, type AuthUser } from '@spark/types'
 import { OperatorScopeService } from '../common/authz/operator-scope.service'
 import { RequestContext } from '../common/context/request-context'
 import {
@@ -184,7 +184,7 @@ export class ResourceManagersService {
    * it is why this endpoint is on the resource rather than under /admin.
    */
   private async assertMayAdminister(actor: AuthUser, operatorId: string): Promise<string> {
-    if (actor.role !== 'operator_admin' && actor.role !== 'platform_admin') {
+    if (actor.role !== 'operator_admin' && !isPlatformRole(actor.role)) {
       throw new ForbiddenException('Only operator admins may manage resource assignments')
     }
     return this.access.resolveAdministrable(actor, operatorId)

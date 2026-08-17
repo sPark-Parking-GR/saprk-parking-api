@@ -59,7 +59,17 @@ export class LifecycleAdminService {
     this.assertPermission(actor, 'platform:tenant.read', 'view the lifecycle trash')
 
     const statuses = query.status ? [query.status] : NON_ACTIVE_STATUSES
-    const types = query.resourceType ? [query.resourceType] : [...LIFECYCLE_RESOURCE_TYPES]
+    const requested = query.resourceType ? [query.resourceType] : [...LIFECYCLE_RESOURCE_TYPES]
+
+    // Asking for users outright is refused; asking for everything simply excludes them.
+    // A 403 on the explicit request is the honest answer — silently returning an empty
+    // page would read as "no deleted accounts exist", which is a different claim.
+    if (query.resourceType === 'user') {
+      this.assertMayTouchUsers(actor, 'user', 'identity:user.read', 'view user accounts')
+    }
+    const types = this.mayReadUsers(actor)
+      ? requested
+      : requested.filter((type) => type !== 'user')
 
     // Merge-then-slice across the requested types. Each type contributes at most
     // skip + take rows, which is the smallest prefix that can possibly hold the page once
@@ -95,6 +105,7 @@ export class LifecycleAdminService {
     action: DestructiveAction,
   ): Promise<ImpactReport> {
     this.assertPermission(actor, 'platform:tenant.read', 'preview lifecycle impact')
+    this.assertMayTouchUsers(actor, resourceType, 'identity:user.read', 'read user accounts')
     return this.impact.preview(resourceType, id, action)
   }
 
@@ -105,6 +116,7 @@ export class LifecycleAdminService {
     reason: string,
   ): Promise<void> {
     this.assertPermission(actor, 'platform:tenant.write', 'archive resources')
+    this.assertMayTouchUsers(actor, resourceType, 'identity:user.lifecycle', 'archive user accounts')
     await this.assertUnblocked(resourceType, id, 'archive')
 
     const who = toLifecycleActor(actor)
@@ -134,6 +146,7 @@ export class LifecycleAdminService {
     reason?: string,
   ): Promise<void> {
     this.assertPermission(actor, 'platform:tenant.write', 'restore resources')
+    this.assertMayTouchUsers(actor, resourceType, 'identity:user.lifecycle', 'restore user accounts')
 
     const who = toLifecycleActor(actor)
     switch (resourceType) {
@@ -155,6 +168,12 @@ export class LifecycleAdminService {
     reason: string,
   ): Promise<void> {
     this.assertPermission(actor, 'platform:tenant.purge', 'tombstone resources')
+    this.assertMayTouchUsers(
+      actor,
+      resourceType,
+      'identity:user.lifecycle',
+      'tombstone user accounts',
+    )
     await this.assertUnblocked(resourceType, id, 'tombstone')
 
     const who = toLifecycleActor(actor)
@@ -182,17 +201,26 @@ export class LifecycleAdminService {
     reason: string,
   ): Promise<ApprovalView> {
     this.assertPermission(actor, 'platform:tenant.purge', 'purge resources')
+    this.assertMayTouchUsers(actor, resourceType, 'identity:user.lifecycle', 'purge user accounts')
     await this.assertUnblocked(resourceType, id, 'purge')
     return this.approvals.request(actor, resourceType, id, reason)
   }
 
   async listApprovals(actor: AuthUser): Promise<ApprovalList> {
     this.assertPermission(actor, 'platform:tenant.purge', 'view purge approvals')
-    return this.approvals.list()
+
+    const approvals = await this.approvals.list()
+    if (this.mayReadUsers(actor)) return approvals
+
+    // Withheld rather than merely undecidable: the existence of a pending purge names an
+    // account id, which is exactly what identity:user.read governs.
+    const items = approvals.items.filter((approval) => approval.resourceType !== 'user')
+    return { items, total: items.length }
   }
 
   async approve(actor: AuthUser, approvalId: string): Promise<PurgeApprovalOutcome> {
     this.assertPermission(actor, 'platform:tenant.purge', 'approve a purge')
+    await this.assertMayDecide(actor, approvalId, 'approve the purge of a user account')
 
     const approval = await this.approvals.claim(actor, approvalId)
     const resourceType = approval.resourceType as LifecycleResourceType
@@ -226,6 +254,7 @@ export class LifecycleAdminService {
 
   async reject(actor: AuthUser, approvalId: string, reason: string): Promise<ApprovalView> {
     this.assertPermission(actor, 'platform:tenant.purge', 'reject a purge')
+    await this.assertMayDecide(actor, approvalId, 'reject the purge of a user account')
     return this.approvals.reject(actor, approvalId, reason)
   }
 
@@ -251,6 +280,56 @@ export class LifecycleAdminService {
     if (!hasPlatformPermission(actor.role, permission)) {
       throw new ForbiddenException(`Only platform admins may ${action}`)
     }
+  }
+
+  /**
+   * THE boundary between platform_admin and super_admin.
+   *
+   * This surface is generic over its resource type and `user` is one of the four, so the
+   * tenant permissions alone would let any platform admin reach every account on the
+   * platform through it. Acting on a user therefore costs an identity permission ON TOP OF
+   * whichever tenant tier the action already demanded — platform admins keep every
+   * `platform:*` capability, so this check is the only thing separating the two tiers.
+   *
+   * A no-op for the other three resource types, which is what keeps operator, facility and
+   * tariff-plan administration entirely unchanged for platform admins.
+   */
+  private assertMayTouchUsers(
+    actor: AuthUser,
+    resourceType: LifecycleResourceType,
+    permission: PlatformPermission,
+    action: string,
+  ): void {
+    if (resourceType !== 'user') return
+    if (!hasPlatformPermission(actor.role, permission)) {
+      throw new ForbiddenException(`Only super admins may ${action}`)
+    }
+  }
+
+  private mayReadUsers(actor: AuthUser): boolean {
+    return hasPlatformPermission(actor.role, 'identity:user.read')
+  }
+
+  /**
+   * Approvals name their resource in the row, not the URL, so authority over it can only be
+   * checked after a read. Deliberately does NOT raise on an unknown id: claim() and
+   * reject() own ApprovalNotFoundError, and short-circuiting here would fork that error
+   * into two places and change what an unknown id looks like to a caller.
+   */
+  private async assertMayDecide(
+    actor: AuthUser,
+    approvalId: string,
+    action: string,
+  ): Promise<void> {
+    const resourceType = await this.approvals.resourceTypeOf(approvalId)
+    if (resourceType === null) return
+
+    this.assertMayTouchUsers(
+      actor,
+      resourceType as LifecycleResourceType,
+      'identity:user.lifecycle',
+      action,
+    )
   }
 
   // Every read here names lifecycleStatus explicitly, which is the extension's documented
