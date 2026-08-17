@@ -1,4 +1,3 @@
-import { createHash, randomBytes } from 'crypto'
 import { ForbiddenException, Inject, Injectable, Logger } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import type { IAuthProvider } from '@spark/auth'
@@ -24,6 +23,7 @@ import { OperatorAccessService } from '../operators/operator-access.service'
 import { OperatorNotFoundError } from '../operators/operators.types'
 import { PrismaService } from '../prisma/prisma.service'
 import { EntitlementService } from '../subscriptions/entitlement.service'
+import { InviteTokenService } from './invite-token.service'
 import type { CreateInviteDto, CreateMemberInviteDto } from './dto/invite.dto'
 import {
   InviteAlreadyAcceptedError,
@@ -56,6 +56,7 @@ export class InviteService {
     private readonly config: ConfigService,
     private readonly access: OperatorAccessService,
     private readonly entitlements: EntitlementService,
+    private readonly tokens: InviteTokenService,
     @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: IAuthProvider,
   ) {}
 
@@ -450,21 +451,16 @@ export class InviteService {
   }
 
   private mintToken(): { rawToken: string; tokenHash: string; expiresAt: Date } {
-    const rawToken = randomBytes(32).toString('hex')
-    return {
-      rawToken,
-      tokenHash: this.hashToken(rawToken),
-      expiresAt: new Date(Date.now() + INVITE_TTL_MS),
-    }
+    return this.tokens.mint(INVITE_TTL_MS)
   }
 
   // Raw token leaves the system only through the email channel — never in a response.
   private acceptUrl(rawToken: string): string {
-    return `${this.config.getOrThrow<string>('WEB_APP_URL')}/invite/accept/${rawToken}`
+    return this.tokens.acceptUrl('/invite/accept', rawToken)
   }
 
   private hashToken(token: string): string {
-    return createHash('sha256').update(token).digest('hex')
+    return this.tokens.hash(token)
   }
 
   // `payload` must never carry the raw token or the accept password — only ids. Callers

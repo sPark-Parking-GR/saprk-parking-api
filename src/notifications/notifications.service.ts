@@ -85,6 +85,26 @@ export class NotificationsService {
     )
   }
 
+  // Carries who invited them, not just that someone did: a link granting platform
+  // administration is exactly the kind a recipient should be able to sanity-check against a
+  // name they recognise before redeeming it.
+  async sendPlatformAdminInvite(data: {
+    to: string
+    acceptUrl: string
+    invitedByName: string
+  }): Promise<boolean> {
+    return this.safeSend(
+      () =>
+        this.emailContext.send({
+          to: data.to,
+          subject: 'You have been invited to administer sPark',
+          template: 'platform-admin-invite',
+          data: { ...data },
+        }),
+      'platform admin invite',
+    )
+  }
+
   // Kept on safeSend like every other channel: /auth/forgot-password answers 204 whether or
   // not the address exists, so surfacing a delivery failure here would reintroduce exactly
   // the enumeration signal that endpoint is built to deny. A bounced reset is recoverable by

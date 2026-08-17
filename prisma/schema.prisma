@@ -222,6 +222,7 @@ model User {
   reviews             Review[]
   operatorMemberships OperatorMembership[]
   invitesSent         OperatorInvite[]
+  adminInvitesSent    PlatformAdminInvite[]
   passwordResetTokens PasswordResetToken[]
   savedFacilities     SavedFacility[]
   managedFacilities   FacilityManager[]
@@ -919,6 +920,36 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([actorId])
   @@index([createdAt])
+}
+
+// A platform administrator recruits a peer. Deliberately its own table rather than a third
+// OperatorInviteKind: operatorId, businessName and OperatorMemberRole are all meaningless
+// here, and reusing OperatorInvite would ship three permanently-null columns plus a nullable
+// operator relation that every read would have to reason about.
+//
+// Grants PLATFORM_ADMIN and only ever that. SUPER_ADMIN is unreachable by invite — it comes
+// from the bootstrap CLI or promotion by an existing super admin, both of which require an
+// authenticated actor who already holds the tier.
+//
+// tokenHash stores sha256 only; the raw token exists solely in the email, exactly as
+// OperatorInvite does it. invitedById is a real FK because unlike the lifecycle audit
+// columns this row is operational, not a historical fact that must outlive its actor.
+model PlatformAdminInvite {
+  id          String       @id @default(cuid())
+  email       String
+  displayName String?
+  tokenHash   String       @unique
+  status      InviteStatus @default(PENDING)
+  invitedById String
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  invitedBy User @relation(fields: [invitedById], references: [id])
+
+  @@index([email])
+  @@index([status])
 }
 
 // ─── Two-person rule ──────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ import type { PrismaService } from '../prisma/prisma.service'
 import type { EntitlementService } from '../subscriptions/entitlement.service'
 import type { NotificationsService } from '../notifications/notifications.service'
 import { InviteService } from './invite.service'
+import { InviteTokenService } from './invite-token.service'
 import {
   InviteAlreadyAcceptedError,
   InviteExpiredError,
@@ -164,6 +165,7 @@ describe('InviteService', () => {
       config as unknown as ConfigService,
       new OperatorAccessService(prismaService, new OperatorScopeService(prismaService)),
       entitlements as unknown as EntitlementService,
+      new InviteTokenService(config as unknown as ConfigService),
       firebase as unknown as IAuthProvider,
     )
   })

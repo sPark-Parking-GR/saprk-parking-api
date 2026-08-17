@@ -63,6 +63,14 @@ import {
   InviteNotRevocableError,
 } from '../../invite/invite.types'
 import {
+  AdminInviteAlreadyAcceptedError,
+  AdminInviteEmailTakenError,
+  AdminInviteExpiredError,
+  AdminInviteNotFoundError,
+  AdminInviteNotResendableError,
+  AdminInviteNotRevocableError,
+} from '../../identity/admin-invite.types'
+import {
   AnonymisedAccountError,
   IdentityUserNotFoundError,
   LastSuperAdminError,
@@ -176,6 +184,7 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof OperatorNotFoundError ||
       exception instanceof OperatorMemberNotFoundError ||
       exception instanceof IdentityUserNotFoundError ||
+      exception instanceof AdminInviteNotFoundError ||
       exception instanceof TicketNotFoundError ||
       exception instanceof LifecycleResourceNotFoundError ||
       exception instanceof ApprovalNotFoundError ||
@@ -192,7 +201,11 @@ export class DomainExceptionFilter implements ExceptionFilter {
     ) {
       return HttpStatus.FORBIDDEN
     }
-    if (exception instanceof InviteExpiredError || exception instanceof ApprovalExpiredError) {
+    if (
+      exception instanceof InviteExpiredError ||
+      exception instanceof AdminInviteExpiredError ||
+      exception instanceof ApprovalExpiredError
+    ) {
       return HttpStatus.GONE
     }
     if (
@@ -217,6 +230,10 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof LastOperatorAdminError ||
       exception instanceof SelfRoleChangeError ||
       exception instanceof SelfRoleAssignmentError ||
+      exception instanceof AdminInviteAlreadyAcceptedError ||
+      exception instanceof AdminInviteNotResendableError ||
+      exception instanceof AdminInviteNotRevocableError ||
+      exception instanceof AdminInviteEmailTakenError ||
       exception instanceof AnonymisedAccountError ||
       exception instanceof SuperAdminProtectedError ||
       exception instanceof LastSuperAdminError ||
