@@ -1,6 +1,8 @@
 import { ForbiddenException } from '@nestjs/common'
+import { UserRole } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
 import { LifecycleActionBlockedError } from '../common/errors/domain.errors'
+import { SuperAdminProtectedError } from '../identity/identity.types'
 import type { PrismaService } from '../prisma/prisma.service'
 import { LifecycleAdminService } from './lifecycle-admin.service'
 import type { LifecycleApprovalService } from './lifecycle-approval.service'
@@ -86,7 +88,9 @@ function makeHarness(report: ImpactReport = CLEAN) {
     facility: delegate(),
     tariffPlan: delegate(),
     parkingOperator: delegate(),
-    user: delegate(),
+    // findFirst backs the super-admin protection check, which reads the target's role
+    // before any destructive verb. An ordinary account by default.
+    user: { ...delegate(), findFirst: jest.fn().mockResolvedValue({ role: UserRole.USER }) },
   }
 
   const service = new LifecycleAdminService(
@@ -167,6 +171,41 @@ describe('LifecycleAdminService — the user-account boundary', () => {
       await expect(service.tombstone(PLATFORM, type, 'x1', 'why')).resolves.toBeUndefined()
     },
   )
+
+  /**
+   * Super admins are unreachable by the ordinary verbs even for another super admin, so the
+   * only way the tier shrinks is the demotion flow, which needs a second super admin. Any
+   * verb that stopped checking this would silently let one compromised super admin delete
+   * every other one.
+   */
+  it.each([
+    ['archive', (s: LifecycleAdminService) => s.archive(SUPER, 'user', 'u1', 'why')],
+    ['tombstone', (s: LifecycleAdminService) => s.tombstone(SUPER, 'user', 'u1', 'why')],
+    ['purge', (s: LifecycleAdminService) => s.requestPurge(SUPER, 'user', 'u1', 'why')],
+  ] as const)('refuses to %s a super administrator, even for a super admin', async (_n, call) => {
+    const { service, prisma, lifecycle, approvals } = makeHarness()
+    prisma.user.findFirst.mockResolvedValue({ role: UserRole.SUPER_ADMIN })
+
+    await expect(call(service)).rejects.toBeInstanceOf(SuperAdminProtectedError)
+
+    expect(lifecycle.archiveUser).not.toHaveBeenCalled()
+    expect(lifecycle.tombstoneUser).not.toHaveBeenCalled()
+    expect(approvals.request).not.toHaveBeenCalled()
+  })
+
+  it('still protects a super admin who has already been archived', async () => {
+    const { service, prisma } = makeHarness()
+    prisma.user.findFirst.mockResolvedValue({ role: UserRole.SUPER_ADMIN })
+
+    await expect(service.tombstone(SUPER, 'user', 'u1', 'why')).rejects.toBeInstanceOf(
+      SuperAdminProtectedError,
+    )
+
+    // The lookup must name lifecycleStatus, or the Prisma extension narrows it to ACTIVE
+    // and an archived super admin reads back as "not found" — and so as unprotected.
+    const where = prisma.user.findFirst.mock.calls[0][0].where as Record<string, unknown>
+    expect(where).toHaveProperty('lifecycleStatus')
+  })
 
   it('lets a super admin run the full lifecycle on an account', async () => {
     const { service, lifecycle } = makeHarness()

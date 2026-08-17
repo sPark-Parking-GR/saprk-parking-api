@@ -6,6 +6,7 @@ import { LoggerModule } from 'nestjs-pino'
 import { AdminModule } from './admin/admin.module'
 import { AnalyticsModule } from './analytics/analytics.module'
 import { AuditModule } from './audit/audit.module'
+import { IdentityModule } from './identity/identity.module'
 import { AuthModule } from './auth/auth.module'
 import { AdminRouteGuard } from './auth/guards/admin-route.guard'
 import { AuthGuard } from './auth/guards/auth.guard'
@@ -58,6 +59,7 @@ import { TariffModule } from './tariff/tariff.module'
     IngestionModule,
     AnalyticsModule,
     AuditModule,
+    IdentityModule,
     AdminModule,
     HealthModule,
   ],

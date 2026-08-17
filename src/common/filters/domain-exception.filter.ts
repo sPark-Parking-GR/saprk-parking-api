@@ -63,6 +63,15 @@ import {
   InviteNotRevocableError,
 } from '../../invite/invite.types'
 import {
+  AnonymisedAccountError,
+  IdentityUserNotFoundError,
+  LastSuperAdminError,
+  NotASuperAdminError,
+  SelfRoleAssignmentError,
+  SuperAdminApproverUnavailableError,
+  SuperAdminProtectedError,
+} from '../../identity/identity.types'
+import {
   LastOperatorAdminError,
   OperatorMemberNotFoundError,
   OperatorNotFoundError,
@@ -166,6 +175,7 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof InviteNotFoundError ||
       exception instanceof OperatorNotFoundError ||
       exception instanceof OperatorMemberNotFoundError ||
+      exception instanceof IdentityUserNotFoundError ||
       exception instanceof TicketNotFoundError ||
       exception instanceof LifecycleResourceNotFoundError ||
       exception instanceof ApprovalNotFoundError ||
@@ -206,6 +216,12 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof OperatorNotReactivatableError ||
       exception instanceof LastOperatorAdminError ||
       exception instanceof SelfRoleChangeError ||
+      exception instanceof SelfRoleAssignmentError ||
+      exception instanceof AnonymisedAccountError ||
+      exception instanceof SuperAdminProtectedError ||
+      exception instanceof LastSuperAdminError ||
+      exception instanceof NotASuperAdminError ||
+      exception instanceof SuperAdminApproverUnavailableError ||
       exception instanceof SelfMembershipRemovalError ||
       exception instanceof TicketNotIssuableError ||
       exception instanceof LifecycleTransitionError ||

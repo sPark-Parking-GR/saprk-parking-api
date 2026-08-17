@@ -1,7 +1,8 @@
 import { ForbiddenException, Injectable } from '@nestjs/common'
-import { LifecycleStatus } from '@prisma/client'
+import { LifecycleStatus, UserRole } from '@prisma/client'
 import { hasPlatformPermission, type AuthUser, type PlatformPermission } from '@spark/types'
 import { LifecycleActionBlockedError } from '../common/errors/domain.errors'
+import { SuperAdminProtectedError } from '../identity/identity.types'
 import { PrismaService } from '../prisma/prisma.service'
 import type { ListTrashDto } from './dto/lifecycle-admin.dto'
 import { LifecycleApprovalService } from './lifecycle-approval.service'
@@ -20,6 +21,15 @@ import {
   type TrashItem,
   type TrashPage,
 } from './lifecycle.types'
+
+// Named explicitly so the Prisma lifecycle extension does not narrow the lookup to ACTIVE:
+// a super admin who is already archived must still be protected from tombstone and purge.
+const EVERY_STATUS = [
+  LifecycleStatus.ACTIVE,
+  LifecycleStatus.ARCHIVED,
+  LifecycleStatus.TOMBSTONED,
+  LifecycleStatus.PURGED,
+]
 
 // "Trash" is everything that is administratively gone. ACTIVE rows belong to the ordinary
 // resource endpoints, so they are only ever returned when explicitly asked for.
@@ -117,6 +127,7 @@ export class LifecycleAdminService {
   ): Promise<void> {
     this.assertPermission(actor, 'platform:tenant.write', 'archive resources')
     this.assertMayTouchUsers(actor, resourceType, 'identity:user.lifecycle', 'archive user accounts')
+    await this.assertTargetNotSuperAdmin(resourceType, id, 'archived')
     await this.assertUnblocked(resourceType, id, 'archive')
 
     const who = toLifecycleActor(actor)
@@ -174,6 +185,7 @@ export class LifecycleAdminService {
       'identity:user.lifecycle',
       'tombstone user accounts',
     )
+    await this.assertTargetNotSuperAdmin(resourceType, id, 'tombstoned')
     await this.assertUnblocked(resourceType, id, 'tombstone')
 
     const who = toLifecycleActor(actor)
@@ -202,6 +214,7 @@ export class LifecycleAdminService {
   ): Promise<ApprovalView> {
     this.assertPermission(actor, 'platform:tenant.purge', 'purge resources')
     this.assertMayTouchUsers(actor, resourceType, 'identity:user.lifecycle', 'purge user accounts')
+    await this.assertTargetNotSuperAdmin(resourceType, id, 'purged')
     await this.assertUnblocked(resourceType, id, 'purge')
     return this.approvals.request(actor, resourceType, id, reason)
   }
@@ -304,6 +317,26 @@ export class LifecycleAdminService {
     if (!hasPlatformPermission(actor.role, permission)) {
       throw new ForbiddenException(`Only super admins may ${action}`)
     }
+  }
+
+  /**
+   * Super administrators are unreachable by every ordinary verb. The single action
+   * permitted against one is demotion, which needs a second super admin to approve — so an
+   * incident response is "demote, then act", and there is no approval fork on four separate
+   * verbs to keep consistent.
+   */
+  private async assertTargetNotSuperAdmin(
+    resourceType: LifecycleResourceType,
+    id: string,
+    action: string,
+  ): Promise<void> {
+    if (resourceType !== 'user') return
+
+    const target = await this.prisma.user.findFirst({
+      where: { id, lifecycleStatus: { in: EVERY_STATUS } },
+      select: { role: true },
+    })
+    if (target?.role === UserRole.SUPER_ADMIN) throw new SuperAdminProtectedError(action)
   }
 
   private mayReadUsers(actor: AuthUser): boolean {
