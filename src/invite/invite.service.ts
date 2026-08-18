@@ -20,6 +20,7 @@ import { FIREBASE_AUTH_PROVIDER_TOKEN } from '../auth/auth.constants'
 import { RequestContext } from '../common/context/request-context'
 import { OperatorSuspendedError } from '../common/errors/domain.errors'
 import { NotificationsService } from '../notifications/notifications.service'
+import { anyLifecycleStatus } from '../prisma/lifecycle.extension'
 import { OperatorAccessService } from '../operators/operator-access.service'
 import { OperatorNotFoundError } from '../operators/operators.types'
 import { PrismaService } from '../prisma/prisma.service'
@@ -28,6 +29,7 @@ import { InviteTokenService } from './invite-token.service'
 import type { CreateInviteDto, CreateMemberInviteDto } from './dto/invite.dto'
 import {
   InviteAlreadyAcceptedError,
+  InviteEmailTakenError,
   InviteExpiredError,
   InviteNotFoundError,
   InviteNotResendableError,
@@ -68,10 +70,17 @@ export class InviteService {
       throw new ForbiddenException('Only platform admins may issue operator invites')
     }
 
-    const { rawToken, tokenHash, expiresAt } = this.mintToken()
     const email = dto.email.toLowerCase()
+    await this.assertEmailFree(email)
+
+    const { rawToken, tokenHash, expiresAt } = this.mintToken()
 
     const invite = await this.prisma.$transaction(async (tx) => {
+      await this.supersede(tx, actor, {
+        email,
+        kind: OperatorInviteKind.ONBOARDING,
+        status: InviteStatus.PENDING,
+      })
       const operator = await tx.parkingOperator.create({
         data: { name: dto.businessName, status: OperatorStatus.PENDING },
       })
@@ -127,8 +136,10 @@ export class InviteService {
     // yet; it has no members and must gain its first one through the onboarding invite.
     if (operator.status !== OperatorStatus.VERIFIED) throw new OperatorNotFoundError(operatorId)
 
-    const { rawToken, tokenHash, expiresAt } = this.mintToken()
     const email = dto.email.toLowerCase()
+    await this.assertEmailFree(email)
+
+    const { rawToken, tokenHash, expiresAt } = this.mintToken()
 
     const invite = await this.prisma.$transaction(async (tx) => {
       // Seats are checked at ISSUANCE, not at accept: a link that cannot be redeemed is
@@ -136,6 +147,14 @@ export class InviteService {
       // invites against the quota is what stops an operator on two seats from mailing out
       // twenty. Under the same operator-row lock the other quota paths take.
       await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${operatorId} FOR UPDATE`
+      // Under the lock and BEFORE the seat check, so re-inviting an address the operator
+      // already has a live invite out to costs the seat it already spent, not a second one.
+      await this.supersede(tx, actor, {
+        email,
+        kind: OperatorInviteKind.MEMBER,
+        operatorId,
+        status: InviteStatus.PENDING,
+      })
       await this.entitlements.assertCanAddStaffSeat(operatorId, tx)
 
       const created = await tx.operatorInvite.create({
@@ -361,6 +380,12 @@ export class InviteService {
       if (operator?.status !== OperatorStatus.VERIFIED) throw new InviteExpiredError()
     }
 
+    // Re-checked at redemption, not only at issuance: the address may have signed up during
+    // the seven days the link was live. Without it the collision surfaces from the identity
+    // provider as EmailInUseError, which the accept page can only report as a generic
+    // conflict — indistinguishable from a link that really was already used.
+    await this.assertEmailFree(invite.email)
+
     // The privileges come off the invite, decided and authorized when it was issued. The
     // person redeeming the link never gets a say in them.
     const grantedRole = userRoleFor(invite.role)
@@ -434,6 +459,67 @@ export class InviteService {
     }
 
     return authResult
+  }
+
+  /**
+   * Names lifecycleStatus so the Prisma lifecycle extension does not narrow this to ACTIVE:
+   * an archived or tombstoned account still owns its address. A PURGED one does not — purge
+   * anonymises the email away and releases the identity-provider credential with it — so a
+   * purged person can be invited again, which is the whole point of anonymising rather than
+   * reserving the address forever.
+   */
+  private async assertEmailFree(email: string): Promise<void> {
+    const existing = await this.prisma.user.findFirst({
+      where: { email, lifecycleStatus: anyLifecycleStatus() },
+      select: { id: true },
+    })
+    if (existing) throw new InviteEmailTakenError(email)
+  }
+
+  /**
+   * Retires every live invite the new one replaces, so one address never holds more than a
+   * single redeemable link at a time.
+   *
+   * Without this, issuing a replacement leaves the earlier link working: an admin who
+   * revokes the invite they can see in the UI has not actually withdrawn the grant, and a
+   * recipient looking at a mailbox of identical-looking invitations has no way to tell
+   * which one is current. Tokens were already unique per row; what was missing was that
+   * only the newest is valid.
+   */
+  private async supersede(
+    tx: Prisma.TransactionClient,
+    actor: AuthUser,
+    where: Prisma.OperatorInviteWhereInput & { email: string },
+  ): Promise<void> {
+    const stale = await tx.operatorInvite.findMany({ where, select: { id: true, operatorId: true } })
+    if (stale.length === 0) return
+
+    const ids = stale.map((invite) => invite.id)
+    await tx.operatorInvite.updateMany({
+      where: { id: { in: ids }, status: InviteStatus.PENDING },
+      data: { status: InviteStatus.REVOKED },
+    })
+
+    // The same unclaimed-shell cleanup revoke() performs, and guarded harder because this
+    // deletes a set rather than one named row: only an operator still PENDING with no
+    // members and no facilities was minted by an invite and never claimed.
+    const shellIds = stale
+      .map((invite) => invite.operatorId)
+      .filter((id): id is string => id !== null)
+    if (shellIds.length > 0) {
+      await tx.parkingOperator.deleteMany({
+        where: {
+          id: { in: shellIds },
+          status: OperatorStatus.PENDING,
+          memberships: { none: {} },
+          facilities: { none: {} },
+        },
+      })
+    }
+
+    for (const id of ids) {
+      await this.recordAudit(tx, actor, 'invite.superseded', id)
+    }
   }
 
   /** Whoever may create an invite of this shape may also resend or revoke that invite. */

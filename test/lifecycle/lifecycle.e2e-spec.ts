@@ -8,6 +8,7 @@ import {
   LifecycleRestoreConflictError,
 } from '../../src/common/errors/domain.errors'
 import { FacilitiesService } from '../../src/facilities/facilities.service'
+import type { FirebaseAuthProvider } from '@spark/auth'
 import { LifecyclePurgeService } from '../../src/lifecycle/lifecycle-purge.service'
 import { EntitlementService } from '../../src/subscriptions/entitlement.service'
 import { LifecycleService } from '../../src/lifecycle/lifecycle.service'
@@ -56,7 +57,11 @@ describe('resource lifecycle (e2e)', () => {
     // harness, so the services are built directly against the app's extended client —
     // the same wiring JobsModule performs in production.
     lifecycle = new LifecycleService(prisma, app.get(ConfigService), app.get(EntitlementService))
-    purge = new LifecyclePurgeService(prisma)
+    // Stubbed rather than resolved from the container: the real provider would call out to
+    // Google, and every account these tests purge is local-only (firebaseUid null) anyway.
+    purge = new LifecyclePurgeService(prisma, {
+      deleteIdentity: async () => undefined,
+    } as unknown as FirebaseAuthProvider)
     facilities = app.get(FacilitiesService)
   })
 

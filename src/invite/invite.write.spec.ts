@@ -21,6 +21,7 @@ import { InviteService } from './invite.service'
 import { InviteTokenService } from './invite-token.service'
 import {
   InviteAlreadyAcceptedError,
+  InviteEmailTakenError,
   InviteExpiredError,
   InviteNotFoundError,
   InviteNotResendableError,
@@ -84,13 +85,18 @@ describe('InviteService', () => {
       updateMany: jest.Mock
     }
     operatorMembership: { create: jest.Mock; findUnique: jest.Mock; findMany: jest.Mock }
-    user: { update: jest.Mock }
+    user: { update: jest.Mock; findFirst: jest.Mock }
     auditLog: { create: jest.Mock }
     $transaction: jest.Mock
   }
   let tx: {
-    parkingOperator: { create: jest.Mock; update: jest.Mock }
-    operatorInvite: { create: jest.Mock; update: jest.Mock; updateMany: jest.Mock }
+    parkingOperator: { create: jest.Mock; update: jest.Mock; deleteMany: jest.Mock }
+    operatorInvite: {
+      create: jest.Mock
+      findMany: jest.Mock
+      update: jest.Mock
+      updateMany: jest.Mock
+    }
     operatorMembership: { create: jest.Mock }
     user: { update: jest.Mock }
     auditLog: { create: jest.Mock }
@@ -116,9 +122,15 @@ describe('InviteService', () => {
 
   beforeEach(() => {
     tx = {
-      parkingOperator: { create: jest.fn(), update: jest.fn() },
+      parkingOperator: {
+        create: jest.fn(),
+        update: jest.fn(),
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
       operatorInvite: {
         create: jest.fn(),
+        // Nothing to supersede unless a test says otherwise.
+        findMany: jest.fn().mockResolvedValue([]),
         update: jest.fn(),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
@@ -147,7 +159,8 @@ describe('InviteService', () => {
         findUnique: jest.fn(),
         findMany: jest.fn().mockResolvedValue([]),
       },
-      user: { update: tx.user.update },
+      // Address free by default; the collision cases override it.
+      user: { update: tx.user.update, findFirst: jest.fn().mockResolvedValue(null) },
       auditLog: { create: jest.fn() },
       $transaction: jest.fn(async (cb: (t: typeof tx) => unknown) => cb(tx)),
     }
@@ -1065,4 +1078,195 @@ describe('InviteService', () => {
       expect(firebase.deleteUser).toHaveBeenCalledWith('user-new')
     })
   })
+
+  const verifiedOperator = (name = 'Biz A') => ({ name, status: OperatorStatus.VERIFIED })
+
+  const inviteRow = () => ({
+    id: 'inv-1',
+    email: 'owner@biz.com',
+    businessName: 'Biz Parking',
+    operatorId: 'op-new',
+    kind: OperatorInviteKind.ONBOARDING,
+    role: OperatorMemberRole.ADMIN,
+    status: InviteStatus.PENDING,
+    expiresAt: futureDate(),
+    createdAt: new Date(),
+    acceptedAt: null,
+  })
+
+  const pendingInvite = () => ({
+    ...inviteRow(),
+    email: 'new@spark.gr',
+    tokenHash: sha256('tok'),
+  })
+
+  describe('an address that already has an account', () => {
+    /**
+     * The collision used to surface only at redeem, from the identity provider, as a bare
+     * 409 the accept page could not distinguish from a link that really had been used. By
+     * then the mail had gone out and a shell operator existed. Refusing at issue puts it in
+     * front of the one person who can act on it.
+     */
+    it('is refused at issue, before a shell operator or an email exists', async () => {
+      prisma.user.findFirst.mockResolvedValue({ id: 'existing' })
+
+      await expect(
+        service.create(platformUser, { email: 'Owner@Biz.com', businessName: 'Biz Parking' }),
+      ).rejects.toBeInstanceOf(InviteEmailTakenError)
+
+      expect(tx.parkingOperator.create).not.toHaveBeenCalled()
+      expect(tx.operatorInvite.create).not.toHaveBeenCalled()
+      expect(notifications.sendOperatorInvite).not.toHaveBeenCalled()
+    })
+
+    it('is refused at issue for a member invite, before a seat is spent', async () => {
+      prisma.parkingOperator.findUnique.mockResolvedValue(verifiedOperator())
+      prisma.user.findFirst.mockResolvedValue({ id: 'existing' })
+      withMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+
+      await expect(
+        service.createMember(operatorUser, {
+          email: 'staff@biz.com',
+          role: OperatorMemberRole.STAFF,
+          operatorId: 'op-a',
+        }),
+      ).rejects.toBeInstanceOf(InviteEmailTakenError)
+
+      expect(entitlements.assertCanAddStaffSeat).not.toHaveBeenCalled()
+      expect(tx.operatorInvite.create).not.toHaveBeenCalled()
+    })
+
+    // Seven days is long enough for the address to sign up on its own in the meantime.
+    it('is refused again at redeem, before any identity is provisioned', async () => {
+      prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
+      prisma.user.findFirst.mockResolvedValue({ id: 'existing' })
+
+      await expect(service.accept('tok', 'password123')).rejects.toBeInstanceOf(
+        InviteEmailTakenError,
+      )
+      expect(firebase.signUp).not.toHaveBeenCalled()
+    })
+
+    /**
+     * Purge anonymises the address away and destroys the identity-provider credential with
+     * it, so nothing owns it any more. The query still looks across every lifecycle state —
+     * it is the anonymised email, not an exclusion here, that stops a purged row matching.
+     */
+    it('does not count a purged account, so that address can be invited again', async () => {
+      tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
+      tx.operatorInvite.create.mockResolvedValue(inviteRow())
+
+      await service.create(platformUser, { email: 'owner@biz.com', businessName: 'Biz Parking' })
+
+      const where = prisma.user.findFirst.mock.calls[0]![0].where as Record<string, unknown>
+      expect(where).toMatchObject({ email: 'owner@biz.com' })
+      expect(where).toHaveProperty('lifecycleStatus')
+      expect(tx.operatorInvite.create).toHaveBeenCalled()
+    })
+  })
+
+  describe('superseding earlier invites', () => {
+    /**
+     * Tokens were always unique per row; what was missing was that only the newest is
+     * valid. Left live, an earlier link is a second redeemable grant to the same address —
+     * so revoking the invite visible in the UI withdraws nothing.
+     */
+    it('retires the earlier live invite when a replacement is issued', async () => {
+      tx.operatorInvite.findMany.mockResolvedValue([{ id: 'inv-old', operatorId: 'op-old' }])
+      tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
+      tx.operatorInvite.create.mockResolvedValue(inviteRow())
+
+      await service.create(platformUser, { email: 'owner@biz.com', businessName: 'Biz Parking' })
+
+      expect(tx.operatorInvite.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            email: 'owner@biz.com',
+            kind: OperatorInviteKind.ONBOARDING,
+            status: InviteStatus.PENDING,
+          },
+        }),
+      )
+      expect(tx.operatorInvite.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['inv-old'] }, status: InviteStatus.PENDING },
+        data: { status: InviteStatus.REVOKED },
+      })
+    })
+
+    // The same cleanup revoke() performs, guarded harder because this deletes a set.
+    it('drops the retired invite unclaimed shell operator, and only an unclaimed one', async () => {
+      tx.operatorInvite.findMany.mockResolvedValue([{ id: 'inv-old', operatorId: 'op-old' }])
+      tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
+      tx.operatorInvite.create.mockResolvedValue(inviteRow())
+
+      await service.create(platformUser, { email: 'owner@biz.com', businessName: 'Biz Parking' })
+
+      expect(tx.parkingOperator.deleteMany).toHaveBeenCalledWith({
+        where: {
+          id: { in: ['op-old'] },
+          status: OperatorStatus.PENDING,
+          memberships: { none: {} },
+          facilities: { none: {} },
+        },
+      })
+    })
+
+    it('records the retirement against each superseded invite', async () => {
+      tx.operatorInvite.findMany.mockResolvedValue([
+        { id: 'inv-old', operatorId: null },
+        { id: 'inv-older', operatorId: null },
+      ])
+      tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
+      tx.operatorInvite.create.mockResolvedValue(inviteRow())
+
+      await service.create(platformUser, { email: 'owner@biz.com', businessName: 'Biz Parking' })
+
+      const superseded = tx.auditLog.create.mock.calls
+        .map((call) => call[0].data as { action: string; entityId: string })
+        .filter((data) => data.action === 'invite.superseded')
+      expect(superseded.map((data) => data.entityId)).toEqual(['inv-old', 'inv-older'])
+    })
+
+    /**
+     * Under the operator lock and before the seat check: re-inviting an address the operator
+     * already has a live invite out to must cost the seat it already spent, not a second one.
+     */
+    it('retires the earlier member invite before the seat quota is consulted', async () => {
+      prisma.parkingOperator.findUnique.mockResolvedValue(verifiedOperator())
+      withMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      tx.operatorInvite.findMany.mockResolvedValue([{ id: 'inv-old', operatorId: 'op-a' }])
+      tx.operatorInvite.create.mockResolvedValue(inviteRow())
+
+      await service.createMember(operatorUser, {
+        email: 'staff@biz.com',
+        role: OperatorMemberRole.STAFF,
+        operatorId: 'op-a',
+      })
+
+      expect(tx.operatorInvite.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            email: 'staff@biz.com',
+            kind: OperatorInviteKind.MEMBER,
+            operatorId: 'op-a',
+            status: InviteStatus.PENDING,
+          },
+        }),
+      )
+      expect(tx.operatorInvite.updateMany.mock.invocationCallOrder[0]!).toBeLessThan(
+        entitlements.assertCanAddStaffSeat.mock.invocationCallOrder[0]!,
+      )
+    })
+
+    it('touches nothing when the address has no live invite', async () => {
+      tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
+      tx.operatorInvite.create.mockResolvedValue(inviteRow())
+
+      await service.create(platformUser, { email: 'owner@biz.com', businessName: 'Biz Parking' })
+
+      expect(tx.operatorInvite.updateMany).not.toHaveBeenCalled()
+      expect(tx.parkingOperator.deleteMany).not.toHaveBeenCalled()
+    })
+  })
+
 })

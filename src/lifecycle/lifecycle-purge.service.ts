@@ -1,5 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { Inject, Injectable, Logger } from '@nestjs/common'
 import { BookingStatus, LifecycleStatus, Prisma } from '@prisma/client'
+import type { FirebaseAuthProvider } from '@spark/auth'
+import { FIREBASE_AUTH_PROVIDER_TOKEN } from '../auth/auth.constants'
 import { RequestContext } from '../common/context/request-context'
 import {
   LifecycleResourceNotFoundError,
@@ -75,7 +77,9 @@ export function emptySummary(): PurgeSummary {
  *   called directly because that method is inseparable from self-service proof of
  *   person (a password sign-in plus the caller's own access token), which an
  *   admin-driven retention purge cannot supply. The row ends PURGED — terminal, out of
- *   the worker's queue, and refused by restore.
+ *   the worker's queue, and refused by restore. The Google-side credential is destroyed
+ *   after the local commit: freeing the address in Postgres while leaving it registered
+ *   with the identity provider would make the person permanently un-re-registerable.
  *
  * Idempotent and resumable by construction: eligibility is read from row state on every
  * run, each row is processed in its own transaction, deletion removes the row from the
@@ -86,7 +90,10 @@ export function emptySummary(): PurgeSummary {
 export class LifecyclePurgeService {
   private readonly logger = new Logger(LifecyclePurgeService.name)
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: FirebaseAuthProvider,
+  ) {}
 
   async purgeDue(now: Date = new Date()): Promise<PurgeSummary> {
     const summary = emptySummary()
@@ -157,8 +164,8 @@ export class LifecyclePurgeService {
         counts.blocked++
         continue
       }
-      this.warnAboutRemoteIdentity(row.id, row.firebaseUid)
       const outcome = await this.tryPurge('User', row.id, (tx) => this.anonymiseUser(tx, row.id))
+      if (outcome === 'purged') await this.releaseRemoteIdentity(row.id, row.firebaseUid)
       counts[outcome]++
     }
     return counts
@@ -180,12 +187,15 @@ export class LifecyclePurgeService {
     const entityType = RESOURCE_ENTITY_TYPE[resourceType]
     await this.assertTombstoned(resourceType, id, entityType)
 
+    // Read before the transaction nulls it: the uid is stored nowhere else, and once the
+    // row is anonymised there is no way left to name the identity that must be destroyed.
+    let firebaseUid: string | null = null
     if (resourceType === 'user') {
       const row = await this.prisma.user.findFirst({
         where: { id, lifecycleStatus: anyLifecycleStatus() },
         select: { firebaseUid: true },
       })
-      this.warnAboutRemoteIdentity(id, row?.firebaseUid ?? null)
+      firebaseUid = row?.firebaseUid ?? null
     }
 
     try {
@@ -223,6 +233,8 @@ export class LifecyclePurgeService {
       }
       throw error
     }
+
+    await this.releaseRemoteIdentity(id, firebaseUid)
   }
 
   /** Bookings are ON DELETE RESTRICT, so any one of them pins the facility forever. */
@@ -350,15 +362,32 @@ export class LifecyclePurgeService {
     // restore that returned them to an empty dashboard would be a silent demotion.
     await tx.facilityManager.deleteMany({ where: { userId: id } })
     await tx.tariffPlanManager.deleteMany({ where: { userId: id } })
+    // Same reasoning, one level up: left behind, an anonymised account keeps an ADMIN or
+    // STAFF grant over a live tenant and goes on consuming one of its staff seats.
+    await tx.operatorMembership.deleteMany({ where: { userId: id } })
   }
 
-  // The uid is about to be nulled and is stored nowhere else; logging it is the ops
-  // trail for cleaning up the remote identity, same as AccountDeletionService.
-  private warnAboutRemoteIdentity(userId: string, firebaseUid: string | null): void {
+  /**
+   * Destroys the Google-side credential, mirroring AccountDeletionService exactly. Without
+   * it the local row is anonymised and the address is freed in Postgres while staying
+   * registered with Google forever, so a later invite to that same address fails at signUp
+   * with auth/email-already-exists — a purged person could never be re-registered.
+   *
+   * Best effort, and deliberately AFTER the local commit: the account is already gone as
+   * far as this platform is concerned, so failing now would report a purge that did happen
+   * as one that did not. A stranded identity is an ops cleanup item, which is why the uid
+   * is logged — it is no longer stored anywhere.
+   */
+  private async releaseRemoteIdentity(userId: string, firebaseUid: string | null): Promise<void> {
     if (!firebaseUid) return
-    this.logger.warn(
-      `Purging user ${userId}: Firebase identity ${firebaseUid} must be removed separately`,
-    )
+    try {
+      await this.firebase.deleteIdentity(firebaseUid)
+    } catch (error) {
+      this.logger.error(
+        `User ${userId} was purged but its Firebase identity ${firebaseUid} was not removed`,
+        error instanceof Error ? error.stack : String(error),
+      )
+    }
   }
 
   private due(

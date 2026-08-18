@@ -18,6 +18,20 @@ export class InviteAlreadyAcceptedError extends DomainError {
   }
 }
 
+/**
+ * Refused at ISSUE as well as at redeem. Discovered only at redeem, the collision surfaces
+ * after the mail went out and after a shell operator was created, to a person who has
+ * already typed a password and cannot act on it — the inviting admin is the one who can.
+ */
+export class InviteEmailTakenError extends DomainError {
+  constructor(email: string) {
+    super(
+      `${email} already has a sPark account. Attaching it to an operator is a change to ` +
+        'that existing account, not something an invitation may do as a side effect.',
+    )
+  }
+}
+
 export class InviteNotRevocableError extends DomainError {
   constructor(status: string) {
     super(`Only a pending invite can be revoked; this one is ${status}`)

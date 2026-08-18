@@ -11,6 +11,9 @@ import {
   FacilityKindChangeBlockedError,
   FacilityNotBookableError,
 } from '../errors/domain.errors'
+import { EmailInUseError } from '@spark/auth'
+import { InviteAlreadyAcceptedError, InviteEmailTakenError } from '../../invite/invite.types'
+import { AdminInviteEmailTakenError } from '../../identity/admin-invite.types'
 
 function makeHost(): { host: ArgumentsHost; reply: { status: jest.Mock; send: jest.Mock } } {
   const reply = { status: jest.fn(), send: jest.fn() }
@@ -108,4 +111,36 @@ describe('DomainExceptionFilter', () => {
 
     expect(reply.status).toHaveBeenCalledWith(HttpStatus.INTERNAL_SERVER_ERROR)
   })
+
+  /**
+   * The two 409s an invite-accept client can receive are opposites — "this link was already
+   * redeemed" versus "this address already has an account" — and the status alone cannot
+   * separate them. Collapsing them is how a live invite to a re-registering address was
+   * reported as a reused one, complete with a sign-in link to an account that no longer
+   * existed. The code is the contract apps/web branches on, so it is asserted literally.
+   */
+  it.each([
+    ['InviteEmailTakenError', new InviteEmailTakenError('owner@biz.com')],
+    ['AdminInviteEmailTakenError', new AdminInviteEmailTakenError('admin@biz.com')],
+    ['EmailInUseError', new EmailInUseError()],
+  ])('tags %s as a 409 the client can tell apart', (_name, error) => {
+    const { host, reply } = makeHost()
+
+    filter.catch(error, host)
+
+    expect(reply.status).toHaveBeenCalledWith(HttpStatus.CONFLICT)
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'EMAIL_TAKEN' }),
+    )
+  })
+
+  it('leaves a genuinely-reused invite untagged, so it reads as the other conflict', () => {
+    const { host, reply } = makeHost()
+
+    filter.catch(new InviteAlreadyAcceptedError(), host)
+
+    expect(reply.status).toHaveBeenCalledWith(HttpStatus.CONFLICT)
+    expect(reply.send).toHaveBeenCalledWith(expect.not.objectContaining({ code: 'EMAIL_TAKEN' }))
+  })
+
 })

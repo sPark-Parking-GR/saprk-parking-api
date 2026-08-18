@@ -57,6 +57,7 @@ import {
 import { AccountHasUnsettledBookingsError } from '../../auth/auth.types'
 import {
   InviteAlreadyAcceptedError,
+  InviteEmailTakenError,
   InviteExpiredError,
   InviteNotFoundError,
   InviteNotResendableError,
@@ -97,6 +98,9 @@ import {
 // Prisma's code for a transaction the database itself aborted: both 40001
 // serialization_failure and 40P01 deadlock_detected surface under it.
 const TRANSACTION_CONFLICT = 'P2034'
+
+// Shared with apps/web's invite-accept actions, which branch on it.
+const EMAIL_TAKEN_CODE = 'EMAIL_TAKEN'
 
 @Catch()
 export class DomainExceptionFilter implements ExceptionFilter {
@@ -146,6 +150,21 @@ export class DomainExceptionFilter implements ExceptionFilter {
       }
     }
 
+    // Both of these are 409, and an invite-accept client can do nothing useful with that
+    // number alone: "this link was already redeemed" and "this address already has an
+    // account" are opposite situations with opposite remedies. The code travels with the
+    // refusal so the accept page states the right one instead of guessing.
+    if (
+      exception instanceof InviteEmailTakenError ||
+      exception instanceof AdminInviteEmailTakenError ||
+      exception instanceof EmailInUseError
+    ) {
+      return {
+        status: HttpStatus.CONFLICT,
+        body: { message: exception.message, code: EMAIL_TAKEN_CODE },
+      }
+    }
+
     const status = this.statusForDomainError(exception)
     if (status) {
       return { status, body: { message: (exception as Error).message } }
@@ -177,9 +196,6 @@ export class DomainExceptionFilter implements ExceptionFilter {
   private statusForDomainError(exception: unknown): number | null {
     if (exception instanceof InvalidCredentialsError || exception instanceof InvalidTokenError) {
       return HttpStatus.UNAUTHORIZED
-    }
-    if (exception instanceof EmailInUseError) {
-      return HttpStatus.CONFLICT
     }
     if (
       exception instanceof FacilityNotFoundError ||
@@ -243,7 +259,6 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof AdminInviteAlreadyAcceptedError ||
       exception instanceof AdminInviteNotResendableError ||
       exception instanceof AdminInviteNotRevocableError ||
-      exception instanceof AdminInviteEmailTakenError ||
       exception instanceof AnonymisedAccountError ||
       exception instanceof SuperAdminProtectedError ||
       exception instanceof LastSuperAdminError ||
