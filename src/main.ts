@@ -18,7 +18,8 @@ async function bootstrap() {
       bufferLogs: true,
     },
   )
-  app.useLogger(app.get(Logger))
+  const logger = app.get(Logger)
+  app.useLogger(logger)
 
   const config = app.get(ConfigService)
   const isProduction = config.get<string>('NODE_ENV') === 'production'
@@ -57,8 +58,11 @@ async function bootstrap() {
 
   app.setGlobalPrefix('api/v1')
   app.enableCors({ origin: parseCorsOrigin(config.get<string>('CORS_ORIGIN')) })
-  await app.listen(config.get<number>('PORT') ?? 3001, '0.0.0.0')
-  console.log(`🚀 API listening on port ${config.get<number>('PORT') ?? 3001}`)
+  // Bound once rather than resolved twice: the value that gets logged has to be the value
+  // that was actually bound, or the line quietly lies the moment one of them is edited.
+  const port = config.get<number>('PORT') ?? 3001
+  await app.listen(port, '0.0.0.0')
+  logger.log(`API listening on port ${port}`)
 }
 
 bootstrap()
