@@ -1,6 +1,11 @@
 import { ForbiddenException, Injectable } from '@nestjs/common'
-import { OperatorStatus, type Prisma } from '@prisma/client'
-import { hasPlatformPermission, type AuthUser, type PlatformPermission } from '@spark/types'
+import { OperatorMemberRole, OperatorStatus, type Prisma } from '@prisma/client'
+import {
+  hasPlatformPermission,
+  scopesFor,
+  type AuthUser,
+  type PlatformPermission,
+} from '@spark/types'
 import { RequestContext } from '../common/context/request-context'
 import { UNCLAIMED_OPERATOR_ID } from '../ingestion/ingestion.constants'
 import { PrismaService } from '../prisma/prisma.service'
@@ -63,7 +68,13 @@ export class OperatorsService {
           orderBy: { createdAt: 'desc' },
         },
         memberships: {
-          select: { userId: true, role: true, createdAt: true, user: { select: { email: true } } },
+          select: {
+            userId: true,
+            role: true,
+            scopes: true,
+            createdAt: true,
+            user: { select: { email: true } },
+          },
           orderBy: { createdAt: 'asc' },
         },
       },
@@ -85,6 +96,7 @@ export class OperatorsService {
         email: m.user.email,
         role: m.role,
         createdAt: m.createdAt,
+        scopes: scopesFor(m.role === OperatorMemberRole.ADMIN ? 'ADMIN' : 'STAFF', m.scopes),
       })),
     }
   }

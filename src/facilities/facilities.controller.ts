@@ -3,6 +3,7 @@ import { Throttle } from '@nestjs/throttler'
 import type { AuthUser } from '@spark/types'
 import { isPlatformRole } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
+import { RequireOrgPermission } from '../auth/decorators/require-org-permission.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { Public } from '../auth/decorators/public.decorator'
 import { FacilityFieldForbiddenError } from '../common/errors/domain.errors'
@@ -57,6 +58,7 @@ export class FacilitiesController {
   }
 
   @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:facility.read')
   @Get()
   list(
     @Query(new ZodValidationPipe(listFacilitiesSchema)) query: ListFacilitiesDto,
@@ -66,6 +68,7 @@ export class FacilitiesController {
   }
 
   @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:facility.read')
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @Get('map')
   adminMap(
@@ -80,12 +83,14 @@ export class FacilitiesController {
   }
 
   @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:facility.read')
   @Get(':id/manage')
   manage(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.facilities.adminGetById(user, id)
   }
 
   @Roles('operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:facility.write')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Patch('bulk')
   bulk(
@@ -99,6 +104,7 @@ export class FacilitiesController {
   // here on the role and again in the service on the resolved operator scope, per the
   // both-layers rule — neither check is load-bearing alone.
   @Roles('operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:facility.write')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post()
   create(
@@ -112,12 +118,14 @@ export class FacilitiesController {
   }
 
   @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:facility.read')
   @Get(':id/tariff-assignments')
   tariffAssignments(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.facilities.getTariffAssignments(user, id)
   }
 
   @Roles('operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:facility.write')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Patch(':id/tariff-plan')
   assignTariff(
@@ -132,6 +140,7 @@ export class FacilitiesController {
   // here on the role and again in the service on the resolved operator scope, per the
   // both-layers rule — neither check is load-bearing alone.
   @Roles('operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:facility.write')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Patch(':id')
   update(
@@ -146,6 +155,7 @@ export class FacilitiesController {
   }
 
   @Roles('operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:facility.write')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Delete(':id')
   @HttpCode(204)

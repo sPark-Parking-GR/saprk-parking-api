@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query } fr
 import { Throttle } from '@nestjs/throttler'
 import type { AuthUser } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
+import { RequireOrgPermission } from '../auth/decorators/require-org-permission.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { TariffService } from './tariff.service'
@@ -15,6 +16,7 @@ import {
 } from './dto/tariff.dto'
 
 @Roles('operator_admin', 'platform_admin', 'super_admin')
+@RequireOrgPermission('org:tariff.write')
 @Controller('tariff-plans')
 export class TariffController {
   constructor(private readonly tariff: TariffService) {}

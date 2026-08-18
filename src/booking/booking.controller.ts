@@ -13,6 +13,7 @@ import {
 import { Throttle } from '@nestjs/throttler'
 import type { AuthUser, UserRole } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
+import { RequireOrgPermission } from '../auth/decorators/require-org-permission.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { BookingService } from './booking.service'
@@ -63,6 +64,7 @@ export class BookingController {
    * misconfigured client or someone grinding codes.
    */
   @Roles('operator_staff', 'operator_admin')
+  @RequireOrgPermission('org:scan.execute')
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post('verify-qr')
   @HttpCode(200)
@@ -74,6 +76,7 @@ export class BookingController {
   }
 
   @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:booking.read')
   @Get()
   list(
     @Query(new ZodValidationPipe(listBookingsSchema)) query: ListBookingsDto,
@@ -134,12 +137,14 @@ export class BookingController {
   }
 
   @Roles('operator_staff', 'operator_admin')
+  @RequireOrgPermission('org:scan.execute')
   @Post(':id/check-in')
   checkIn(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.bookings.checkIn(id, user)
   }
 
   @Roles('operator_staff', 'operator_admin')
+  @RequireOrgPermission('org:scan.execute')
   @Post(':id/check-out')
   checkOut(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.bookings.checkOut(id, user)

@@ -2,6 +2,7 @@ import { Controller, ForbiddenException, Get, Query } from '@nestjs/common'
 import { Throttle } from '@nestjs/throttler'
 import type { AuthUser, UserRole } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
+import { RequireOrgPermission } from '../auth/decorators/require-org-permission.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { AnalyticsService } from './analytics.service'
@@ -26,6 +27,7 @@ const REPORTING_ROLES: UserRole[] = [
 // global budget rather than inheriting it.
 @Throttle({ default: { limit: 30, ttl: 60_000 } })
 @Roles(...REPORTING_ROLES)
+@RequireOrgPermission('org:stats.read')
 @Controller('analytics')
 export class AnalyticsController {
   constructor(private readonly analytics: AnalyticsService) {}

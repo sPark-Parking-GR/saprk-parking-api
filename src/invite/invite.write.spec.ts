@@ -2,7 +2,7 @@ import { createHash } from 'crypto'
 import { ForbiddenException } from '@nestjs/common'
 import type { ConfigService } from '@nestjs/config'
 import type { IAuthProvider } from '@spark/auth'
-import type { AuthResult, AuthUser, UserRole } from '@spark/types'
+import { DEFAULT_STAFF_SCOPES, type AuthResult, type AuthUser, type UserRole } from '@spark/types'
 import {
   InviteStatus,
   OperatorInviteKind,
@@ -913,7 +913,9 @@ describe('InviteService', () => {
         role: 'operator_admin',
       })
       expect(tx.operatorMembership.create).toHaveBeenCalledWith({
-        data: { operatorId: 'op-new', userId: 'user-new', role: 'ADMIN' },
+        // An admin stores no scopes: their set is derived, so a scope added to the product
+        // later applies to them rather than being missing from a row written before it.
+        data: { operatorId: 'op-new', userId: 'user-new', role: 'ADMIN', scopes: [] },
       })
       expect(tx.parkingOperator.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -950,7 +952,15 @@ describe('InviteService', () => {
         role: 'operator_staff',
       })
       expect(tx.operatorMembership.create).toHaveBeenCalledWith({
-        data: { operatorId: 'op-a', userId: 'user-staff', role: OperatorMemberRole.STAFF },
+        // Staff arrive with the same default set the scopes migration backfilled onto
+        // existing ones — otherwise everyone invited after it would arrive able to do
+        // nothing at all.
+        data: {
+          operatorId: 'op-a',
+          userId: 'user-staff',
+          role: OperatorMemberRole.STAFF,
+          scopes: [...DEFAULT_STAFF_SCOPES],
+        },
       })
       // A member invite must never verify, re-verify or otherwise touch its operator.
       expect(tx.parkingOperator.update).not.toHaveBeenCalled()

@@ -1,3 +1,4 @@
+import { DEFAULT_STAFF_SCOPES } from '@spark/types'
 import { randomUUID } from 'node:crypto'
 import {
   BookingStatus,
@@ -132,6 +133,12 @@ export async function seedUser(prisma: PrismaClient, seed: UserSeed = {}): Promi
         operatorId: seed.operatorId,
         userId: user.id,
         role: seed.memberRole ?? OperatorMemberRole.ADMIN,
+        // Mirrors what invite acceptance writes, so suites exercise a state that can
+        // actually occur rather than a staff member with no scopes at all.
+        scopes:
+          (seed.memberRole ?? OperatorMemberRole.ADMIN) === OperatorMemberRole.STAFF
+            ? [...DEFAULT_STAFF_SCOPES]
+            : [],
       },
     })
   }

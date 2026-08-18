@@ -2,6 +2,7 @@ import { ForbiddenException, Inject, Injectable, Logger } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import type { IAuthProvider } from '@spark/auth'
 import {
+  DEFAULT_STAFF_SCOPES,
   hasPlatformPermission,
   isPlatformRole,
   type AuthResult,
@@ -383,6 +384,12 @@ export class InviteService {
             operatorId,
             userId: newUserId,
             role: invite.role,
+            // A new staff member starts with the same default set the scopes migration
+            // backfilled onto existing ones. Without this the backfill would only ever have
+            // helped accounts that predated it, and everyone invited afterwards would
+            // arrive able to do nothing. ADMIN stores none and derives all.
+            scopes:
+              invite.role === OperatorMemberRole.STAFF ? [...DEFAULT_STAFF_SCOPES] : [],
           },
         })
         if (isOnboarding) {

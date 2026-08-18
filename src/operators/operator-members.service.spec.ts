@@ -76,12 +76,13 @@ describe('OperatorMembersService', () => {
           return {
             id: 'mem-2',
             role,
+            scopes: [],
             createdAt: new Date('2026-02-01'),
             user: { email: 'member@biz.gr' },
           }
         }
         if (key.userId === operatorUser.id && key.operatorId === 'op-a') {
-          return { id: 'mem-1', role: OperatorMemberRole.ADMIN }
+          return { id: 'mem-1', role: OperatorMemberRole.ADMIN, scopes: [] }
         }
         return null
       },
@@ -128,6 +129,7 @@ describe('OperatorMembersService', () => {
         {
           userId: 'user-2',
           role: OperatorMemberRole.STAFF,
+          scopes: ['org:booking.read', 'org:scan.execute'],
           createdAt: new Date('2026-02-01'),
           user: { email: 'member@biz.gr' },
         },
@@ -139,6 +141,8 @@ describe('OperatorMembersService', () => {
           email: 'member@biz.gr',
           role: OperatorMemberRole.STAFF,
           createdAt: new Date('2026-02-01'),
+          // A staff member's set is exactly what is stored.
+          scopes: ['org:booking.read', 'org:scan.execute'],
         },
       ])
     })
@@ -248,7 +252,8 @@ describe('OperatorMembersService', () => {
             : {
                 id: 'mem-2',
                 role: OperatorMemberRole.STAFF,
-                createdAt: new Date('2026-02-01'),
+                scopes: [],
+            createdAt: new Date('2026-02-01'),
                 user: { email: 'member@biz.gr' },
               },
       )

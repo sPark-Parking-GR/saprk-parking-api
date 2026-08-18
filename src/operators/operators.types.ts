@@ -77,10 +77,25 @@ export interface OperatorMemberSummary {
   email: string
   role: string
   createdAt: Date
+  /** Effective, not stored: an ADMIN's set is derived, so this is what they may actually do. */
+  scopes: readonly string[]
 }
 
 export interface OperatorDetail extends OperatorSummary {
   facilities: OperatorFacilitySummary[]
   plans: OperatorPlanSummary[]
   members: OperatorMemberSummary[]
+}
+
+/**
+ * An administrator's scopes are derived, never stored, so there is nothing here to set. The
+ * way to narrow what someone may do is to make them a staff member first.
+ */
+export class AdminScopesNotEditableError extends DomainError {
+  constructor() {
+    super(
+      'An operator administrator holds every permission in their operator by definition. ' +
+        'Change their role to staff first if their access should be narrowed.',
+    )
+  }
 }

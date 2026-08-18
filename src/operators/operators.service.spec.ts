@@ -1,6 +1,6 @@
 import { ForbiddenException } from '@nestjs/common'
 import { OperatorStatus } from '@prisma/client'
-import type { AuthUser } from '@spark/types'
+import { ORG_PERMISSIONS, type AuthUser } from '@spark/types'
 import { RequestContext } from '../common/context/request-context'
 import { UNCLAIMED_OPERATOR_ID } from '../ingestion/ingestion.constants'
 import type { PrismaService } from '../prisma/prisma.service'
@@ -105,6 +105,7 @@ describe('OperatorsService', () => {
           {
             userId: 'u-1',
             role: 'ADMIN',
+            scopes: [],
             createdAt: new Date('2026-01-03'),
             user: { email: 'admin@biz-a.gr' },
           },
@@ -140,6 +141,8 @@ describe('OperatorsService', () => {
             email: 'admin@biz-a.gr',
             role: 'ADMIN',
             createdAt: new Date('2026-01-03'),
+            // Derived, not stored: an operator's own admin holds everything within it.
+            scopes: [...ORG_PERMISSIONS],
           },
         ],
       })

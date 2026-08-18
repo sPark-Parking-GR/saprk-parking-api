@@ -1,10 +1,11 @@
 import { ForbiddenException, Injectable } from '@nestjs/common'
 import { OperatorMemberRole, OperatorStatus, UserRole, type Prisma } from '@prisma/client'
-import { isPlatformRole, type AuthUser } from '@spark/types'
+import { isPlatformRole, scopesFor, type AuthUser, type OrgPermission } from '@spark/types'
 import { RequestContext } from '../common/context/request-context'
 import { PrismaService } from '../prisma/prisma.service'
 import { OperatorAccessService } from './operator-access.service'
 import {
+  AdminScopesNotEditableError,
   LastOperatorAdminError,
   OperatorMemberNotFoundError,
   SelfMembershipRemovalError,
@@ -27,7 +28,13 @@ export class OperatorMembersService {
 
     const memberships = await this.prisma.operatorMembership.findMany({
       where: { operatorId },
-      select: { userId: true, role: true, createdAt: true, user: { select: { email: true } } },
+      select: {
+        userId: true,
+        role: true,
+        scopes: true,
+        createdAt: true,
+        user: { select: { email: true } },
+      },
       orderBy: { createdAt: 'asc' },
     })
 
@@ -36,6 +43,8 @@ export class OperatorMembersService {
       email: m.user.email,
       role: m.role,
       createdAt: m.createdAt,
+      // Effective rather than stored, so a caller never has to know that ADMIN derives.
+      scopes: scopesFor(m.role === OperatorMemberRole.ADMIN ? 'ADMIN' : 'STAFF', m.scopes),
     }))
   }
 
@@ -77,6 +86,7 @@ export class OperatorMembersService {
         email: membership.user.email,
         role,
         createdAt: membership.createdAt,
+        scopes: scopesFor(role === OperatorMemberRole.ADMIN ? 'ADMIN' : 'STAFF', membership.scopes),
       }
     })
   }
@@ -106,6 +116,56 @@ export class OperatorMembersService {
     })
   }
 
+  /**
+   * Sets what one staff member may do inside this operator.
+   *
+   * Scopes are replaced wholesale rather than merged: the caller is a form that already
+   * knows the state of every box, and a merge would make "remove this" indistinguishable
+   * from "leave it alone".
+   */
+  async setScopes(
+    actor: AuthUser,
+    requestedOperatorId: string,
+    userId: string,
+    scopes: OrgPermission[],
+  ): Promise<OperatorMemberSummary> {
+    const operatorId = await this.assertMayManage(actor, requestedOperatorId)
+    await this.access.assertScope(actor, operatorId, 'org:member.manage')
+
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockOperator(tx, operatorId)
+
+      const membership = await this.findMembership(tx, operatorId, userId)
+      if (membership.role === OperatorMemberRole.ADMIN) throw new AdminScopesNotEditableError()
+
+      const next = [...new Set(scopes)].sort()
+
+      await tx.operatorMembership.update({
+        where: { id: membership.id },
+        // Narrowing what someone may do has to invalidate the tokens they are holding, or
+        // the change does not take effect until their session happens to expire. Same
+        // watermark reconcileUserRole moves when the global role changes.
+        data: { scopes: next },
+      })
+      await tx.user.update({ where: { id: userId }, data: { sessionsValidFrom: new Date() } })
+
+      await this.recordAudit(tx, actor, 'operator_member.scopes_changed', membership.id, {
+        operatorId,
+        userId,
+        from: membership.scopes,
+        to: next,
+      })
+
+      return {
+        userId,
+        email: membership.user.email,
+        role: membership.role,
+        createdAt: membership.createdAt,
+        scopes: next,
+      }
+    })
+  }
+
   private async assertMayManage(actor: AuthUser, requestedOperatorId: string): Promise<string> {
     // Controller already gates on @Roles('operator_admin', 'platform_admin'); re-check in
     // the service layer per the both-layers authorization rule. resolveAdministrable then
@@ -129,12 +189,19 @@ export class OperatorMembersService {
   ): Promise<{
     id: string
     role: OperatorMemberRole
+    scopes: string[]
     createdAt: Date
     user: { email: string }
   }> {
     const membership = await tx.operatorMembership.findUnique({
       where: { operatorId_userId: { operatorId, userId } },
-      select: { id: true, role: true, createdAt: true, user: { select: { email: true } } },
+      select: {
+        id: true,
+        role: true,
+        scopes: true,
+        createdAt: true,
+        user: { select: { email: true } },
+      },
     })
     if (!membership) throw new OperatorMemberNotFoundError(userId)
     return membership

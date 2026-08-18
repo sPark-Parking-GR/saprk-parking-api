@@ -1,3 +1,4 @@
+import { DEFAULT_STAFF_SCOPES } from '@spark/types'
 import {
   PrismaClient,
   VehicleType,
@@ -159,6 +160,11 @@ async function main() {
   )
 }
 
+/** Mirrors invite acceptance: staff start with the default set, admins derive theirs. */
+function scopesForSeed(role: OperatorMemberRole): string[] {
+  return role === OperatorMemberRole.STAFF ? [...DEFAULT_STAFF_SCOPES] : []
+}
+
 async function seedUsers(athensOperatorId: string, thessOperatorId: string): Promise<void> {
   const passwordHash = await hashPassword(DEV_PASSWORD)
 
@@ -231,11 +237,12 @@ async function seedUsers(athensOperatorId: string, thessOperatorId: string): Pro
         where: {
           operatorId_userId: { operatorId: account.membership.operatorId, userId: user.id },
         },
-        update: { role: account.membership.role },
+        update: { role: account.membership.role, scopes: scopesForSeed(account.membership.role) },
         create: {
           operatorId: account.membership.operatorId,
           userId: user.id,
           role: account.membership.role,
+          scopes: scopesForSeed(account.membership.role),
         },
       })
     }

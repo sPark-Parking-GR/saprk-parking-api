@@ -80,6 +80,7 @@ import {
   SuperAdminProtectedError,
 } from '../../identity/identity.types'
 import {
+  AdminScopesNotEditableError,
   LastOperatorAdminError,
   OperatorMemberNotFoundError,
   OperatorNotFoundError,
@@ -229,6 +230,7 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof OperatorNotReactivatableError ||
       exception instanceof LastOperatorAdminError ||
       exception instanceof SelfRoleChangeError ||
+      exception instanceof AdminScopesNotEditableError ||
       exception instanceof SelfRoleAssignmentError ||
       exception instanceof AdminInviteAlreadyAcceptedError ||
       exception instanceof AdminInviteNotResendableError ||
