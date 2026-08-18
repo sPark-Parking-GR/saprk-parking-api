@@ -85,6 +85,10 @@ import {
   OperatorMemberNotFoundError,
   OperatorNotFoundError,
   OperatorNotReactivatableError,
+  OperatorNotVerifiableError,
+  OperatorNotVerifiedError,
+  OperatorEmailTakenError,
+  SelfSignupDisabledError,
   OperatorNotSuspendableError,
   SelfMembershipRemovalError,
   SelfRoleChangeError,
@@ -198,7 +202,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof FacilityFieldForbiddenError ||
       exception instanceof OperatorSuspendedError ||
       exception instanceof AnalyticsScopeForbiddenError ||
-      exception instanceof SelfApprovalError
+      exception instanceof SelfApprovalError ||
+      exception instanceof SelfSignupDisabledError
     ) {
       return HttpStatus.FORBIDDEN
     }
@@ -228,6 +233,9 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof InviteNotResendableError ||
       exception instanceof OperatorNotSuspendableError ||
       exception instanceof OperatorNotReactivatableError ||
+      exception instanceof OperatorNotVerifiableError ||
+      exception instanceof OperatorNotVerifiedError ||
+      exception instanceof OperatorEmailTakenError ||
       exception instanceof LastOperatorAdminError ||
       exception instanceof SelfRoleChangeError ||
       exception instanceof AdminScopesNotEditableError ||

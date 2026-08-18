@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service'
 import {
   OperatorNotFoundError,
   OperatorNotReactivatableError,
+  OperatorNotVerifiableError,
   OperatorNotSuspendableError,
   type OperatorDetail,
   type OperatorSummary,
@@ -115,6 +116,25 @@ export class OperatorsService {
     if (count === 0) await this.explainFailedTransition(id, OperatorStatus.VERIFIED)
   }
 
+  /**
+   * Approves a self-registered business. Unlike reactivate, this one DOES stamp verifiedAt:
+   * it is the original verification, which for an invited operator happened implicitly the
+   * moment its admin accepted the invitation.
+   */
+  async verify(actor: AuthUser, id: string): Promise<void> {
+    this.assertPermission(actor, 'platform:tenant.write', 'verify operators')
+
+    const count = await this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.parkingOperator.updateMany({
+        where: { id, status: OperatorStatus.PENDING },
+        data: { status: OperatorStatus.VERIFIED, verifiedAt: new Date() },
+      })
+      if (count > 0) await this.recordAudit(tx, actor, 'operator.verified', id)
+      return count
+    })
+    if (count === 0) await this.explainFailedTransition(id, OperatorStatus.PENDING)
+  }
+
   async reactivate(actor: AuthUser, id: string): Promise<void> {
     this.assertPermission(actor, 'platform:tenant.write', 'reactivate operators')
 
@@ -163,8 +183,14 @@ export class OperatorsService {
       select: { status: true },
     })
     if (!operator) throw new OperatorNotFoundError(id)
-    throw required === OperatorStatus.VERIFIED
-      ? new OperatorNotSuspendableError(operator.status)
-      : new OperatorNotReactivatableError(operator.status)
+    // Named by the state the transition REQUIRED, so the refusal describes the action the
+    // caller attempted rather than whichever one happens to be the fallback.
+    if (required === OperatorStatus.VERIFIED) {
+      throw new OperatorNotSuspendableError(operator.status)
+    }
+    if (required === OperatorStatus.PENDING) {
+      throw new OperatorNotVerifiableError(operator.status)
+    }
+    throw new OperatorNotReactivatableError(operator.status)
   }
 }

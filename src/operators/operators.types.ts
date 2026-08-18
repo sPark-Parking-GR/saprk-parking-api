@@ -99,3 +99,42 @@ export class AdminScopesNotEditableError extends DomainError {
     )
   }
 }
+
+/**
+ * Named rather than silent: an operator waiting on verification should be told that is what
+ * is happening, not handed a generic refusal that reads like a bug in their own account.
+ */
+export class OperatorNotVerifiedError extends DomainError {
+  constructor(status: string) {
+    super(
+      `This business is ${status.toLowerCase()} and has not been verified by sPark yet. ` +
+        'Facilities can be published once verification completes.',
+    )
+  }
+}
+
+export class OperatorNotVerifiableError extends DomainError {
+  constructor(status: string) {
+    super(`Only a pending operator can be verified; this one is ${status.toLowerCase()}.`)
+  }
+}
+
+/**
+ * Refused because the platform has not opened registration yet, not because anything about
+ * the request was wrong — so the message points at the invitation route rather than
+ * suggesting the caller try again differently.
+ */
+export class SelfSignupDisabledError extends DomainError {
+  constructor() {
+    super(
+      'sPark is not open for public operator registration yet. Ask an existing ' +
+        'administrator for an invitation.',
+    )
+  }
+}
+
+export class OperatorEmailTakenError extends DomainError {
+  constructor() {
+    super('That email address already has a sPark account. Sign in instead.')
+  }
+}

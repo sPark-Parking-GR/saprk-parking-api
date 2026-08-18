@@ -29,6 +29,13 @@ export class OperatorsController {
 
   @RequirePermission('platform:tenant.write')
   @HttpCode(204)
+  @Post(':id/verify')
+  verify(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.operators.verify(user, id)
+  }
+
+  @RequirePermission('platform:tenant.write')
+  @HttpCode(204)
   @Post(':id/reactivate')
   reactivate(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.operators.reactivate(user, id)

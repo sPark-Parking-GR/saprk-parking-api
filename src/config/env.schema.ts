@@ -62,6 +62,10 @@ const envSchema = z
     GOOGLE_MAPS_API_KEY: z.string().optional(),
     MAPBOX_ACCESS_TOKEN: z.string().optional(),
 
+    // Pre-release the platform is invite-only; going public is a config change, not a
+    // deploy. Defaults to false so an environment that has not decided yet stays closed.
+    OPERATOR_SELF_SIGNUP_ENABLED: z.enum(['true', 'false']).default('false'),
+
     PAYMENT_PROVIDER: z.enum(PAYMENT_PROVIDERS).default('mock'),
     ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: z.enum(['true', 'false']).default('false'),
     STRIPE_SECRET_KEY: z.string().optional(),

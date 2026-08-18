@@ -1,7 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { computeDistanceMeters } from '@spark/maps'
 import type { OpeningHours, VehicleType as ContractVehicleType } from '@spark/types'
-import { FacilityKind, LifecycleStatus, Prisma, PromotionType, VehicleType } from '@prisma/client'
+import {
+  FacilityKind,
+  LifecycleStatus,
+  OperatorStatus,
+  Prisma,
+  PromotionType,
+  VehicleType,
+} from '@prisma/client'
 import type { AuthUser } from '@spark/types'
 import { unhonouredBookingsWhere } from '../booking/booking.predicates'
 import { BookingService } from '../booking/booking.service'
@@ -24,6 +31,7 @@ import {
 import { InventoryService } from '../inventory/inventory.service'
 import { LifecycleService, type LifecycleActor } from '../lifecycle/lifecycle.service'
 import { initialManagerIds } from '../managers/initial-managers'
+import { OperatorNotVerifiedError } from '../operators/operators.types'
 import { PrismaService } from '../prisma/prisma.service'
 import { EntitlementService } from '../subscriptions/entitlement.service'
 import { TariffService, assignmentMismatchReason } from '../tariff/tariff.service'
@@ -634,9 +642,18 @@ export class FacilitiesService {
     if (operatorId !== null) {
       const operator = await this.prisma.parkingOperator.findUnique({
         where: { id: operatorId },
-        select: { id: true },
+        select: { id: true, status: true },
       })
       if (!operator) throw new DomainError('operatorId required')
+
+      // A PENDING operator is unverified: nobody at sPark has confirmed the business is
+      // real. Before self-signup existed this was unreachable — accepting an onboarding
+      // invite flips PENDING to VERIFIED in the same transaction, so no operator ever had
+      // a live admin while pending. Self-registration creates exactly that state, and an
+      // unverified business must not be able to publish bookable parking.
+      if (operator.status !== OperatorStatus.VERIFIED) {
+        throw new OperatorNotVerifiedError(operator.status)
+      }
     }
 
     if (scope.kind === 'operator' && dto.kind !== undefined) {

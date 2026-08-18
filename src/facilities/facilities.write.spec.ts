@@ -1,5 +1,7 @@
 import type { AuthUser } from '@spark/types'
-import { Prisma, type FacilityKind } from '@prisma/client'
+import { Prisma, type FacilityKind,
+  OperatorStatus,
+} from '@prisma/client'
 import { FacilitiesService } from './facilities.service'
 import type { FacilityClusterIndexService } from './facility-cluster-index.service'
 import type { BookingService } from '../booking/booking.service'
@@ -195,7 +197,11 @@ describe('FacilitiesService admin writes', () => {
         groupBy: jest.fn().mockResolvedValue([]),
       },
       facilityOwnershipPeriod: { create: tx.facilityOwnershipPeriod.create },
-      parkingOperator: { findUnique: jest.fn().mockResolvedValue({ id: 'op1' }) },
+      // status is load-bearing: create refuses an operator sPark has not verified, which is
+      // the state public self-registration produces.
+      parkingOperator: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'op1', status: OperatorStatus.VERIFIED }),
+      },
       auditLog: { create: tx.auditLog.create },
       operatorMembership: { findFirst: jest.fn() },
       $transaction: jest.fn(async (cb: (t: typeof tx) => unknown) => cb(tx)),
