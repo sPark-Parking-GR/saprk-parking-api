@@ -10,6 +10,7 @@ import { IdentityModule } from './identity/identity.module'
 import { AuthModule } from './auth/auth.module'
 import { AdminRouteGuard } from './auth/guards/admin-route.guard'
 import { AuthGuard } from './auth/guards/auth.guard'
+import { OrgPermissionGuard } from './auth/guards/org-permission.guard'
 import { PermissionGuard } from './auth/guards/permission.guard'
 import { RolesGuard } from './auth/guards/roles.guard'
 import { BookingModule } from './booking/booking.module'
@@ -82,6 +83,10 @@ import { TariffModule } from './tariff/tariff.module'
     { provide: APP_GUARD, useClass: AdminRouteGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_GUARD, useClass: PermissionGuard },
+    // Last, and finest: org scopes narrow WITHIN one operator, so they only ever matter
+    // for a caller the coarser guards have already admitted. Undecorated routes pass
+    // through untouched, so adding it here changed nothing until a route opted in.
+    { provide: APP_GUARD, useClass: OrgPermissionGuard },
     { provide: APP_INTERCEPTOR, useClass: RequestContextInterceptor },
   ],
 })

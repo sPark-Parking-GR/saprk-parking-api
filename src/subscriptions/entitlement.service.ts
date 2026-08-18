@@ -19,6 +19,7 @@ import {
   entitlementsSchema,
   mergeEntitlements,
   type Entitlements,
+  type SubscriptionFeature,
 } from './entitlements.schema'
 import {
   DEFAULT_PLAN_CODE,
@@ -167,6 +168,21 @@ export class EntitlementService {
     ])
 
     return { facilities, tariffPlans, staffSeats }
+  }
+
+  /**
+   * Whether the operator's plan includes a capability at all, as distinct from how much of
+   * it they have left. A refusal for "your plan does not include this" and one for "you have
+   * used your last seat" are different products speaking, and the caller has to be able to
+   * tell a customer which one happened.
+   */
+  async hasFeature(
+    operatorId: string,
+    feature: SubscriptionFeature,
+    tx?: Prisma.TransactionClient,
+  ): Promise<boolean> {
+    const { entitlements } = await this.resolveEffective(operatorId, tx)
+    return entitlements.features.includes(feature)
   }
 
   /** The full picture for the admin surface: limits, where they came from, and usage. */

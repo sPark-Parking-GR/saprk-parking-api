@@ -10,6 +10,16 @@ export const SUBSCRIPTION_FEATURES = [
   'api.access',
   'branding.custom',
   'support.priority',
+  /**
+   * Unlocks the team surface: inviting staff, and setting what each of them may do.
+   *
+   * Separate from maxStaffSeats because they answer different questions. The feature is
+   * whether the operator bought team management at all; the seat count is how many people
+   * it covers. Collapsing them into "seats > 0" would make a plan that sells the capability
+   * with no seats yet unexpressible, and would put the reason for a refusal — unbought
+   * versus outgrown — beyond the API's ability to say.
+   */
+  'team.management',
 ] as const
 
 export type SubscriptionFeature = (typeof SUBSCRIPTION_FEATURES)[number]

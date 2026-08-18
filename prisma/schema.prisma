@@ -371,6 +371,16 @@ model OperatorMembership {
   role       OperatorMemberRole
   createdAt  DateTime           @default(now())
 
+  // What this member may do inside THIS operator (the org:* scopes in @spark/types).
+  //
+  // Per membership, not per user: the same person can be an administrator of one operator
+  // and a barrier attendant at another, and a single per-user set could not express that.
+  //
+  // Meaningful for STAFF only. ADMIN derives the full set at read time rather than storing
+  // it, so a scope added to the product later applies to existing admins instead of
+  // silently missing from rows written before it existed.
+  scopes     String[]           @default([])
+
   operator ParkingOperator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
   user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
 
