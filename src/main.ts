@@ -58,6 +58,7 @@ async function bootstrap() {
   app.setGlobalPrefix('api/v1')
   app.enableCors({ origin: parseCorsOrigin(config.get<string>('CORS_ORIGIN')) })
   await app.listen(config.get<number>('PORT') ?? 3001, '0.0.0.0')
+  console.log(`🚀 API listening on port ${config.get<number>('PORT') ?? 3001}`)
 }
 
 bootstrap()
