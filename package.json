@@ -14,6 +14,7 @@
     "db:generate": "prisma generate",
     "db:seed:dev": "ts-node --project tsconfig.seed.json prisma/seed.ts",
     "bootstrap:admin": "ts-node --project tsconfig.seed.json src/scripts/bootstrap-admin.ts",
+    "reconcile:purged": "ts-node --project tsconfig.seed.json src/scripts/reconcile-purged.ts",
     "db:studio": "prisma studio"
   },
   "prisma": {
