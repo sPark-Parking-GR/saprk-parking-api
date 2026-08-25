@@ -75,7 +75,7 @@ const SEARCH_RENDER_BUDGET = 60
 // prefilter and the cluster buckets can never disagree about what is publicly listable.
 // The lifecycle term is load-bearing: these queries run as raw SQL, which the default
 // lifecycle filter (src/prisma/lifecycle.extension.ts) cannot intercept.
-const PUBLIC_VISIBLE_SQL = Prisma.sql`"isActive" AND "isVerified" AND "kind" != 'RESTRICTED' AND "lifecycleStatus" = 'ACTIVE'`
+const PUBLIC_VISIBLE_SQL = Prisma.sql`"isActive" AND "isPublished" AND "kind" != 'RESTRICTED' AND "lifecycleStatus" = 'ACTIVE'`
 
 /**
  * One admin-map filter term, expressed as data so it can be rendered twice: as Prisma
@@ -88,7 +88,7 @@ type AdminMapFilter =
   | { on: 'bounds'; bounds: MapBounds }
   | { on: 'text'; value: string }
   | { on: 'isActive'; value: boolean }
-  | { on: 'isVerified'; value: boolean }
+  | { on: 'isPublished'; value: boolean }
   | { on: 'kind'; value: FacilityKind }
   | { on: 'operators'; value: string[] }
   | { on: 'manager'; userId: string }
@@ -110,8 +110,8 @@ function adminFilterWhere(filter: AdminMapFilter): Prisma.FacilityWhereInput {
       }
     case 'isActive':
       return { isActive: filter.value }
-    case 'isVerified':
-      return { isVerified: filter.value }
+    case 'isPublished':
+      return { isPublished: filter.value }
     case 'kind':
       return { kind: filter.value }
     case 'operators':
@@ -133,8 +133,8 @@ function adminFilterSql(filter: AdminMapFilter): Prisma.Sql {
       return Prisma.sql`("name" ILIKE ${`%${filter.value}%`} OR "address" ILIKE ${`%${filter.value}%`})`
     case 'isActive':
       return Prisma.sql`"isActive" = ${filter.value}`
-    case 'isVerified':
-      return Prisma.sql`"isVerified" = ${filter.value}`
+    case 'isPublished':
+      return Prisma.sql`"isPublished" = ${filter.value}`
     case 'kind':
       return Prisma.sql`"kind" = ${filter.value}::"FacilityKind"`
     case 'operators':
@@ -374,7 +374,7 @@ export class FacilitiesService {
    *
    * ADMIN MAP ONLY. The public search moved to FacilityClusterIndexService, whose
    * hierarchy merges smoothly across zoom levels instead of re-bucketing per viewport.
-   * The admin map cannot follow: free-text search, the isActive/isVerified toggles, kind
+   * The admin map cannot follow: free-text search, the isActive/isPublished toggles, kind
    * and operator scope multiply into far too many predicates to precompute an index per
    * combination, and this grid needs no cache at all.
    */
@@ -406,7 +406,7 @@ export class FacilitiesService {
 
   async getDetail(id: string) {
     const facility = await this.prisma.facility.findFirst({
-      where: { id, isActive: true, isVerified: true, kind: { not: FacilityKind.RESTRICTED } },
+      where: { id, isActive: true, isPublished: true, kind: { not: FacilityKind.RESTRICTED } },
       include: {
         images: { orderBy: { sortOrder: 'asc' } },
         rules: true,
@@ -604,7 +604,7 @@ export class FacilitiesService {
           totalCapacity: true,
           onlineQuota: true,
           isActive: true,
-          isVerified: true,
+          isPublished: true,
           kind: true,
           source: true,
           operatorId: true,
@@ -693,7 +693,7 @@ export class FacilitiesService {
           amenities: dto.amenities,
           cancellationPolicy: dto.cancellationPolicy,
           isActive: false,
-          isVerified: false,
+          isPublished: false,
           rank: 0,
         },
       })
@@ -754,8 +754,11 @@ export class FacilitiesService {
     })
     if (!existing) throw new FacilityNotFoundError(id)
 
+    // The two flags are independent axes: isActive is system-wide availability and stays
+    // platform-only, while isPublished is mobile visibility an operator owns for the
+    // facilities the scopeWhere above already narrowed them to.
     if (scope.kind === 'operator') {
-      if (dto.isVerified !== undefined) throw new FacilityFieldForbiddenError('isVerified')
+      if (dto.isActive !== undefined) throw new FacilityFieldForbiddenError('isActive')
       if (dto.rank !== undefined) throw new FacilityFieldForbiddenError('rank')
       if (dto.kind !== undefined) throw new FacilityFieldForbiddenError('kind')
     }
@@ -799,7 +802,7 @@ export class FacilitiesService {
     if (dto.amenities !== undefined) data.amenities = dto.amenities
     if (dto.cancellationPolicy !== undefined) data.cancellationPolicy = dto.cancellationPolicy
     if (dto.isActive !== undefined) data.isActive = dto.isActive
-    if (dto.isVerified !== undefined) data.isVerified = dto.isVerified
+    if (dto.isPublished !== undefined) data.isPublished = dto.isPublished
     if (dto.rank !== undefined) data.rank = dto.rank
     if (dto.kind !== undefined) data.kind = dto.kind
 
@@ -920,9 +923,13 @@ export class FacilitiesService {
     const scope = await this.operatorScope.resolve(user)
     const scopeWhere = this.operatorScope.facilityScopeWhere(scope, user)
 
-    // Verification is platform-only; operators cannot self-verify (mirrors `update`).
-    if (dto.action === 'deploy' && scope.kind === 'operator') {
-      throw new FacilityFieldForbiddenError('isVerified')
+    // isActive is platform-only (mirrors `update`), and deploy carries it alongside
+    // isPublished. publish/unpublish touch isPublished alone, so they stay open to an
+    // operator — scopeWhere is what keeps those to the facilities they manage.
+    const touchesIsActive =
+      dto.action === 'deploy' || dto.action === 'enable' || dto.action === 'disable'
+    if (touchesIsActive && scope.kind === 'operator') {
+      throw new FacilityFieldForbiddenError('isActive')
     }
 
     // assignTariff carries a dynamic per-slot payload and its own multi-plan ownership
@@ -1209,13 +1216,13 @@ export class FacilitiesService {
   ): Prisma.FacilityUpdateManyMutationInput {
     switch (action) {
       case 'deploy':
-        return { isActive: true, isVerified: true }
+        return { isActive: true, isPublished: true }
       case 'enable':
         return { isActive: true }
       case 'publish':
-        return { isVerified: true }
+        return { isPublished: true }
       case 'unpublish':
-        return { isVerified: false }
+        return { isPublished: false }
     }
   }
 
@@ -1241,7 +1248,7 @@ export class FacilitiesService {
         lng: true,
         kind: true,
         isActive: true,
-        isVerified: true,
+        isPublished: true,
       },
       take: MAX_POINTS,
     })
@@ -1253,7 +1260,7 @@ export class FacilitiesService {
       lng: r.lng.toNumber(),
       kind: r.kind,
       isActive: r.isActive,
-      isVerified: r.isVerified,
+      isPublished: r.isPublished,
     }))
     return { mode: 'points', points, clusters: [], total }
   }
@@ -1281,8 +1288,8 @@ export class FacilitiesService {
     ]
     if (params.q) filters.push({ on: 'text', value: params.q })
     if (params.isActive !== undefined) filters.push({ on: 'isActive', value: params.isActive })
-    if (params.isVerified !== undefined) {
-      filters.push({ on: 'isVerified', value: params.isVerified })
+    if (params.isPublished !== undefined) {
+      filters.push({ on: 'isPublished', value: params.isPublished })
     }
     if (params.kind) filters.push({ on: 'kind', value: params.kind })
 
@@ -1318,7 +1325,7 @@ export class FacilitiesService {
       })
     }
     if (query.isActive !== undefined) filters.push({ isActive: query.isActive })
-    if (query.isVerified !== undefined) filters.push({ isVerified: query.isVerified })
+    if (query.isPublished !== undefined) filters.push({ isPublished: query.isPublished })
     if (query.kind) filters.push({ kind: query.kind })
     if (scope.kind === 'platform' && query.operatorId) {
       filters.push({ operatorId: query.operatorId })
@@ -1346,7 +1353,7 @@ export class FacilitiesService {
     amenities: string[]
     cancellationPolicy: string
     isActive: boolean
-    isVerified: boolean
+    isPublished: boolean
     rank: number
     createdAt: Date
     updatedAt: Date
@@ -1367,7 +1374,7 @@ export class FacilitiesService {
       amenities: facility.amenities,
       cancellationPolicy: facility.cancellationPolicy,
       isActive: facility.isActive,
-      isVerified: facility.isVerified,
+      isPublished: facility.isPublished,
       rank: facility.rank,
       createdAt: facility.createdAt,
       updatedAt: facility.updatedAt,

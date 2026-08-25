@@ -154,7 +154,7 @@ export interface FacilitySeed {
   address?: string
   kind?: FacilityKind
   isActive?: boolean
-  isVerified?: boolean
+  isPublished?: boolean
   onlineQuota?: number
   totalCapacity?: number
   vehicleTypes?: VehicleType[]
@@ -176,7 +176,7 @@ export function seedFacility(prisma: PrismaClient, seed: FacilitySeed): Promise<
       openingHoursJson: { is24h: true },
       amenities: [],
       isActive: seed.isActive ?? true,
-      isVerified: seed.isVerified ?? true,
+      isPublished: seed.isPublished ?? true,
       kind: seed.kind ?? FacilityKind.BUSINESS,
       rank: seed.rank ?? 0,
       ...(seed.createdAt ? { createdAt: seed.createdAt } : {}),

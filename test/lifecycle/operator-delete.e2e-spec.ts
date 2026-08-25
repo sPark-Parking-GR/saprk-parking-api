@@ -215,9 +215,10 @@ describe('operator delete archives into the admin trash (e2e)', () => {
       expect(await trash()).toHaveLength(1)
     })
 
-    // 'disable' is an unpublish, not a delete: it must NOT sweep the row into the bin.
-    it('bulk disable unpublishes without archiving', async () => {
-      await authed('patch', `${API}/facilities/bulk`, operatorToken)
+    // 'disable' only flips isActive, it is not a delete: it must NOT sweep the row into the
+    // bin. Platform token because isActive is platform-only.
+    it('bulk disable deactivates without archiving', async () => {
+      await authed('patch', `${API}/facilities/bulk`, platformToken)
         .send({ action: 'disable', ids: [facility.id] })
         .expect(200)
 

@@ -30,6 +30,7 @@ import {
   bulkFacilitySchema,
   createFacilitySchema,
   updateFacilitySchema,
+  type BulkFacilityDto,
   type CreateFacilityDto,
 } from './dto/facility.dto'
 
@@ -70,7 +71,7 @@ function makeRow(over: Record<string, unknown> = {}) {
     amenities: [],
     cancellationPolicy: '',
     isActive: false,
-    isVerified: false,
+    isPublished: false,
     rank: 0,
     createdAt: new Date('2026-06-18T00:00:00Z'),
     updatedAt: new Date('2026-06-18T00:00:00Z'),
@@ -223,7 +224,7 @@ describe('FacilitiesService admin writes', () => {
     )
   })
 
-  it('operator_admin create forces isActive/isVerified false and audits', async () => {
+  it('operator_admin create forces isActive/isPublished false and audits', async () => {
     setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.create.mockResolvedValue(makeRow())
 
@@ -231,7 +232,7 @@ describe('FacilitiesService admin writes', () => {
 
     const data = prisma.facility.create.mock.calls[0]![0].data
     expect(data.isActive).toBe(false)
-    expect(data.isVerified).toBe(false)
+    expect(data.isPublished).toBe(false)
     expect(data.rank).toBe(0)
     expect(data.operatorId).toBe('op1')
     expect(data.vehicleTypes).toEqual(['CAR'])
@@ -482,13 +483,61 @@ describe('FacilitiesService admin writes', () => {
     })
   })
 
-  it('operator update cannot set isVerified', async () => {
-    setScope({ kind: 'operator', operatorIds: ['op1'] })
-    prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
+  /**
+   * The two flags are independent axes and each has its own owner: isActive is system-wide
+   * availability only the platform grants, isPublished is mobile visibility the managing
+   * operator runs day to day.
+   */
+  describe('isActive vs isPublished (the two axes)', () => {
+    it('operator update cannot set isActive', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
 
-    await expect(service.update(operatorUser, 'f1', { isVerified: true })).rejects.toBeInstanceOf(
-      FacilityFieldForbiddenError,
-    )
+      const error = await service
+        .update(operatorUser, 'f1', { isActive: true })
+        .catch((e: Error) => e)
+
+      expect(error).toBeInstanceOf(FacilityFieldForbiddenError)
+      expect((error as Error).message).toContain('isActive')
+      expect(prisma.facility.update).not.toHaveBeenCalled()
+    })
+
+    it('operator update may set isPublished on a facility it manages', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
+      prisma.facility.update.mockResolvedValue(makeRow({ isPublished: true }))
+
+      const res = await service.update(operatorUser, 'f1', { isPublished: true })
+
+      // The lookup is the authorization boundary: an operator reaches only managed rows.
+      expect(prisma.facility.findFirst.mock.calls[0]![0].where).toEqual({
+        id: 'f1',
+        ...managed(['op1'], operatorUser.id),
+      })
+      expect(prisma.facility.update.mock.calls[0]![0].data.isPublished).toBe(true)
+      expect(res.isPublished).toBe(true)
+    })
+
+    it('an operator cannot publish a facility it does not manage', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.findFirst.mockResolvedValue(null)
+
+      await expect(
+        service.update(operatorUser, 'f-other', { isPublished: true }),
+      ).rejects.toBeInstanceOf(FacilityNotFoundError)
+      expect(prisma.facility.update).not.toHaveBeenCalled()
+    })
+
+    it('platform update may set isActive', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
+      prisma.facility.update.mockResolvedValue(makeRow({ isActive: true }))
+
+      const res = await service.update(platformUser, 'f1', { isActive: true })
+
+      expect(prisma.facility.update.mock.calls[0]![0].data.isActive).toBe(true)
+      expect(res.isActive).toBe(true)
+    })
   })
 
   it('operator update cannot set rank', async () => {
@@ -602,15 +651,15 @@ describe('FacilitiesService admin writes', () => {
     })
   })
 
-  it('platform update may set isVerified', async () => {
+  it('platform update may set isPublished', async () => {
     setScope({ kind: 'platform' })
     prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
-    prisma.facility.update.mockResolvedValue(makeRow({ isVerified: true }))
+    prisma.facility.update.mockResolvedValue(makeRow({ isPublished: true }))
 
-    const res = await service.update(platformUser, 'f1', { isVerified: true })
+    const res = await service.update(platformUser, 'f1', { isPublished: true })
 
-    expect(prisma.facility.update.mock.calls[0]![0].data.isVerified).toBe(true)
-    expect(res.isVerified).toBe(true)
+    expect(prisma.facility.update.mock.calls[0]![0].data.isPublished).toBe(true)
+    expect(res.isPublished).toBe(true)
   })
 
   it('cross-operator access returns FacilityNotFoundError (no leak)', async () => {
@@ -761,7 +810,7 @@ describe('FacilitiesService admin writes', () => {
       await service.adminMap(platformUser, {
         bounds,
         isActive: true,
-        isVerified: false,
+        isPublished: false,
         kind: 'BUSINESS' as FacilityKind,
         operatorId: 'op9',
       })
@@ -769,7 +818,7 @@ describe('FacilitiesService admin writes', () => {
       const sql = sqlOf(prisma.$queryRaw.mock.calls[0]!)
       expect(sql.text).toContain('"lifecycleStatus" = $5::"LifecycleStatus"')
       expect(sql.text).toContain('"isActive" = $6')
-      expect(sql.text).toContain('"isVerified" = $7')
+      expect(sql.text).toContain('"isPublished" = $7')
       expect(sql.text).toContain('"kind" = $8::"FacilityKind"')
       expect(sql.text).toContain('"operatorId" IN ($9)')
       expect(sql.text).not.toContain('BUSINESS')
@@ -843,7 +892,7 @@ describe('FacilitiesService admin writes', () => {
         bounds,
         q: 'kolonaki',
         isActive: true,
-        isVerified: false,
+        isPublished: false,
         kind: 'BUSINESS' as FacilityKind,
       })
 
@@ -860,7 +909,7 @@ describe('FacilitiesService admin writes', () => {
             ],
           },
           { isActive: true },
-          { isVerified: false },
+          { isPublished: false },
           { kind: 'BUSINESS' },
           { operatorId: { in: ['op1'] } },
           { managers: { some: { userId: operatorUser.id } } },
@@ -1009,10 +1058,12 @@ describe('FacilitiesService admin writes', () => {
       expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
     })
 
+    // Platform caller: an operator never reaches this guard, isActive is refused earlier.
     it('blocks the update path from deactivating around the guard', async () => {
+      setScope({ kind: 'platform' })
       prisma.booking.count.mockResolvedValue(2)
 
-      await expect(service.update(operatorUser, 'f1', { isActive: false })).rejects.toBeInstanceOf(
+      await expect(service.update(platformUser, 'f1', { isActive: false })).rejects.toBeInstanceOf(
         FacilityHasActiveBookingsError,
       )
       expect(prisma.facility.update).not.toHaveBeenCalled()
@@ -1060,7 +1111,7 @@ describe('FacilitiesService admin writes', () => {
     expect(res).toEqual({ affected: 3 })
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['a', 'b', 'c'] } },
-      data: { isActive: true, isVerified: true },
+      data: { isActive: true, isPublished: true },
     })
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1099,12 +1150,14 @@ describe('FacilitiesService admin writes', () => {
       )
     })
 
-    // 'disable' is an unpublish, not a delete, so it keeps the set-based flag flip.
+    // 'disable' flips isActive rather than archiving, so it keeps the set-based flag flip.
+    // Platform caller: isActive is theirs alone now.
     it('bulk disable still deactivates in one updateMany and archives nothing', async () => {
+      setScope({ kind: 'platform' })
       prisma.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
       prisma.facility.updateMany.mockResolvedValue({ count: 2 })
 
-      const res = await service.bulkUpdate(operatorUser, {
+      const res = await service.bulkUpdate(platformUser, {
         ids: ['a', 'b'],
         action: 'disable',
         force: false,
@@ -1112,7 +1165,7 @@ describe('FacilitiesService admin writes', () => {
 
       expect(res).toEqual({ affected: 2 })
       expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-        where: { id: { in: ['a', 'b'] }, ...managed(['op1'], operatorUser.id) },
+        where: { id: { in: ['a', 'b'] } },
         data: { isActive: false },
       })
       expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
@@ -1142,11 +1195,12 @@ describe('FacilitiesService admin writes', () => {
     })
 
     it('leaves a facility with unhonoured bookings active and reports it', async () => {
+      setScope({ kind: 'platform' })
       prisma.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
       prisma.booking.groupBy.mockResolvedValue([{ facilityId: 'b', _count: { _all: 4 } }])
       prisma.facility.updateMany.mockResolvedValue({ count: 1 })
 
-      const res = await service.bulkUpdate(operatorUser, {
+      const res = await service.bulkUpdate(platformUser, {
         ids: ['a', 'b'],
         action: 'disable',
         force: false,
@@ -1157,7 +1211,7 @@ describe('FacilitiesService admin writes', () => {
         skipped: [{ facilityId: 'b', reason: 'unhonoured_bookings', unhonoured: 4, cancelled: 0 }],
       })
       expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-        where: { id: { in: ['a'] }, ...managed(['op1'], operatorUser.id) },
+        where: { id: { in: ['a'] } },
         data: { isActive: false },
       })
       expect(bookings.cancelBooking).not.toHaveBeenCalled()
@@ -1210,38 +1264,67 @@ describe('FacilitiesService admin writes', () => {
 
       const res = await service.bulkUpdate(operatorUser, {
         ids: ['foreign'],
-        action: 'disable',
+        action: 'delete',
         force: true,
       })
 
       expect(res).toEqual({ affected: 0 })
+      expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
       expect(prisma.facility.updateMany).not.toHaveBeenCalled()
       expect(bookings.cancelBooking).not.toHaveBeenCalled()
     })
   })
 
-  it('operator cannot bulk deploy (self-verify forbidden)', async () => {
-    setScope({ kind: 'operator', operatorIds: ['op1'] })
+  // deploy/enable/disable all move isActive, which is platform-only. publish/unpublish move
+  // isPublished alone, which the managing operator owns.
+  describe('bulk actions split along the isActive boundary', () => {
+    const isActiveActions: BulkFacilityDto[] = [
+      { action: 'deploy', ids: ['a'] },
+      { action: 'enable', ids: ['a'] },
+      { action: 'disable', ids: ['a'], force: false },
+    ]
 
-    await expect(
-      service.bulkUpdate(operatorUser, { ids: ['a'], action: 'deploy' }),
-    ).rejects.toBeInstanceOf(FacilityFieldForbiddenError)
-    expect(prisma.facility.updateMany).not.toHaveBeenCalled()
-  })
+    it.each(isActiveActions)(
+      'operator cannot bulk $action (isActive is platform-only)',
+      async (dto) => {
+        setScope({ kind: 'operator', operatorIds: ['op1'] })
 
-  it('bulk enable is scoped to the operator (foreign ids cannot be touched)', async () => {
-    setScope({ kind: 'operator', operatorIds: ['op1'] })
-    prisma.facility.updateMany.mockResolvedValue({ count: 1 })
+        const error = await service.bulkUpdate(operatorUser, dto).catch((e: Error) => e)
 
-    await service.bulkUpdate(operatorUser, { ids: ['mine', 'foreign'], action: 'enable' })
+        expect(error).toBeInstanceOf(FacilityFieldForbiddenError)
+        expect((error as Error).message).toContain('isActive')
+        expect(prisma.facility.updateMany).not.toHaveBeenCalled()
+        expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
+      },
+    )
 
-    expect(prisma.facility.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['mine', 'foreign'] }, ...managed(['op1'], operatorUser.id) },
-      data: { isActive: true },
+    it('platform may bulk enable', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.updateMany.mockResolvedValue({ count: 2 })
+
+      const res = await service.bulkUpdate(platformUser, { ids: ['a', 'b'], action: 'enable' })
+
+      expect(res).toEqual({ affected: 2 })
+      expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a', 'b'] } },
+        data: { isActive: true },
+      })
+    })
+
+    it('platform may bulk publish', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.updateMany.mockResolvedValue({ count: 2 })
+
+      await service.bulkUpdate(platformUser, { ids: ['a', 'b'], action: 'publish' })
+
+      expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a', 'b'] } },
+        data: { isPublished: true },
+      })
     })
   })
 
-  it('operator can bulk publish own facilities (unlike deploy, this does not require platform verification)', async () => {
+  it('operator can bulk publish own facilities (isPublished is theirs; isActive is not)', async () => {
     setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.updateMany.mockResolvedValue({ count: 2 })
 
@@ -1250,7 +1333,7 @@ describe('FacilitiesService admin writes', () => {
     expect(res).toEqual({ affected: 2 })
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['a', 'b'] }, ...managed(['op1'], operatorUser.id) },
-      data: { isVerified: true },
+      data: { isPublished: true },
     })
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1267,7 +1350,7 @@ describe('FacilitiesService admin writes', () => {
 
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['a'] }, ...managed(['op1'], operatorUser.id) },
-      data: { isVerified: false },
+      data: { isPublished: false },
     })
   })
 

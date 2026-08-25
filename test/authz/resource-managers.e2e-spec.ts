@@ -210,13 +210,30 @@ describe('resource manager assignment (e2e)', () => {
       await seedFacilityManager(raw, { facilityId: assigned.id, userId: admin.id })
 
       const res = await authed('patch', '/facilities/bulk', adminToken)
-        .send({ ids: [assigned.id, unassigned.id], action: 'enable' })
+        .send({ ids: [assigned.id, unassigned.id], action: 'unpublish' })
         .expect(200)
 
       expect(res.body.affected).toBe(1)
       expect(
-        (await raw.facility.findUniqueOrThrow({ where: { id: unassigned.id } })).isActive,
+        (await raw.facility.findUniqueOrThrow({ where: { id: assigned.id } })).isPublished,
+      ).toBe(false)
+      expect(
+        (await raw.facility.findUniqueOrThrow({ where: { id: unassigned.id } })).isPublished,
       ).toBe(true)
+    })
+
+    // isActive is system-wide availability, so it belongs to the platform alone — an
+    // operator holds no bulk lever over it, not even for facilities it manages.
+    it('refuses an operator bulk enable/disable outright, assigned or not', async () => {
+      const [assigned] = await twoFacilities()
+      await seedFacilityManager(raw, { facilityId: assigned.id, userId: admin.id })
+
+      await authed('patch', '/facilities/bulk', adminToken)
+        .send({ ids: [assigned.id], action: 'enable' })
+        .expect(403)
+      await authed('patch', '/facilities/bulk', adminToken)
+        .send({ ids: [assigned.id], action: 'disable' })
+        .expect(403)
       expect((await raw.facility.findUniqueOrThrow({ where: { id: assigned.id } })).isActive).toBe(
         true,
       )

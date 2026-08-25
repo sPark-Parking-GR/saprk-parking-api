@@ -125,7 +125,7 @@ async function main() {
         amenities: [...data.amenities],
         cancellationPolicy: 'Free cancellation up to 1 hour before arrival.',
         isActive: true,
-        isVerified: true,
+        isPublished: true,
         kind: FacilityKind.BUSINESS,
       },
     })

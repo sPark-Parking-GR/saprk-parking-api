@@ -123,7 +123,7 @@ describe('facility search PostGIS (e2e)', () => {
         operatorId: UNCLAIMED_OPERATOR_ID,
         name: 'Unverified',
         ...CENTRE,
-        isVerified: false,
+        isPublished: false,
       }),
     ])
 
@@ -209,7 +209,7 @@ describe('facility search PostGIS (e2e)', () => {
             openingHoursJson: { is24h: true },
             amenities: [],
             isActive: true,
-            isVerified: true,
+            isPublished: true,
             kind: FacilityKind.BUSINESS,
           }
         }),

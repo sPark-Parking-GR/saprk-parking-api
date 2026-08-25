@@ -61,7 +61,7 @@ export interface OperatorFacilitySummary {
   name: string
   address: string
   isActive: boolean
-  isVerified: boolean
+  isPublished: boolean
   kind: string
 }
 

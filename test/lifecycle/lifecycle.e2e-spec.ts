@@ -160,7 +160,7 @@ describe('resource lifecycle (e2e)', () => {
       const opB = await seedOperator(raw)
       const listed = await seedFacility(raw, { operatorId: opA.id, ...CENTRE, name: 'Listed' })
       const archived = await seedFacility(raw, { operatorId: opB.id, ...CENTRE, name: 'Ghost' })
-      // Lifecycle flips WITHOUT clearing isActive/isVerified, isolating the lifecycle
+      // Lifecycle flips WITHOUT clearing isActive/isPublished, isolating the lifecycle
       // term that PUBLIC_VISIBLE_SQL carries precisely because raw SQL is unfiltered.
       await raw.facility.update({
         where: { id: archived.id },

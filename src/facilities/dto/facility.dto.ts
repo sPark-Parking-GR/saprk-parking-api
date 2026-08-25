@@ -133,7 +133,7 @@ export const updateFacilitySchema = z
     amenities: z.array(z.string().min(1).max(60)).max(50).optional(),
     cancellationPolicy: z.string().max(2_000).optional(),
     isActive: z.boolean().optional(),
-    isVerified: z.boolean().optional(),
+    isPublished: z.boolean().optional(),
     rank: z.number().int().optional(),
     // Platform-admin only, enforced in the controller and again in the service. Absent
     // from createFacilitySchema on purpose: every operator-created facility is BUSINESS,
@@ -163,7 +163,7 @@ export const listFacilitiesSchema = z.object({
   take: z.coerce.number().int().positive().max(100).default(20),
   q: z.string().trim().max(200).optional(),
   isActive: booleanFromQuery,
-  isVerified: booleanFromQuery,
+  isPublished: booleanFromQuery,
   kind: z.nativeEnum(FacilityKind).optional(),
   operatorId: z.string().min(1).optional(),
 })
@@ -236,7 +236,7 @@ export const adminMapSchema = z
     west: z.coerce.number().min(-180).max(180),
     q: z.string().trim().max(200).optional(),
     isActive: booleanFromQuery,
-    isVerified: booleanFromQuery,
+    isPublished: booleanFromQuery,
     kind: z.nativeEnum(FacilityKind).optional(),
     operatorId: z.string().min(1).optional(),
   })

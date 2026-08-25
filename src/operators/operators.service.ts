@@ -59,7 +59,7 @@ export class OperatorsService {
             name: true,
             address: true,
             isActive: true,
-            isVerified: true,
+            isPublished: true,
             kind: true,
           },
           orderBy: { createdAt: 'desc' },

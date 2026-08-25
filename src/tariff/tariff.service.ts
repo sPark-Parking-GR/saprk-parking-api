@@ -125,7 +125,7 @@ export class TariffService {
     }
 
     const facility = await this.prisma.facility.findFirst({
-      where: { id: facilityId, isActive: true, isVerified: true, kind: FacilityKind.BUSINESS },
+      where: { id: facilityId, isActive: true, isPublished: true, kind: FacilityKind.BUSINESS },
       include: {
         tariffAssignments: {
           where: { vehicleType },

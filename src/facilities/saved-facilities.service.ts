@@ -15,7 +15,7 @@ const SAVED_SELECT = {
       lng: true,
       kind: true,
       isActive: true,
-      isVerified: true,
+      isPublished: true,
     },
   },
 } satisfies Prisma.SavedFacilitySelect
@@ -44,7 +44,7 @@ export class SavedFacilitiesService {
 
   /**
    * Every bookmark the caller holds, archived facilities included. A facility the operator
-   * later deactivates, un-verifies or reclassifies RESTRICTED stays in the list carrying
+   * later deactivates, unpublishes or reclassifies RESTRICTED stays in the list carrying
    * `available: false`: filtering it out would make the user's own data disappear over an
    * operator-side change that is routinely reversed, and resolving each row through the
    * public detail read — which throws FacilityNotFoundError for exactly those states —
@@ -71,7 +71,7 @@ export class SavedFacilitiesService {
       where: {
         id: facilityId,
         isActive: true,
-        isVerified: true,
+        isPublished: true,
         kind: { not: FacilityKind.RESTRICTED },
       },
       select: { id: true },
@@ -108,6 +108,6 @@ function toItem(row: SavedRow): SavedFacilityItem {
     lng: facility.lng.toNumber(),
     savedAt: row.createdAt,
     available:
-      facility.isActive && facility.isVerified && facility.kind !== FacilityKind.RESTRICTED,
+      facility.isActive && facility.isPublished && facility.kind !== FacilityKind.RESTRICTED,
   }
 }

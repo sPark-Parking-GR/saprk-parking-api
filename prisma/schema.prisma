@@ -408,7 +408,7 @@ model Facility {
   amenities           String[]
   cancellationPolicy  String   @default("")
   isActive            Boolean  @default(false)
-  isVerified          Boolean  @default(false)
+  isPublished         Boolean  @default(false)
   rank                Int      @default(0)
   // Free public lot vs commercial parking business vs restricted. Classified at
   // ingestion; lets the two be surfaced and managed separately.
@@ -456,7 +456,7 @@ model Facility {
 
   @@unique([source, sourceRef])
   @@index([lat, lng])
-  @@index([isActive, isVerified])
+  @@index([isActive, isPublished])
   @@index([kind, isActive])
   // One-facility-per-operator cap for real operators is a PARTIAL unique index defined
   // in the migration (WHERE operatorId <> the synthetic unclaimed-import operator),

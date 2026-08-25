@@ -231,7 +231,7 @@ describe('consumer app endpoints (e2e)', () => {
     })
 
     it('refuses to save a facility that is not publicly visible', async () => {
-      await prisma.facility.update({ where: { id: facilityId }, data: { isVerified: false } })
+      await prisma.facility.update({ where: { id: facilityId }, data: { isPublished: false } })
 
       await post('/saved-facilities', { facilityId }, meToken).expect(404)
       await post('/saved-facilities', { facilityId: 'no-such-facility' }, meToken).expect(404)

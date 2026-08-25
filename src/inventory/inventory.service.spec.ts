@@ -83,7 +83,7 @@ describe('InventoryService.holdSlot', () => {
     client.facility.findUnique.mockResolvedValue({
       onlineQuota: 5,
       isActive: true,
-      isVerified: true,
+      isPublished: true,
       kind: FacilityKind.BUSINESS,
     })
     const service = makeService(client)
@@ -99,7 +99,7 @@ describe('InventoryService.holdSlot', () => {
     client.facility.findUnique.mockResolvedValue({
       onlineQuota: 5,
       isActive: true,
-      isVerified: true,
+      isPublished: true,
       kind: FacilityKind.BUSINESS,
     })
     const service = makeService(client)
@@ -118,7 +118,7 @@ describe('InventoryService.holdSlot', () => {
     client.facility.findUnique.mockResolvedValue({
       onlineQuota: 5,
       isActive: true,
-      isVerified: true,
+      isPublished: true,
       kind: FacilityKind.BUSINESS,
     })
     const service = makeService(client)
@@ -135,7 +135,7 @@ describe('InventoryService.holdSlot', () => {
     client.facility.findUnique.mockResolvedValue({
       onlineQuota: 5,
       isActive: false,
-      isVerified: true,
+      isPublished: true,
       kind: FacilityKind.BUSINESS,
     })
     const service = makeService(client)
@@ -149,7 +149,7 @@ describe('InventoryService.holdSlot', () => {
     client.facility.findUnique.mockResolvedValue({
       onlineQuota: 5,
       isActive: true,
-      isVerified: true,
+      isPublished: true,
       kind: FacilityKind.FREE_PUBLIC,
     })
     const service = makeService(client)

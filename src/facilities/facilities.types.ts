@@ -48,7 +48,7 @@ export interface AdminFacility {
   amenities: string[]
   cancellationPolicy: string
   isActive: boolean
-  isVerified: boolean
+  isPublished: boolean
   rank: number
   createdAt: Date
   updatedAt: Date
@@ -61,7 +61,7 @@ export interface AdminFacilityListItem {
   totalCapacity: number
   onlineQuota: number
   isActive: boolean
-  isVerified: boolean
+  isPublished: boolean
   kind: FacilityKind
   source: IngestSource | null
   operatorId: string | null
@@ -84,14 +84,14 @@ export interface AdminMapPoint {
   lng: number
   kind: FacilityKind
   isActive: boolean
-  isVerified: boolean
+  isPublished: boolean
 }
 
 export interface AdminMapParams {
   bounds: MapBounds
   q?: string
   isActive?: boolean
-  isVerified?: boolean
+  isPublished?: boolean
   kind?: FacilityKind
   operatorId?: string
 }

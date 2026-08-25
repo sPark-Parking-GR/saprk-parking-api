@@ -270,7 +270,7 @@ export class PromotionService {
           openingHoursJson: canonical.openingHours as unknown as Prisma.InputJsonValue,
           amenities: canonical.amenities,
           isActive: false,
-          isVerified: false,
+          isPublished: false,
           operatorId: UNCLAIMED_OPERATOR_ID,
           source: canonical.source,
           sourceRef: canonical.sourceRef,

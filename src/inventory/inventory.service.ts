@@ -75,13 +75,13 @@ export class InventoryService {
 
       const facility = await client.facility.findUnique({
         where: { id: params.facilityId },
-        select: { onlineQuota: true, isActive: true, isVerified: true, kind: true },
+        select: { onlineQuota: true, isActive: true, isPublished: true, kind: true },
       })
 
       // Booking eligibility mirrors TariffService.computeQuote's own facility lookup
-      // (isActive, isVerified, kind === BUSINESS) so holding without a prior quote
+      // (isActive, isPublished, kind === BUSINESS) so holding without a prior quote
       // can't bypass it.
-      if (!facility?.isActive || !facility.isVerified || facility.kind !== FacilityKind.BUSINESS) {
+      if (!facility?.isActive || !facility.isPublished || facility.kind !== FacilityKind.BUSINESS) {
         throw new FacilityNotBookableError(params.facilityId)
       }
 

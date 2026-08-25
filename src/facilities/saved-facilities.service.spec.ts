@@ -22,7 +22,7 @@ function savedRow(overrides: Record<string, unknown> = {}) {
       lng: new Prisma.Decimal(23.7275),
       kind: FacilityKind.BUSINESS,
       isActive: true,
-      isVerified: true,
+      isPublished: true,
       ...overrides,
     },
   }
@@ -59,7 +59,7 @@ describe('SavedFacilitiesService', () => {
     prisma.savedFacility.findMany.mockResolvedValue([
       savedRow(),
       savedRow({ id: 'f2', isActive: false }),
-      savedRow({ id: 'f3', isVerified: false }),
+      savedRow({ id: 'f3', isPublished: false }),
       savedRow({ id: 'f4', kind: FacilityKind.RESTRICTED }),
     ])
 
