@@ -42,6 +42,7 @@ export interface AdminFacility {
   lng: number
   totalCapacity: number
   onlineQuota: number
+  bookedOnlineSpots: number
   vehicleTypes: ContractVehicleType[]
   heightRestrictionCm: number | null
   openingHours: OpeningHours

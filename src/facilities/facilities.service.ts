@@ -1337,7 +1337,7 @@ export class FacilitiesService {
     }
   }
 
-  private toAdminFacility(facility: {
+  private async toAdminFacility(facility: {
     id: string
     operatorId: string | null
     kind: FacilityKind
@@ -1357,7 +1357,14 @@ export class FacilitiesService {
     rank: number
     createdAt: Date
     updatedAt: Date
-  }): AdminFacility {
+  }): Promise<AdminFacility> {
+    const now = new Date()
+    const { overlappingCount } = await this.inventory.checkAvailability({
+      facilityId: facility.id,
+      startsAt: now,
+      endsAt: now,
+    })
+
     return {
       id: facility.id,
       operatorId: facility.operatorId,
@@ -1368,6 +1375,7 @@ export class FacilitiesService {
       lng: facility.lng.toNumber(),
       totalCapacity: facility.totalCapacity,
       onlineQuota: facility.onlineQuota,
+      bookedOnlineSpots: overlappingCount,
       vehicleTypes: facility.vehicleTypes.map((v) => VEHICLE_FROM_PRISMA[v]),
       heightRestrictionCm: facility.heightRestrictionCm,
       openingHours: facility.openingHoursJson as unknown as OpeningHours,
