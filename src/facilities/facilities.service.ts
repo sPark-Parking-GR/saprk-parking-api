@@ -58,6 +58,7 @@ import type {
   FacilitySearchResult,
   FacilityTariffAssignments,
   MapBounds,
+  OnlineBookingStatus,
   ResolvedTariffAssignment,
 } from './facilities.types'
 
@@ -272,6 +273,8 @@ export class FacilitiesService {
 
     const results = candidates.map(({ facility, coords, distanceMeters }): FacilitySearchResult => {
       const free = facility.onlineQuota - (overlapByFacility.get(facility.id) ?? 0)
+      const onlineBookingStatus: OnlineBookingStatus =
+        facility.onlineQuota === 0 ? 'NOT_OFFERED' : free > 0 ? 'OPEN' : 'FULL'
       const isPromoted =
         facility.promotionPlan?.isActive === true &&
         this.isPromotionLive(facility.promotionPlan.startsAt, facility.promotionPlan.endsAt)
@@ -284,7 +287,8 @@ export class FacilitiesService {
         lat: coords.lat,
         lng: coords.lng,
         distanceMeters: Math.round(distanceMeters),
-        available: free > 0,
+        available: onlineBookingStatus === 'OPEN',
+        onlineBookingStatus,
         remainingSlots: Math.max(0, free),
         priceCents: vehicleType ? (priceByFacility.get(facility.id) ?? null) : null,
         currency: 'EUR',

@@ -131,6 +131,10 @@ export interface BulkFacilityResult {
   skipped?: BulkFacilitySkipped[]
 }
 
+// NOT_OFFERED distinguishes a facility that sells no online capacity at all
+// (onlineQuota 0 — walk-in only) from one whose quota is genuinely exhausted (FULL).
+export type OnlineBookingStatus = 'NOT_OFFERED' | 'FULL' | 'OPEN'
+
 export interface FacilitySearchResult {
   id: string
   name: string
@@ -140,6 +144,7 @@ export interface FacilitySearchResult {
   lng: number
   distanceMeters: number
   available: boolean
+  onlineBookingStatus: OnlineBookingStatus
   remainingSlots: number
   priceCents: number | null
   currency: string

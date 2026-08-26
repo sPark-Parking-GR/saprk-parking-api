@@ -94,13 +94,41 @@ describe('FacilitiesService.search', () => {
     const f1 = res.points.find((r) => r.id === 'f1')!
     expect(f1.remainingSlots).toBe(4)
     expect(f1.available).toBe(true)
+    expect(f1.onlineBookingStatus).toBe('OPEN')
     expect(f1.priceCents).toBe(500)
     expect(f1.thumbnailUrl).toBe('thumb.jpg')
 
     const f2 = res.points.find((r) => r.id === 'f2')!
     expect(f2.remainingSlots).toBe(0)
     expect(f2.available).toBe(false)
+    expect(f2.onlineBookingStatus).toBe('FULL')
     expect(f2.priceCents).toBeNull()
+  })
+
+  it('reports a zero-quota facility as NOT_OFFERED, not FULL', async () => {
+    prisma.$queryRaw.mockResolvedValue([{ id: 'f2' }, { id: 'f3' }])
+    prisma.facility.findMany.mockResolvedValue([
+      makeFacility({ id: 'f2', onlineQuota: 2 }),
+      makeFacility({ id: 'f3', onlineQuota: 0, lat: decimal(37.981), lng: decimal(23.731) }),
+    ])
+    inventory.countOverlappingByFacility.mockResolvedValue(new Map([['f2', 2]]))
+
+    const res = await service.search({
+      lat: 37.98,
+      lng: 23.73,
+      radiusMeters: 5000,
+      startsAt,
+      endsAt,
+    })
+
+    const f3 = res.points.find((r) => r.id === 'f3')!
+    expect(f3.onlineBookingStatus).toBe('NOT_OFFERED')
+    expect(f3.available).toBe(false)
+    expect(f3.remainingSlots).toBe(0)
+
+    const f2 = res.points.find((r) => r.id === 'f2')!
+    expect(f2.onlineBookingStatus).toBe('FULL')
+    expect(f2.available).toBe(false)
   })
 
   it('orders by rank desc ahead of distance', async () => {
