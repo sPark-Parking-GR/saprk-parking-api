@@ -1,10 +1,10 @@
+import { SUBSCRIPTION_FEATURES, type Entitlements } from '@spark/types'
 import {
   entitlementOverrideSchema,
   entitlementsSchema,
   hasFeature,
   mergeEntitlements,
   normalizeEntitlements,
-  type Entitlements,
 } from './entitlements.schema'
 
 const base: Entitlements = {
@@ -87,7 +87,7 @@ describe('mergeEntitlements', () => {
 
   // Replacement, not union: a deal that REMOVES a feature has to be expressible.
   it('replaces the feature list outright instead of unioning it', () => {
-    const withFeatures = { ...base, features: ['api.access' as const] }
+    const withFeatures = { ...base, features: ['team.management' as const] }
     expect(mergeEntitlements(withFeatures, { features: [] }).features).toEqual([])
   })
 
@@ -102,18 +102,28 @@ describe('normalizeEntitlements', () => {
   it('deduplicates and orders features so equal sets store identically', () => {
     const a = normalizeEntitlements({
       ...base,
-      features: ['api.access', 'analytics.advanced', 'api.access'],
+      features: ['team.management', 'analytics.advanced', 'team.management'],
     })
-    const b = normalizeEntitlements({ ...base, features: ['analytics.advanced', 'api.access'] })
-    expect(a.features).toEqual(['analytics.advanced', 'api.access'])
+    const b = normalizeEntitlements({ ...base, features: ['analytics.advanced', 'team.management'] })
+    expect(a.features).toEqual(['analytics.advanced', 'team.management'])
     expect(a).toEqual(b)
   })
 })
 
 describe('hasFeature', () => {
   it('reports membership of the granted set', () => {
-    const granted = { ...base, features: ['api.access' as const] }
-    expect(hasFeature(granted, 'api.access')).toBe(true)
-    expect(hasFeature(granted, 'branding.custom')).toBe(false)
+    const granted = { ...base, features: ['team.management' as const] }
+    expect(hasFeature(granted, 'team.management')).toBe(true)
+    expect(hasFeature(granted, 'analytics.advanced')).toBe(false)
+  })
+
+  // Every member of the closed set is wired to a gate; a flag with nothing behind it reads
+  // to a customer exactly like one that works, which is the failure this set exists to stop.
+  it('carries no feature the API does not enforce', () => {
+    expect([...SUBSCRIPTION_FEATURES].sort()).toEqual([
+      'analytics.advanced',
+      'support.priority',
+      'team.management',
+    ])
   })
 })

@@ -1,11 +1,11 @@
 import { Injectable } from '@nestjs/common'
-import {
-  InviteStatus,
-  LifecycleStatus,
-  OperatorInviteKind,
-  Prisma,
-  type SubscriptionStatus,
-} from '@prisma/client'
+import { InviteStatus, LifecycleStatus, OperatorInviteKind, Prisma } from '@prisma/client'
+import type {
+  EffectiveEntitlements,
+  Entitlements,
+  OperatorUsage,
+  SubscriptionFeature,
+} from '@spark/types'
 import {
   DefaultSubscriptionPlanMissingError,
   EntitlementLimitExceededError,
@@ -18,32 +18,12 @@ import {
   entitlementOverrideSchema,
   entitlementsSchema,
   mergeEntitlements,
-  type Entitlements,
-  type SubscriptionFeature,
 } from './entitlements.schema'
 import {
   DEFAULT_PLAN_CODE,
   LIVE_SUBSCRIPTION_STATUSES,
   UNLIMITED_ENTITLEMENTS,
 } from './subscriptions.constants'
-
-export interface OperatorUsage {
-  facilities: number
-  tariffPlans: number
-  staffSeats: number
-}
-
-export type EntitlementSource = 'exempt' | 'subscription' | 'subscription+override' | 'default'
-
-export interface EffectiveEntitlements {
-  operatorId: string
-  entitlements: Entitlements
-  source: EntitlementSource
-  planCode: string | null
-  planName: string | null
-  subscriptionId: string | null
-  status: SubscriptionStatus | null
-}
 
 /**
  * Resolves what an operator is allowed to do and refuses the operations that would exceed

@@ -4,8 +4,9 @@ import { entitlementOverrideSchema, entitlementsSchema } from '../entitlements.s
 
 // Stable, lowercase, machine-readable. It is the identifier DEFAULT_PLAN_CODE resolves and
 // the one any future provider mapping will key on, so it is immutable after creation —
-// there is no `code` on the update schema.
-const planCodeSchema = z
+// there is no `code` on the update schema. Exported because the driver catalog identifies
+// its plans by exactly the same rule, and two copies would drift.
+export const planCodeSchema = z
   .string()
   .trim()
   .min(2)
@@ -14,7 +15,7 @@ const planCodeSchema = z
 
 // ISO 4217. Money is integer minor units everywhere in this codebase; there is no decimal
 // price field to get wrong.
-const currencySchema = z
+export const currencySchema = z
   .string()
   .trim()
   .length(3)

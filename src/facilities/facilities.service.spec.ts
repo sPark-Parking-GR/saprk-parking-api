@@ -9,6 +9,12 @@ import type { EntitlementService } from '../subscriptions/entitlement.service'
 import type { TariffService } from '../tariff/tariff.service'
 import type { OperatorScopeService } from '../common/authz/operator-scope.service'
 
+import type { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
+
+const quotaThresholdStub = (): { checkOperatorQuotaThresholds: jest.Mock } => ({
+  checkOperatorQuotaThresholds: jest.fn().mockResolvedValue(undefined),
+})
+
 const decimal = (n: number) => ({ toNumber: () => n }) as never
 
 // Rebuilds the Sql the tagged template would have produced, so a test can inspect the
@@ -55,6 +61,7 @@ describe('FacilitiesService.search', () => {
       {} as unknown as EntitlementService,
       {} as unknown as LifecycleService,
       clusterIndex as unknown as FacilityClusterIndexService,
+      quotaThresholdStub() as unknown as QuotaThresholdService,
     )
   })
 
@@ -367,6 +374,7 @@ describe('FacilitiesService.getDetail', () => {
       {} as unknown as EntitlementService,
       {} as unknown as LifecycleService,
       {} as unknown as FacilityClusterIndexService,
+      quotaThresholdStub() as unknown as QuotaThresholdService,
     )
   })
 

@@ -1,8 +1,17 @@
 import { ForbiddenException, Injectable } from '@nestjs/common'
 import { OperatorMemberRole, OperatorStatus, UserRole, type Prisma } from '@prisma/client'
-import { isPlatformRole, scopesFor, type AuthUser, type OrgPermission } from '@spark/types'
+import {
+  DEFAULT_STAFF_SCOPES,
+  isPlatformRole,
+  isStaffGrantableScope,
+  scopesFor,
+  type AuthUser,
+  type OrgPermission,
+} from '@spark/types'
 import { RequestContext } from '../common/context/request-context'
+import { SubscriptionFeatureRequiredError } from '../common/errors/domain.errors'
 import { PrismaService } from '../prisma/prisma.service'
+import { EntitlementService } from '../subscriptions/entitlement.service'
 import { OperatorAccessService } from './operator-access.service'
 import {
   AdminScopesNotEditableError,
@@ -10,6 +19,7 @@ import {
   OperatorMemberNotFoundError,
   SelfMembershipRemovalError,
   SelfRoleChangeError,
+  StaffScopeNotGrantableError,
   type OperatorMemberSummary,
 } from './operators.types'
 
@@ -21,6 +31,7 @@ export class OperatorMembersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly access: OperatorAccessService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async list(actor: AuthUser, requestedOperatorId: string): Promise<OperatorMemberSummary[]> {
@@ -132,13 +143,19 @@ export class OperatorMembersService {
     const operatorId = await this.assertMayManage(actor, requestedOperatorId)
     await this.access.assertScope(actor, operatorId, 'org:member.manage')
 
+    const next = [...new Set(scopes)].sort()
+    this.assertStaffGrantable(next)
+
     return this.prisma.$transaction(async (tx) => {
       await this.lockOperator(tx, operatorId)
 
       const membership = await this.findMembership(tx, operatorId, userId)
+      // Before the plan gate, not after: an administrator's set is derived on every plan
+      // there is, so upgrading would not make this request succeed and a "your plan does
+      // not include this" refusal would be a lie the caller could act on.
       if (membership.role === OperatorMemberRole.ADMIN) throw new AdminScopesNotEditableError()
 
-      const next = [...new Set(scopes)].sort()
+      await this.assertMayCustomiseScopes(operatorId, next, tx)
 
       await tx.operatorMembership.update({
         where: { id: membership.id },
@@ -164,6 +181,39 @@ export class OperatorMembersService {
         scopes: next,
       }
     })
+  }
+
+  private assertStaffGrantable(scopes: readonly OrgPermission[]): void {
+    const forbidden = scopes.filter((scope) => !isStaffGrantableScope(scope))
+    if (forbidden.length > 0) throw new StaffScopeNotGrantableError(forbidden)
+  }
+
+  /**
+   * `team.management` is the right to DIFFER from the default staff set, not the right to
+   * have staff at all — seats are what sell that, and EntitlementService.assertCanAddStaffSeat
+   * already enforces them. So a plan without the feature can still add and manage people;
+   * their scopes are simply the same DEFAULT_STAFF_SCOPES every invited staff member starts
+   * with, and re-submitting exactly that set is not a customisation and stays allowed.
+   *
+   * Takes the caller's transaction client for the same reason every other entitlement
+   * assert does: the plan is read under the ParkingOperator lock the mutation already
+   * holds, so a concurrent plan change cannot land between the check and the write.
+   */
+  private async assertMayCustomiseScopes(
+    operatorId: string,
+    scopes: readonly OrgPermission[],
+    tx: Prisma.TransactionClient,
+  ): Promise<void> {
+    if (this.isDefaultStaffSet(scopes)) return
+    if (await this.entitlements.hasFeature(operatorId, 'team.management', tx)) return
+    throw new SubscriptionFeatureRequiredError('team.management')
+  }
+
+  private isDefaultStaffSet(scopes: readonly OrgPermission[]): boolean {
+    return (
+      scopes.length === DEFAULT_STAFF_SCOPES.length &&
+      DEFAULT_STAFF_SCOPES.every((scope) => scopes.includes(scope))
+    )
   }
 
   private async assertMayManage(actor: AuthUser, requestedOperatorId: string): Promise<string> {

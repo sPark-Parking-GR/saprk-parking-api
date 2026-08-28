@@ -1,18 +1,24 @@
 import { ForbiddenException } from '@nestjs/common'
 import { OperatorMemberRole, OperatorStatus, UserRole } from '@prisma/client'
-import type { AuthUser } from '@spark/types'
+import { DEFAULT_STAFF_SCOPES, type AuthUser } from '@spark/types'
 import { OperatorScopeService } from '../common/authz/operator-scope.service'
 import { RequestContext } from '../common/context/request-context'
-import { OperatorTargetRequiredError } from '../common/errors/domain.errors'
+import {
+  OperatorTargetRequiredError,
+  SubscriptionFeatureRequiredError,
+} from '../common/errors/domain.errors'
 import type { PrismaService } from '../prisma/prisma.service'
+import type { EntitlementService } from '../subscriptions/entitlement.service'
 import { OperatorAccessService } from './operator-access.service'
 import { OperatorMembersService } from './operator-members.service'
 import {
+  AdminScopesNotEditableError,
   LastOperatorAdminError,
   OperatorMemberNotFoundError,
   OperatorNotFoundError,
   SelfMembershipRemovalError,
   SelfRoleChangeError,
+  StaffScopeNotGrantableError,
 } from './operators.types'
 
 const platformUser: AuthUser = {
@@ -53,6 +59,7 @@ describe('OperatorMembersService', () => {
     $executeRaw: jest.Mock
     $transaction: jest.Mock
   }
+  let entitlements: { hasFeature: jest.Mock }
   let service: OperatorMembersService
 
   /** Callers' own memberships, which drive both scope resolution and the ADMIN check. */
@@ -112,9 +119,11 @@ describe('OperatorMembersService', () => {
       $transaction: jest.fn(async (cb: (t: typeof prisma) => unknown) => cb(prisma)),
     }
     const prismaService = prisma as unknown as PrismaService
+    entitlements = { hasFeature: jest.fn().mockResolvedValue(true) }
     service = new OperatorMembersService(
       prismaService,
       new OperatorAccessService(prismaService, new OperatorScopeService(prismaService)),
+      entitlements as unknown as EntitlementService,
     )
   })
 
@@ -155,6 +164,115 @@ describe('OperatorMembersService', () => {
     it('refuses a consumer account (service-layer re-check)', async () => {
       await expect(service.list(consumerUser, 'op-a')).rejects.toBeInstanceOf(ForbiddenException)
       expect(prisma.operatorMembership.findMany).not.toHaveBeenCalled()
+    })
+
+    // The read half of the structural exclusion: a row written before the rule existed, or
+    // by anything that bypassed the write path, still grants nothing.
+    it('never reports org:billing.view for a staff member, even if the row holds it', async () => {
+      withCallerMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      targetMembership(OperatorMemberRole.STAFF)
+      prisma.operatorMembership.findMany.mockResolvedValueOnce([
+        { operatorId: 'op-a', role: OperatorMemberRole.ADMIN },
+      ])
+      prisma.operatorMembership.findMany.mockResolvedValueOnce([
+        {
+          userId: 'user-2',
+          role: OperatorMemberRole.STAFF,
+          scopes: ['org:booking.read', 'org:billing.view'],
+          createdAt: new Date('2026-02-01'),
+          user: { email: 'member@biz.gr' },
+        },
+      ])
+
+      const [member] = await service.list(operatorUser, 'op-a')
+      expect(member!.scopes).toEqual(['org:booking.read'])
+    })
+
+    it('still derives org:billing.view for an admin', async () => {
+      withCallerMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      targetMembership(OperatorMemberRole.ADMIN)
+      prisma.operatorMembership.findMany.mockResolvedValueOnce([
+        { operatorId: 'op-a', role: OperatorMemberRole.ADMIN },
+      ])
+      prisma.operatorMembership.findMany.mockResolvedValueOnce([
+        {
+          userId: 'user-2',
+          role: OperatorMemberRole.ADMIN,
+          scopes: [],
+          createdAt: new Date('2026-02-01'),
+          user: { email: 'owner@biz.gr' },
+        },
+      ])
+
+      const [member] = await service.list(operatorUser, 'op-a')
+      expect(member!.scopes).toContain('org:billing.view')
+    })
+  })
+
+  describe('setScopes', () => {
+    beforeEach(() => {
+      withCallerMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      targetMembership(OperatorMemberRole.STAFF)
+    })
+
+    it('stores a customised set for an operator whose plan sells team management', async () => {
+      await expect(
+        service.setScopes(operatorUser, 'op-a', 'user-2', ['org:scan.execute']),
+      ).resolves.toMatchObject({ scopes: ['org:scan.execute'] })
+
+      // Third argument is the caller's transaction client: the plan is read under the same
+      // operator lock the write takes, not before it.
+      expect(entitlements.hasFeature).toHaveBeenCalledWith('op-a', 'team.management', prisma)
+      expect(prisma.operatorMembership.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { scopes: ['org:scan.execute'] } }),
+      )
+    })
+
+    it('refuses a customised set without the team.management feature', async () => {
+      entitlements.hasFeature.mockResolvedValue(false)
+
+      await expect(
+        service.setScopes(operatorUser, 'op-a', 'user-2', ['org:scan.execute']),
+      ).rejects.toBeInstanceOf(SubscriptionFeatureRequiredError)
+      expect(prisma.operatorMembership.update).not.toHaveBeenCalled()
+    })
+
+    // The feature sells the right to DIFFER from the default, not the right to have staff.
+    it('allows the default staff set without the feature', async () => {
+      entitlements.hasFeature.mockResolvedValue(false)
+
+      await expect(
+        service.setScopes(operatorUser, 'op-a', 'user-2', [...DEFAULT_STAFF_SCOPES]),
+      ).resolves.toMatchObject({ scopes: [...DEFAULT_STAFF_SCOPES].sort() })
+    })
+
+    it('rejects org:billing.view for a staff member however it arrives', async () => {
+      await expect(
+        service.setScopes(operatorUser, 'op-a', 'user-2', [
+          'org:booking.read',
+          'org:billing.view',
+        ]),
+      ).rejects.toBeInstanceOf(StaffScopeNotGrantableError)
+      expect(prisma.operatorMembership.update).not.toHaveBeenCalled()
+    })
+
+    it('refuses to edit an admin’s derived set at all', async () => {
+      targetMembership(OperatorMemberRole.ADMIN)
+
+      await expect(
+        service.setScopes(operatorUser, 'op-a', 'user-2', ['org:scan.execute']),
+      ).rejects.toBeInstanceOf(AdminScopesNotEditableError)
+    })
+
+    // The derived-set invariant outranks the plan gate: an upgrade would not make this
+    // request succeed, so reporting it as a missing feature would send the caller to buy one.
+    it('reports an admin target as underivable even when the plan sells nothing', async () => {
+      targetMembership(OperatorMemberRole.ADMIN)
+      entitlements.hasFeature.mockResolvedValue(false)
+
+      await expect(
+        service.setScopes(operatorUser, 'op-a', 'user-2', ['org:scan.execute']),
+      ).rejects.toBeInstanceOf(AdminScopesNotEditableError)
     })
   })
 

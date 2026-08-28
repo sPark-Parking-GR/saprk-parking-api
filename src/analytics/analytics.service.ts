@@ -5,8 +5,10 @@ import { OperatorScopeService } from '../common/authz/operator-scope.service'
 import {
   AnalyticsScopeForbiddenError,
   MixedCurrencyAnalyticsError,
+  SubscriptionFeatureRequiredError,
 } from '../common/errors/domain.errors'
 import { PrismaService } from '../prisma/prisma.service'
+import { EntitlementService } from '../subscriptions/entitlement.service'
 import type {
   AnalyticsSummaryDto,
   RevenueBucket,
@@ -14,6 +16,7 @@ import type {
   TopFacilitiesDto,
 } from './dto/analytics.dto'
 import type {
+  AnalyticsComparison,
   AnalyticsSummary,
   OccupancySummary,
   RevenuePoint,
@@ -99,12 +102,61 @@ export class AnalyticsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly operatorScope: OperatorScopeService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async summary(user: AuthUser, query: AnalyticsSummaryDto): Promise<AnalyticsSummary> {
     const operatorIds = await this.resolveOperatorIds(user, query.operatorId)
-    const { from, to } = query
+    return this.summaryFor(operatorIds, query.from, query.to)
+  }
 
+  /**
+   * The paid tier of the same panel. The basic summary above is deliberately left ungated —
+   * an operator who stops paying for the deeper view must not lose sight of their own
+   * revenue, and a metering surface that goes dark is a support ticket, not an upsell.
+   */
+  async advancedSummary(user: AuthUser, query: AnalyticsSummaryDto): Promise<AnalyticsComparison> {
+    const operatorIds = await this.resolveOperatorIds(user, query.operatorId)
+    await this.assertAdvancedAnalytics(operatorIds)
+
+    const { from, to } = query
+    const previousFrom = new Date(from.getTime() - (to.getTime() - from.getTime()))
+
+    const [current, previous] = await Promise.all([
+      this.summaryFor(operatorIds, from, to),
+      this.summaryFor(operatorIds, previousFrom, from),
+    ])
+
+    return {
+      current,
+      previous,
+      netRevenueDeltaCents: current.netRevenueCents - previous.netRevenueCents,
+      bookingCountDelta: current.bookingCount - previous.bookingCount,
+      occupancyRatioDelta:
+        Math.round((current.occupancy.ratio - previous.occupancy.ratio) * 10_000) / 10_000,
+    }
+  }
+
+  /**
+   * The feature is the TENANT's purchase, so it is checked against the operators being
+   * reported on rather than the caller's own role. A platform-wide view (null) belongs to no
+   * tenant and is therefore ungated — there is no plan to consult.
+   */
+  private async assertAdvancedAnalytics(operatorIds: string[] | null): Promise<void> {
+    if (operatorIds === null) return
+
+    for (const operatorId of operatorIds) {
+      if (!(await this.entitlements.hasFeature(operatorId, 'analytics.advanced'))) {
+        throw new SubscriptionFeatureRequiredError('analytics.advanced')
+      }
+    }
+  }
+
+  private async summaryFor(
+    operatorIds: string[] | null,
+    from: Date,
+    to: Date,
+  ): Promise<AnalyticsSummary> {
     const [revenueRows, occupancyRows] = await Promise.all([
       this.prisma.$queryRaw<RevenueRow[]>`
         SELECT

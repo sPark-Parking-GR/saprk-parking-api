@@ -40,6 +40,14 @@ export class AnalyticsController {
     return this.analytics.summary(this.reportingUser(user), query)
   }
 
+  @Get('advanced-summary')
+  advancedSummary(
+    @Query(new ZodValidationPipe(analyticsSummarySchema)) query: AnalyticsSummaryDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.analytics.advancedSummary(this.reportingUser(user), query)
+  }
+
   @Get('revenue-series')
   revenueSeries(
     @Query(new ZodValidationPipe(revenueSeriesSchema)) query: RevenueSeriesDto,

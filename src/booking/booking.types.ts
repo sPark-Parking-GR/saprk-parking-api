@@ -98,9 +98,12 @@ export interface BookingDetail {
 }
 
 // The subset of a booking check-out repricing needs: the booked start, the price the
-// customer agreed to, and the plan revision that produced it.
+// customer agreed to, the plan revision that produced it, and whose booking it is — the
+// last so a subscribed rider's discount survives to the final price instead of being applied
+// at quote time and silently dropped at check-out.
 export interface PinnedStay {
   id: string
+  userId: string
   startsAt: Date
   quotedPriceCents: number
   currency: string

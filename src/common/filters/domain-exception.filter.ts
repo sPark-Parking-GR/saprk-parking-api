@@ -11,6 +11,7 @@ import { Prisma } from '@prisma/client'
 import { AuthError, EmailInUseError, InvalidCredentialsError, InvalidTokenError } from '@spark/auth'
 import {
   AccessCodeGenerationError,
+  AlreadySubscribedToPlanError,
   AnalyticsScopeForbiddenError,
   ApprovalAlreadyPendingError,
   ApprovalExpiredError,
@@ -34,6 +35,7 @@ import {
   LifecycleResourceNotFoundError,
   LifecycleRestoreConflictError,
   LifecycleTransitionError,
+  LiveSubscriptionNotFoundError,
   MixedCurrencyAnalyticsError,
   NoApplicableTariffError,
   NoAvailabilityError,
@@ -46,6 +48,7 @@ import {
   RefundFailedError,
   SelfApprovalError,
   SubscriptionDowngradeBlockedError,
+  SubscriptionFeatureRequiredError,
   SubscriptionPlanCodeTakenError,
   SubscriptionPlanInUseError,
   SubscriptionPlanNotFoundError,
@@ -209,7 +212,8 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof TicketNotFoundError ||
       exception instanceof LifecycleResourceNotFoundError ||
       exception instanceof ApprovalNotFoundError ||
-      exception instanceof SubscriptionPlanNotFoundError
+      exception instanceof SubscriptionPlanNotFoundError ||
+      exception instanceof LiveSubscriptionNotFoundError
     ) {
       return HttpStatus.NOT_FOUND
     }
@@ -219,7 +223,10 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof OperatorSuspendedError ||
       exception instanceof AnalyticsScopeForbiddenError ||
       exception instanceof SelfApprovalError ||
-      exception instanceof SelfSignupDisabledError
+      exception instanceof SelfSignupDisabledError ||
+      // 403 rather than 409: nothing about the request conflicts with current state, the
+      // caller simply has not bought the capability. Retrying it unchanged never succeeds.
+      exception instanceof SubscriptionFeatureRequiredError
     ) {
       return HttpStatus.FORBIDDEN
     }
@@ -239,6 +246,7 @@ export class DomainExceptionFilter implements ExceptionFilter {
       exception instanceof DefaultTariffRequiredError ||
       exception instanceof EntitlementLimitExceededError ||
       exception instanceof SubscriptionPlanCodeTakenError ||
+      exception instanceof AlreadySubscribedToPlanError ||
       exception instanceof SubscriptionPlanInUseError ||
       exception instanceof FacilityHasActiveBookingsError ||
       exception instanceof FacilityHasNoOperatorError ||

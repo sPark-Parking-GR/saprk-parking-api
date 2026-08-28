@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { BookingStatus, PaymentStatus, Prisma, RefundStatus } from '@prisma/client'
 import type { PaymentWebhookEvent } from '@spark/types'
+import { isWebhookReplayTarget, type WebhookSurface } from '../common/webhook-surface'
 import { NotificationsService } from '../notifications/notifications.service'
 import { PaymentsService } from '../payments/payments.service'
 import { PrismaService } from '../prisma/prisma.service'
@@ -50,6 +51,14 @@ const paymentInclude = {
 type PaymentWithBooking = Prisma.PaymentGetPayload<{ include: typeof paymentInclude }>
 
 /**
+ * This handler's half of the WebhookEvent replay gate. Booking payments have never collided
+ * with the subscription handlers — they consume a disjoint set of provider event types — but
+ * the ledger's unique key is compound for all three writers, so the surface has to be named
+ * on every insert or the gate silently stops matching.
+ */
+const SURFACE: WebhookSurface = 'payments'
+
+/**
  * Applies provider webhook events to payment/booking state. The webhook, not the
  * client, is the authoritative source of payment state: a client that pays and
  * drops the connection still gets its booking confirmed here.
@@ -68,12 +77,13 @@ export class PaymentEventsService {
     let result: HandlerResult
     try {
       result = await this.prisma.$transaction(async (tx) => {
-        // Insert-first: the unique providerEventId is the replay gate. A redelivery
-        // fails here with P2002 before any state is touched; a handler failure rolls
-        // this insert back with it, so the provider's retry gets a clean attempt.
+        // Insert-first: the unique (providerEventId, surface) is the replay gate. A
+        // redelivery fails here with P2002 before any state is touched; a handler failure
+        // rolls this insert back with it, so the provider's retry gets a clean attempt.
         await tx.webhookEvent.create({
           data: {
             providerEventId: event.id,
+            surface: SURFACE,
             provider: this.payments.providerName,
             type: event.type,
             payload: event.raw == null ? Prisma.JsonNull : (event.raw as Prisma.InputJsonValue),
@@ -83,14 +93,21 @@ export class PaymentEventsService {
         const handled = await this.dispatch(event, tx)
 
         await tx.webhookEvent.update({
-          where: { providerEventId: event.id },
+          where: { providerEventId_surface: { providerEventId: event.id, surface: SURFACE } },
           data: { outcome: handled.outcome, processedAt: new Date() },
         })
 
         return handled
       })
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      // Only the replay gate itself. The same transaction writes Payment, Booking and Refund,
+      // any of whose uniques could raise a P2002 of their own — acknowledging one of those as
+      // a duplicate would 200 a genuine failure the provider would then never retry.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002' &&
+        isWebhookReplayTarget((error.meta as { target?: unknown } | undefined)?.target)
+      ) {
         this.logger.log(`Webhook event ${event.id} already processed, acknowledging replay`)
         return 'duplicate'
       }

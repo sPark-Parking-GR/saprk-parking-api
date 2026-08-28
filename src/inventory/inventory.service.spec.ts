@@ -69,6 +69,7 @@ describe('InventoryService.holdSlot', () => {
     startsAt,
     endsAt,
     quotedPriceCents: 500,
+    discountCents: 0,
     vehiclePlate: 'ABC123',
     vehicleType: 'CAR',
     accessCode: 'CODE1234',
@@ -128,6 +129,25 @@ describe('InventoryService.holdSlot', () => {
     const data = client.booking.create.mock.calls[0]![0].data
     expect(data.tariffPlanId).toBe('plan1')
     expect(data.tariffPlanVersion).toBe(3)
+  })
+
+  it('records the quote discount, including an explicit zero for an unsubscribed rider', async () => {
+    const client = makeClient()
+    client.facility.findUnique.mockResolvedValue({
+      onlineQuota: 5,
+      isActive: true,
+      isPublished: true,
+      kind: FacilityKind.BUSINESS,
+    })
+    const service = makeService(client)
+
+    await service.holdSlot({ ...holdParams, discountCents: 0 })
+    await service.holdSlot({ ...holdParams, discountCents: 150 })
+
+    // 0 rather than undefined: NULL on this column means "predates the column", and a row
+    // written today must never claim that.
+    expect(client.booking.create.mock.calls[0]![0].data.discountCents).toBe(0)
+    expect(client.booking.create.mock.calls[1]![0].data.discountCents).toBe(150)
   })
 
   it('rejects an inactive facility with a domain error, not a raw Error', async () => {

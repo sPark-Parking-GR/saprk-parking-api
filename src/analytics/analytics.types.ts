@@ -28,6 +28,22 @@ export interface AnalyticsSummary extends RevenueTotals {
   occupancy: OccupancySummary
 }
 
+/**
+ * The deeper cut of the same panels, sold as `analytics.advanced`: the range against the
+ * one immediately before it, so a number can be read as a trend rather than a level.
+ *
+ * The previous range is the SAME LENGTH and ends where the current one begins, so the two
+ * tile without overlap and a month is never compared against a fortnight.
+ */
+export interface AnalyticsComparison {
+  current: AnalyticsSummary
+  previous: AnalyticsSummary
+  netRevenueDeltaCents: number
+  bookingCountDelta: number
+  /** Difference of two ratios, so it is in ratio units too — not percentage points. */
+  occupancyRatioDelta: number
+}
+
 export interface RevenuePoint extends RevenueTotals {
   bucketStart: Date
 }

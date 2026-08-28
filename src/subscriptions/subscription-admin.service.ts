@@ -1,12 +1,20 @@
 import { ForbiddenException, Injectable } from '@nestjs/common'
 import { LifecycleStatus, Prisma, SubscriptionStatus, type SubscriptionPlan } from '@prisma/client'
-import { hasPlatformPermission, type AuthUser, type PlatformPermission } from '@spark/types'
+import {
+  hasPlatformPermission,
+  type AuthUser,
+  type EntitlementOverride,
+  type OperatorSubscriptionView,
+  type PlanView,
+  type PlatformPermission,
+} from '@spark/types'
 import {
   SubscriptionPlanCodeTakenError,
   SubscriptionPlanInUseError,
   SubscriptionPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import { PrismaService } from '../prisma/prisma.service'
+import { SubscriptionBillingService } from '../subscription-billing/subscription-billing.service'
 import type {
   ArchivePlanDto,
   AssignSubscriptionDto,
@@ -15,48 +23,16 @@ import type {
   SetOverrideDto,
   UpdatePlanDto,
 } from './dto/subscriptions.dto'
-import {
-  EntitlementService,
-  type EffectiveEntitlements,
-  type OperatorUsage,
-} from './entitlement.service'
+import { EntitlementService } from './entitlement.service'
 import {
   entitlementOverrideSchema,
   entitlementsSchema,
   mergeEntitlements,
   normalizeEntitlements,
-  type EntitlementOverride,
-  type Entitlements,
 } from './entitlements.schema'
 import { DEFAULT_PLAN_CODE, LIVE_SUBSCRIPTION_STATUSES } from './subscriptions.constants'
 
 const BILLING: PlatformPermission = 'platform:billing.manage'
-
-export interface PlanView {
-  id: string
-  code: string
-  name: string
-  description: string | null
-  priceCents: number
-  currency: string
-  interval: SubscriptionPlan['interval']
-  entitlements: Entitlements
-  isPublic: boolean
-  sortOrder: number
-  lifecycleStatus: LifecycleStatus
-  subscribers: number
-}
-
-export interface OperatorSubscriptionView extends EffectiveEntitlements {
-  usage: OperatorUsage
-  planId: string | null
-  currentPeriodStart: Date | null
-  currentPeriodEnd: Date | null
-  trialEndsAt: Date | null
-  cancelAtPeriodEnd: boolean
-  providerSubscriptionId: string | null
-  entitlementOverride: EntitlementOverride | null
-}
 
 /**
  * The platform-administration face of billing. Every method re-checks
@@ -74,6 +50,7 @@ export class SubscriptionAdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly entitlements: EntitlementService,
+    private readonly billing: SubscriptionBillingService,
   ) {}
 
   async listPlans(actor: AuthUser, query: ListPlansDto): Promise<PlanView[]> {
@@ -232,7 +209,7 @@ export class SubscriptionAdminService {
   ): Promise<OperatorSubscriptionView> {
     this.assertBilling(actor, 'assign operator subscriptions')
 
-    await this.prisma.$transaction(async (tx) => {
+    const superseded = await this.prisma.$transaction(async (tx) => {
       await this.lockOperator(tx, operatorId)
 
       const plan = await this.loadPlan(dto.planId, tx)
@@ -259,7 +236,34 @@ export class SubscriptionAdminService {
         entitlementOverride: this.overrideForWrite(override),
       }
 
-      if (current) {
+      /**
+       * A DB-only cancellation is not a cancellation. Now that an operator can reach a real
+       * provider subscription through self-serve checkout, the provider goes on charging
+       * their card on its own schedule and nothing in this database points at the agreement
+       * doing it — a discrepancy that stays invisible until the customer complains.
+       *
+       * Two writes end a provider-billed agreement: cancelling it outright, and moving the
+       * tenant to a different plan — the second is a replacement, and leaving the old
+       * subscription live would bill them for both. Null when the current row was assigned by
+       * hand and never billed, which is every row that predates this phase.
+       */
+      const providerSubscriptionId =
+        current?.providerSubscriptionId != null && (terminal || current.planId !== plan.id)
+          ? current.providerSubscriptionId
+          : null
+
+      if (current && providerSubscriptionId && !terminal) {
+        // Retired as its own CANCELLED row, keeping the provider id, rather than reused for
+        // the new plan: the `subscription.deleted` our cancellation provokes must land on
+        // this record and stop, not on the plan the administrator just granted.
+        await tx.operatorSubscription.update({
+          where: { id: current.id },
+          data: { status: SubscriptionStatus.CANCELLED, cancelledAt: new Date() },
+        })
+        await tx.operatorSubscription.create({
+          data: { ...data, operatorId, currentPeriodStart: new Date() },
+        })
+      } else if (current) {
         await tx.operatorSubscription.update({ where: { id: current.id }, data })
       } else {
         await tx.operatorSubscription.create({
@@ -276,11 +280,49 @@ export class SubscriptionAdminService {
           planCode: plan.code,
           status: dto.status,
           hasOverride: override !== null,
+          cancelledProviderSubscriptionId: providerSubscriptionId,
         },
       )
+
+      return providerSubscriptionId
     })
 
+    if (superseded) await this.cancelAtProvider(actor, operatorId, superseded)
+
     return this.describeOperator(operatorId)
+  }
+
+  /**
+   * Outside the transaction on purpose: cancelling is a network call to the billing provider,
+   * and holding the ParkingOperator row lock across it would let one slow Stripe response
+   * block every other write on that tenant — facility creates included, since they take the
+   * same lock.
+   *
+   * Best-effort, mirroring NotificationsService.safeSend — an administrator's override must
+   * not be blocked by a transient provider outage, so the local write stands either way. But
+   * "best-effort" is not "silent": a failure means the provider is still charging a tenant
+   * this database says is cancelled, which is exactly the discrepancy a billing
+   * reconciliation needs on record rather than in a log line that rotates away.
+   */
+  private async cancelAtProvider(
+    actor: AuthUser,
+    operatorId: string,
+    providerSubscriptionId: string,
+  ): Promise<void> {
+    const cancelled = await this.billing.cancelSubscriptionBestEffort(providerSubscriptionId, {
+      reason: 'admin_assign',
+      operatorId,
+    })
+
+    if (!cancelled) {
+      await this.audit(
+        actor,
+        'operator_subscription.provider_cancel_failed',
+        'OperatorSubscription',
+        operatorId,
+        { providerSubscriptionId },
+      )
+    }
   }
 
   /**

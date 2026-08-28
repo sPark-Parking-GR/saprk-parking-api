@@ -84,6 +84,63 @@ export function seedOperatorSubscription(prisma: PrismaClient, seed: OperatorSub
   })
 }
 
+export interface DriverSubscriptionPlanSeed {
+  id?: string
+  code?: string
+  name?: string
+  bookingDiscountBps?: number | null
+  bookingFeeWaived?: boolean
+  freeCancellations?: number | null
+  features?: string[]
+  priceCents?: number
+}
+
+/**
+ * No migration seeds a driver plan and none needs to: a rider with no DriverSubscription
+ * resolves to the free tier in code rather than to a catalog row, so a suite only seeds
+ * this when it is testing what a PAID rider gets.
+ */
+export function seedDriverSubscriptionPlan(
+  prisma: PrismaClient,
+  seed: DriverSubscriptionPlanSeed = {},
+) {
+  return prisma.driverSubscriptionPlan.create({
+    data: {
+      ...(seed.id ? { id: seed.id } : {}),
+      code: seed.code ?? `driver_${uniqueSuffix()}`,
+      name: seed.name ?? 'Driver Plus',
+      priceCents: seed.priceCents ?? 499,
+      entitlements: {
+        bookingDiscountBps:
+          seed.bookingDiscountBps === undefined ? 1_000 : seed.bookingDiscountBps,
+        bookingFeeWaived: seed.bookingFeeWaived ?? false,
+        freeCancellations: seed.freeCancellations === undefined ? null : seed.freeCancellations,
+        features: seed.features ?? [],
+      },
+    },
+  })
+}
+
+export interface DriverSubscriptionSeed {
+  userId: string
+  planId: string
+  status?: SubscriptionStatus
+  entitlementOverride?: Prisma.InputJsonValue
+}
+
+export function seedDriverSubscription(prisma: PrismaClient, seed: DriverSubscriptionSeed) {
+  return prisma.driverSubscription.create({
+    data: {
+      userId: seed.userId,
+      planId: seed.planId,
+      status: seed.status ?? SubscriptionStatus.ACTIVE,
+      ...(seed.entitlementOverride === undefined
+        ? {}
+        : { entitlementOverride: seed.entitlementOverride }),
+    },
+  })
+}
+
 function uniqueSuffix(): string {
   return randomUUID().replace(/-/g, '').slice(0, 12)
 }
@@ -228,6 +285,11 @@ export interface BookingSeed {
   endsAt: Date
   status?: BookingStatus
   quotedPriceCents?: number
+  /**
+   * Left undefined to reproduce a row from before 20260827400000, which stores NULL and
+   * means "unknown" rather than "saved nothing".
+   */
+  discountCents?: number
   vehicleType?: VehicleType
   currency?: string
   /** Set to mint a scannable ticket; production writes this only at confirm time. */
@@ -246,6 +308,7 @@ export function seedBooking(prisma: PrismaClient, seed: BookingSeed): Promise<Bo
       startsAt: seed.startsAt,
       endsAt: seed.endsAt,
       quotedPriceCents: seed.quotedPriceCents ?? 1_000,
+      ...(seed.discountCents === undefined ? {} : { discountCents: seed.discountCents }),
       currency: seed.currency ?? 'EUR',
       status: seed.status ?? BookingStatus.CONFIRMED,
       accessCode: seed.accessCode ?? `AC${uniqueSuffix().toUpperCase()}`,

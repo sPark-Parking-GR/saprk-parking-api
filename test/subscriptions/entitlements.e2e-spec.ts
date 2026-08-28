@@ -487,7 +487,7 @@ describe('subscription entitlements (e2e)', () => {
           maxFacilities: 50,
           maxTariffPlans: null,
           maxStaffSeats: null,
-          features: ['api.access'],
+          features: ['analytics.advanced'],
           commissionBps: 175,
         },
       }).expect(201)

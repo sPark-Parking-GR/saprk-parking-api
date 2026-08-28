@@ -13,8 +13,20 @@ import {
 import { validateRateGrid } from './schedule-validation'
 import type { LifecycleService } from '../lifecycle/lifecycle.service'
 import type { PrismaService } from '../prisma/prisma.service'
+import type { DriverEntitlementService } from '../subscriptions/driver-entitlement.service'
 import type { EntitlementService } from '../subscriptions/entitlement.service'
 import { tariffDraftSchema, type TariffDraftDto } from './dto/tariff.dto'
+
+import type { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
+
+const quotaThresholdStub = (): { checkOperatorQuotaThresholds: jest.Mock } => ({
+  checkOperatorQuotaThresholds: jest.fn().mockResolvedValue(undefined),
+})
+
+/** No rider identified on these paths, so the free tier is what a resolution would return. */
+const freeTierDriver = () => ({
+  resolveEffective: jest.fn().mockResolvedValue({ entitlements: { bookingDiscountBps: null } }),
+})
 
 const operatorUser: AuthUser = {
   id: 'u-op',
@@ -324,6 +336,8 @@ describe('TariffService admin writes', () => {
       scope,
       entitlements as unknown as EntitlementService,
       lifecycle as unknown as LifecycleService,
+      freeTierDriver() as unknown as DriverEntitlementService,
+      quotaThresholdStub() as unknown as QuotaThresholdService,
     )
   })
 
@@ -1021,6 +1035,8 @@ describe('TariffService.simulate', () => {
       scope as unknown as OperatorScopeService,
       {} as unknown as EntitlementService,
       {} as unknown as LifecycleService,
+      freeTierDriver() as unknown as DriverEntitlementService,
+      quotaThresholdStub() as unknown as QuotaThresholdService,
     )
   })
 

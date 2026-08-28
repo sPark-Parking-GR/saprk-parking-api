@@ -95,6 +95,7 @@ describe('inventory overbooking (e2e)', () => {
       startsAt: STARTS_AT,
       endsAt: ENDS_AT,
       quotedPriceCents: 1_000,
+      discountCents: 0,
       vehiclePlate: `E2E${attempt}`,
       vehicleType: 'CAR',
       accessCode: `CONCURRENT${attempt}`,

@@ -101,6 +101,20 @@ export class AdminScopesNotEditableError extends DomainError {
 }
 
 /**
+ * The service-layer half of the staff/billing exclusion the DTO also rejects, kept because
+ * the two must fail independently: a scopes array reaching this service from anywhere other
+ * than that one validated route would otherwise be written unchecked.
+ */
+export class StaffScopeNotGrantableError extends DomainError {
+  constructor(readonly scopes: readonly string[]) {
+    super(
+      `A staff member may never hold ${scopes.join(', ')}. ` +
+        'Make them an admin of this operator if they should see its plan and billing.',
+    )
+  }
+}
+
+/**
  * Named rather than silent: an operator waiting on verification should be told that is what
  * is happening, not handed a generic refusal that reads like a bug in their own account.
  */

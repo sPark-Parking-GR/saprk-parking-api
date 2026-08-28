@@ -1,14 +1,14 @@
 import { ForbiddenException } from '@nestjs/common'
 import { BillingInterval, LifecycleStatus, SubscriptionStatus } from '@prisma/client'
-import type { AuthUser } from '@spark/types'
+import type { AuthUser, Entitlements } from '@spark/types'
 import {
   SubscriptionDowngradeBlockedError,
   SubscriptionPlanInUseError,
   SubscriptionPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import type { PrismaService } from '../prisma/prisma.service'
+import type { SubscriptionBillingService } from '../subscription-billing/subscription-billing.service'
 import type { EntitlementService } from './entitlement.service'
-import type { Entitlements } from './entitlements.schema'
 import { SubscriptionAdminService } from './subscription-admin.service'
 
 const starter: Entitlements = {
@@ -70,6 +70,10 @@ describe('SubscriptionAdminService', () => {
     describe: jest.Mock
     assertUsageFitsEntitlements: jest.Mock
   }
+  let billing: {
+    providerName: string
+    cancelSubscriptionBestEffort: jest.Mock
+  }
   let service: SubscriptionAdminService
   let tx: typeof prisma
 
@@ -109,9 +113,15 @@ describe('SubscriptionAdminService', () => {
       assertUsageFitsEntitlements: jest.fn().mockResolvedValue(undefined),
     }
 
+    billing = {
+      providerName: 'mock',
+      cancelSubscriptionBestEffort: jest.fn().mockResolvedValue(true),
+    }
+
     service = new SubscriptionAdminService(
       prisma as unknown as PrismaService,
       entitlements as unknown as EntitlementService,
+      billing as unknown as SubscriptionBillingService,
     )
   })
 
@@ -206,6 +216,134 @@ describe('SubscriptionAdminService', () => {
 
       expect(prisma.operatorSubscription.create).toHaveBeenCalled()
       expect(prisma.operatorSubscription.create.mock.calls[0]![0].data.operatorId).toBe('op1')
+    })
+
+    /**
+     * A DB-only cancellation is not a cancellation. Now that an operator can reach a real
+     * provider subscription through self-serve checkout, an administrator's write that ends
+     * one has to end it upstream too — otherwise the provider goes on charging a tenant this
+     * database says is cancelled, and nothing here names the agreement doing it.
+     */
+    it('cancels at the provider when an administrator cancels a provider-billed plan', async () => {
+      prisma.operatorSubscription.findFirst.mockResolvedValue({
+        id: 'sub1',
+        planId: 'plan_growth',
+        status: SubscriptionStatus.ACTIVE,
+        entitlementOverride: null,
+        providerSubscriptionId: 'sub_stripe_1',
+      })
+
+      await service.assignSubscription(platformAdmin, 'op1', {
+        planId: 'plan_growth',
+        status: SubscriptionStatus.CANCELLED,
+        cancelAtPeriodEnd: false,
+      })
+
+      expect(billing.cancelSubscriptionBestEffort).toHaveBeenCalledWith(
+        'sub_stripe_1',
+        expect.objectContaining({ reason: 'admin_assign', operatorId: 'op1' }),
+      )
+    })
+
+    // A plan change is a replacement, and leaving the old subscription live would bill the
+    // tenant for both.
+    it('cancels the old provider subscription when an administrator moves the plan', async () => {
+      prisma.operatorSubscription.findFirst.mockResolvedValue({
+        id: 'sub1',
+        planId: 'plan_starter',
+        status: SubscriptionStatus.ACTIVE,
+        entitlementOverride: null,
+        providerSubscriptionId: 'sub_stripe_1',
+      })
+
+      await service.assignSubscription(platformAdmin, 'op1', {
+        planId: 'plan_growth',
+        status: SubscriptionStatus.ACTIVE,
+        cancelAtPeriodEnd: false,
+      })
+
+      expect(billing.cancelSubscriptionBestEffort).toHaveBeenCalledWith(
+        'sub_stripe_1',
+        expect.anything(),
+      )
+      // Retired as its own CANCELLED row rather than reused, so the subscription.deleted our
+      // cancellation provokes lands there and not on the plan just granted.
+      expect(prisma.operatorSubscription.update.mock.calls[0]![0]).toMatchObject({
+        where: { id: 'sub1' },
+        data: { status: SubscriptionStatus.CANCELLED },
+      })
+      expect(prisma.operatorSubscription.create).toHaveBeenCalled()
+    })
+
+    // Every row that predates self-serve checkout was assigned by hand and has no provider
+    // subscription behind it. There is nothing upstream to cancel, and no call to make.
+    it('calls the provider for nothing when the subscription was assigned by hand', async () => {
+      prisma.operatorSubscription.findFirst.mockResolvedValue({
+        id: 'sub1',
+        planId: 'plan_starter',
+        status: SubscriptionStatus.ACTIVE,
+        entitlementOverride: null,
+        providerSubscriptionId: null,
+      })
+
+      await service.assignSubscription(platformAdmin, 'op1', {
+        planId: 'plan_growth',
+        status: SubscriptionStatus.CANCELLED,
+        cancelAtPeriodEnd: false,
+      })
+
+      expect(billing.cancelSubscriptionBestEffort).not.toHaveBeenCalled()
+      expect(prisma.operatorSubscription.update).toHaveBeenCalled()
+    })
+
+    // Same plan, same status: nothing has ended, so the agreement must keep billing.
+    it('does not cancel when the administrator only edits the terms of the current plan', async () => {
+      prisma.operatorSubscription.findFirst.mockResolvedValue({
+        id: 'sub1',
+        planId: 'plan_growth',
+        status: SubscriptionStatus.ACTIVE,
+        entitlementOverride: null,
+        providerSubscriptionId: 'sub_stripe_1',
+      })
+
+      await service.assignSubscription(platformAdmin, 'op1', {
+        planId: 'plan_growth',
+        status: SubscriptionStatus.ACTIVE,
+        cancelAtPeriodEnd: true,
+      })
+
+      expect(billing.cancelSubscriptionBestEffort).not.toHaveBeenCalled()
+    })
+
+    /**
+     * "Best-effort" is not "silent". A provider outage must not block the administrator's
+     * write, but a failure means the provider is still charging a tenant this database says
+     * is cancelled — exactly the discrepancy a billing reconciliation needs on record.
+     */
+    it('records an audit row when the provider refuses the cancellation', async () => {
+      prisma.operatorSubscription.findFirst.mockResolvedValue({
+        id: 'sub1',
+        planId: 'plan_growth',
+        status: SubscriptionStatus.ACTIVE,
+        entitlementOverride: null,
+        providerSubscriptionId: 'sub_stripe_1',
+      })
+      billing.cancelSubscriptionBestEffort.mockResolvedValue(false)
+
+      await service.assignSubscription(platformAdmin, 'op1', {
+        planId: 'plan_growth',
+        status: SubscriptionStatus.CANCELLED,
+        cancelAtPeriodEnd: false,
+      })
+
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'operator_subscription.provider_cancel_failed',
+            payload: { providerSubscriptionId: 'sub_stripe_1' },
+          }),
+        }),
+      )
     })
 
     it('updates the live subscription in place rather than creating a second one', async () => {

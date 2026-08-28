@@ -30,6 +30,8 @@ import { NotificationsModule } from './notifications/notifications.module'
 import { OperatorsModule } from './operators/operators.module'
 import { PaymentsModule } from './payments/payments.module'
 import { PrismaModule } from './prisma/prisma.module'
+import { DriverSubscriptionsModule } from './subscriptions/driver-subscriptions.module'
+import { OperatorSubscriptionsModule } from './subscriptions/operator-subscriptions.module'
 import { SubscriptionsModule } from './subscriptions/subscriptions.module'
 import { TariffModule } from './tariff/tariff.module'
 
@@ -46,6 +48,7 @@ import { TariffModule } from './tariff/tariff.module'
     PrismaModule,
     AuthModule,
     SubscriptionsModule,
+    DriverSubscriptionsModule,
     MapsModule,
     PaymentsModule,
     NotificationsModule,
@@ -55,6 +58,7 @@ import { TariffModule } from './tariff/tariff.module'
     BookingModule,
     InviteModule,
     OperatorsModule,
+    OperatorSubscriptionsModule,
     ManagersModule,
     JobsModule,
     IngestionModule,

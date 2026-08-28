@@ -4,7 +4,13 @@ import { DEFAULT_STAFF_SCOPES, ORG_PERMISSIONS } from '@spark/types'
 import request from 'supertest'
 import { bearerToken } from '../utils/auth'
 import { truncateAll } from '../utils/db'
-import { seedFacility, seedOperator, seedUser } from '../utils/seed'
+import {
+  seedFacility,
+  seedOperator,
+  seedOperatorSubscription,
+  seedSubscriptionPlan,
+  seedUser,
+} from '../utils/seed'
 import { createTestApp } from '../utils/test-app'
 import { resetThrottle } from '../utils/throttle'
 
@@ -47,6 +53,18 @@ describe('org scopes over HTTP (e2e)', () => {
 
     operator = await seedOperator(raw)
     await seedFacility(raw, { operatorId: operator.id, ...CENTRE })
+
+    // Setting a member's scopes to anything other than DEFAULT_STAFF_SCOPES is what
+    // `team.management` sells, so this suite's operator has to be on a plan that includes
+    // it — otherwise every customisation below would be measuring the plan gate rather than
+    // the scope machinery it is here to exercise.
+    const growth = await seedSubscriptionPlan(raw, {
+      id: 'plan_growth',
+      code: 'growth',
+      name: 'Growth',
+      features: ['team.management'],
+    })
+    await seedOperatorSubscription(raw, { operatorId: operator.id, planId: growth.id })
 
     admin = await seedUser(raw, { role: UserRole.OPERATOR_ADMIN, operatorId: operator.id })
     staff = await seedUser(raw, {

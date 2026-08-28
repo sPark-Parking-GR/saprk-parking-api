@@ -155,6 +155,9 @@ export class BookingService {
       startsAt: request.startsAt,
       endsAt: request.endsAt,
       vehicleType: request.vehicleType,
+      // The one place a real rider is known. The public preview quote is anonymous and stays
+      // that way, so this is where a subscribed rider's discount is actually applied.
+      userId: request.userId,
     })
 
     if (quote.expiresAt < new Date()) throw new QuoteExpiredError()
@@ -219,6 +222,9 @@ export class BookingService {
           startsAt: request.startsAt,
           endsAt: request.endsAt,
           quotedPriceCents: quote.totalCents,
+          // Recorded even when zero: an explicit 0 is what distinguishes "this rider had no
+          // perk on this stay" from the NULL that means "booked before the column existed".
+          discountCents: quote.discountCents,
           vehiclePlate: request.vehiclePlate,
           vehicleType: request.vehicleType,
           accessCode,
@@ -704,6 +710,7 @@ export class BookingService {
       where: { id: bookingId },
       select: {
         id: true,
+        userId: true,
         status: true,
         startsAt: true,
         quotedPriceCents: true,
@@ -802,6 +809,9 @@ export class BookingService {
         planVersion: booking.tariffPlanVersion,
         startsAt: booking.startsAt,
         endsAt: checkedOutAt,
+        // Without this the reprice would quote the rider a discounted price at booking and
+        // bill them the undiscounted one at the barrier.
+        userId: booking.userId,
       })
     } catch (error) {
       // Includes the pricing engine's 366-day ceiling: a stay left open that long is a

@@ -4,6 +4,7 @@ import {
   OperatorInviteKind,
   SubscriptionStatus,
 } from '@prisma/client'
+import type { Entitlements } from '@spark/types'
 import {
   DefaultSubscriptionPlanMissingError,
   EntitlementLimitExceededError,
@@ -12,7 +13,6 @@ import {
 import { UNCLAIMED_OPERATOR_ID } from '../ingestion/ingestion.constants'
 import type { PrismaService } from '../prisma/prisma.service'
 import { EntitlementService } from './entitlement.service'
-import type { Entitlements } from './entitlements.schema'
 
 const starter: Entitlements = {
   maxFacilities: 1,

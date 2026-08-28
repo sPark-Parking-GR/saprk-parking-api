@@ -26,7 +26,9 @@ import {
   TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
 import { PrismaService } from '../prisma/prisma.service'
+import { DriverEntitlementService } from '../subscriptions/driver-entitlement.service'
 import { EntitlementService } from '../subscriptions/entitlement.service'
+import { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
 import { compileDraft } from './draft-compiler'
 import { priceStay } from './pricing-engine'
 import { validateRateGrid, validateSchedule } from './schedule-validation'
@@ -115,6 +117,8 @@ export class TariffService {
     private readonly operatorScope: OperatorScopeService,
     private readonly entitlements: EntitlementService,
     private readonly lifecycle: LifecycleService,
+    private readonly driverEntitlements: DriverEntitlementService,
+    private readonly quotaThresholds: QuotaThresholdService,
   ) {}
 
   async computeQuote(request: QuoteRequest): Promise<PriceQuote> {
@@ -148,7 +152,11 @@ export class TariffService {
     }
 
     const compiled = compilePlan(plan)
-    const result = priceStay(startsAt, endsAt, compiled)
+    const [commissionBps, bookingDiscountBps] = await Promise.all([
+      this.commissionBpsFor(facility.operatorId),
+      this.bookingDiscountBpsFor(request.userId),
+    ])
+    const result = priceStay(startsAt, endsAt, compiled, commissionBps, bookingDiscountBps)
 
     const durationMinutes = Math.ceil((endsAt.getTime() - startsAt.getTime()) / 60_000)
     const expiresAt = new Date(Date.now() + QUOTE_TTL_MINUTES * 60_000)
@@ -161,6 +169,7 @@ export class TariffService {
       vehicleType,
       lineItems: result.lineItems,
       totalCents: result.totalCents,
+      discountCents: result.discountCents,
       currency: compiled.currency,
       expiresAt,
       planId: compiled.id,
@@ -199,13 +208,55 @@ export class TariffService {
     if (!plan) return null
 
     const compiled = compilePlan(plan)
-    const result = priceStay(startsAt, endsAt, compiled)
+    const [commissionBps, bookingDiscountBps] = await Promise.all([
+      this.commissionBpsFor(plan.operatorId),
+      this.bookingDiscountBpsFor(request.userId),
+    ])
+    const result = priceStay(startsAt, endsAt, compiled, commissionBps, bookingDiscountBps)
 
     return {
       totalCents: result.totalCents,
+      discountCents: result.discountCents,
       currency: compiled.currency,
       billableMinutes: result.billableMinutes,
+      commissionCents: result.commissionCents,
     }
+  }
+
+  /**
+   * The platform's take-rate for whoever owns what is being priced, read from the operator's
+   * subscription rather than from the tariff plan: the tariff says what the DRIVER pays, the
+   * subscription says what the platform keeps of it, and conflating them would make a
+   * commission change require an operator to re-publish their prices.
+   *
+   * A facility with no operator is an un-onboarded import that nobody is billed through, so
+   * there is no agreement to take a share under.
+   */
+  private async commissionBpsFor(operatorId: string | null): Promise<number> {
+    if (operatorId === null) return 0
+    const { entitlements } = await this.entitlements.resolveEffective(operatorId)
+    return entitlements.commissionBps
+  }
+
+  /**
+   * The rider's own perk, the mirror of commissionBpsFor on the other side of the same
+   * booking: the operator's subscription says what the platform keeps, the rider's says what
+   * the rider is spared. `null` where no rider is identified — that is the unauthenticated
+   * quote preview, which prices a stay rather than a person's stay, and it is the reason
+   * userId is optional on QuoteRequest.
+   *
+   * `bookingFeeWaived` IS NOT WIRED HERE, AND THAT IS DELIBERATE. This codebase charges no
+   * booking fee anywhere — there is no fee line item in pricing-engine.ts, no fee column on
+   * Booking, and nothing that adds one — so there is literally nothing for the entitlement to
+   * waive. It stays schema'd and resolved into EffectiveDriverEntitlements so a plan can
+   * already promise it, and it will be consumed at the point a real fee model introduces the
+   * fee. Do not invent a placeholder fee here so that the flag has something to switch off:
+   * that would make riders pay a charge nobody decided to levy.
+   */
+  private async bookingDiscountBpsFor(userId: string | undefined): Promise<number | null> {
+    if (!userId) return null
+    const { entitlements } = await this.driverEntitlements.resolveEffective(userId)
+    return entitlements.bookingDiscountBps
   }
 
   /**
@@ -256,7 +307,9 @@ export class TariffService {
         null
       if (!plan || !isPlanApplicable(plan, startsAt, vehicleType)) continue
       try {
-        const result = priceStay(startsAt, endsAt, compilePlan(plan))
+        // No commission and no rider discount: this prices the SCHEDULE for a map full of
+        // facilities, not a stay anyone is billed for, and the caller is often anonymous.
+        const result = priceStay(startsAt, endsAt, compilePlan(plan), 0, null)
         totals.set(facility.id, result.totalCents)
       } catch {
         // Incomplete/invalid schedule: omit this facility from priced results.
@@ -427,6 +480,10 @@ export class TariffService {
 
       return tx.tariffPlan.findFirstOrThrow({ where: { id: plan.id }, include: scheduleInclude })
     })
+
+    // After the commit and outside the lock, for the same reason FacilitiesService.create
+    // calls it there. Never throws — see QuotaThresholdService.
+    await this.quotaThresholds.checkOperatorQuotaThresholds(operatorId)
 
     return this.toPlanDetail(created)
   }
@@ -734,7 +791,9 @@ export class TariffService {
         })),
       })
 
-      const result = priceStay(startsAt, endsAt, compiled)
+      // An operator previewing their own draft schedule. Neither the platform's take nor any
+      // rider's perk belongs in a number whose whole purpose is "what does this plan charge".
+      const result = priceStay(startsAt, endsAt, compiled, 0, null)
       const durationMinutes = Math.ceil((endsAt.getTime() - startsAt.getTime()) / 60_000)
 
       return {

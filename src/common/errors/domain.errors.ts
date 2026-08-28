@@ -168,6 +168,16 @@ export class EntitlementLimitExceededError extends DomainError {
   }
 }
 
+// The other half of EntitlementLimitExceededError: the plan does not include the capability
+// AT ALL, as opposed to including it and having none left. Naming the feature is what lets a
+// surface render "upgrade to unlock this" instead of a bare refusal, and is why the two are
+// separate errors rather than one message the client has to parse.
+export class SubscriptionFeatureRequiredError extends DomainError {
+  constructor(readonly feature: string) {
+    super(`This operator's plan does not include "${feature}". Upgrade the plan to unlock it.`)
+  }
+}
+
 // One limit a target plan would already be violating. `remove` is the count that has to go,
 // precomputed so neither the client nor the operator has to do the subtraction.
 export interface EntitlementViolation {
@@ -199,6 +209,26 @@ export class SubscriptionDowngradeBlockedError extends DomainError {
 export class SubscriptionPlanNotFoundError extends DomainError {
   constructor(id: string) {
     super(`Subscription plan ${id} not found`)
+  }
+}
+
+// An override is a deviation FROM an agreement, so there has to be one to amend. Separate
+// from SubscriptionPlanNotFoundError, which names a CATALOG row: reporting this as a missing
+// plan printed the subscriber's id where a plan id was expected and told the operator to go
+// looking for a plan that was never the problem.
+export class LiveSubscriptionNotFoundError extends DomainError {
+  constructor(subscriberId: string) {
+    super(`${subscriberId} has no live subscription to override. Assign a plan first.`)
+  }
+}
+
+// A rider holds at most one live subscription, so buying the plan they are already on has no
+// meaning beyond opening a second provider subscription that bills the same card for the same
+// thing. Named specifically rather than reported as a generic conflict: the rider needs to be
+// told they already have it, not that something went wrong.
+export class AlreadySubscribedToPlanError extends DomainError {
+  constructor(code: string) {
+    super(`You are already subscribed to "${code}".`)
   }
 }
 

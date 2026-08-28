@@ -5,6 +5,12 @@ export interface QuoteRequest {
   startsAt: Date
   endsAt: Date
   vehicleType: VehicleType
+  /**
+   * Whose subscription perks apply. Optional because the public `GET /facilities/:id/quote`
+   * preview is unauthenticated and stays that way: it prices a stay, not a person's stay.
+   * Personalisation happens where a rider is actually known — booking creation.
+   */
+  userId?: string
 }
 
 export interface QuoteLineItem {
@@ -23,6 +29,8 @@ export interface PriceQuote {
   vehicleType: VehicleType
   lineItems: QuoteLineItem[]
   totalCents: number
+  /** Already deducted from totalCents; carried so a client can show the perk it represents. */
+  discountCents: number
   currency: string
   expiresAt: Date
   planId: string
@@ -34,12 +42,20 @@ export interface PinnedPriceRequest {
   planVersion: number
   startsAt: Date
   endsAt: Date
+  /**
+   * The booking's own owner. Required in practice at check-out even though it is optional
+   * here: repricing the real stay without the rider's discount would bill a subscriber the
+   * full amount after quoting them a reduced one.
+   */
+  userId?: string
 }
 
 export interface PinnedPriceResult {
   totalCents: number
+  discountCents: number
   currency: string
   billableMinutes: number
+  commissionCents: number
 }
 
 export const QUOTE_TTL_MINUTES = 10
@@ -92,6 +108,18 @@ export interface PriceResult {
   lineItems: QuoteLineItem[]
   totalCents: number
   billableMinutes: number
+  /**
+   * What a subscribed rider's plan took off, already subtracted from totalCents and already
+   * present as its own negative line item. Zero for everyone else.
+   */
+  discountCents: number
+  /** The take-rate that produced commissionCents, carried so a figure can be explained. */
+  commissionBps: number
+  /**
+   * The platform's cut of totalCents. NOT a line item and never added to what the driver
+   * pays: the stay costs the same whatever the operator's plan charges the operator.
+   */
+  commissionCents: number
 }
 
 export interface TariffPlanListItem {

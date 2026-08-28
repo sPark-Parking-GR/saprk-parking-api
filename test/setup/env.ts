@@ -71,7 +71,13 @@ export function applyTestEnv(): TestDatabase {
     GOOGLE_MAPS_API_KEY: 'not-a-real-key',
     PAYMENT_PROVIDER: 'mock',
     MOCK_WEBHOOK_SECRET: 'not-a-real-secret',
+    SUBSCRIPTION_BILLING_PROVIDER: 'mock',
+    MOCK_SUBSCRIPTION_WEBHOOK_SECRET: 'not-a-real-subscription-secret',
+    API_PUBLIC_URL: 'http://127.0.0.1:3001',
     EMAIL_PROVIDER: 'console',
+    // Optional in production, set here so the upgrade-request suite exercises the send path
+    // rather than the unset-contact short circuit.
+    PLATFORM_BILLING_CONTACT_EMAIL: 'billing@spark-e2e.invalid',
   })
 
   return database

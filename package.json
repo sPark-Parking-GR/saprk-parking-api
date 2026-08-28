@@ -34,6 +34,7 @@
     "@spark/maps": "workspace:*",
     "@spark/notifications": "workspace:*",
     "@spark/payments": "workspace:*",
+    "@spark/subscription-billing": "workspace:*",
     "@spark/types": "workspace:*",
     "bullmq": "^5.34.0",
     "fastify": "^4.28.1",

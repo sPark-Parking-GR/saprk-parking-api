@@ -34,6 +34,7 @@ import { initialManagerIds } from '../managers/initial-managers'
 import { OperatorNotVerifiedError } from '../operators/operators.types'
 import { PrismaService } from '../prisma/prisma.service'
 import { EntitlementService } from '../subscriptions/entitlement.service'
+import { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
 import { TariffService, assignmentMismatchReason } from '../tariff/tariff.service'
 import type {
   BulkFacilityDto,
@@ -213,6 +214,7 @@ export class FacilitiesService {
     private readonly entitlements: EntitlementService,
     private readonly lifecycle: LifecycleService,
     private readonly clusterIndex: FacilityClusterIndexService,
+    private readonly quotaThresholds: QuotaThresholdService,
   ) {}
 
   async search(params: FacilitySearchParams): Promise<FacilitySearchResponse> {
@@ -746,6 +748,14 @@ export class FacilitiesService {
 
       return facility
     })
+
+    // Outside the transaction on purpose: the nudge describes a facility that now exists, and
+    // sending mail under the operator-row lock would hold the only thing serializing
+    // concurrent creates for the length of an SMTP round trip. Never throws — see
+    // QuotaThresholdService.
+    if (operatorId !== null) {
+      await this.quotaThresholds.checkOperatorQuotaThresholds(operatorId)
+    }
 
     return this.toAdminFacility(created)
   }

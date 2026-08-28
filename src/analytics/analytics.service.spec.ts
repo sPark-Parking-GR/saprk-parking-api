@@ -4,8 +4,10 @@ import type { OperatorScope, OperatorScopeService } from '../common/authz/operat
 import {
   AnalyticsScopeForbiddenError,
   MixedCurrencyAnalyticsError,
+  SubscriptionFeatureRequiredError,
 } from '../common/errors/domain.errors'
 import type { PrismaService } from '../prisma/prisma.service'
+import type { EntitlementService } from '../subscriptions/entitlement.service'
 import { AnalyticsService } from './analytics.service'
 
 // Rebuilds the Sql the tagged template would have produced, so a test can inspect the
@@ -32,14 +34,16 @@ const occupancyRow = (booked: number, capacity: number) => ({
   capacity_minutes: BigInt(capacity),
 })
 
-function setup(scope: OperatorScope) {
+function setup(scope: OperatorScope, hasFeature = true) {
   const prisma = { $queryRaw: jest.fn().mockResolvedValue([]) }
   const operatorScope = { resolve: jest.fn().mockResolvedValue(scope) }
+  const entitlements = { hasFeature: jest.fn().mockResolvedValue(hasFeature) }
   const service = new AnalyticsService(
     prisma as unknown as PrismaService,
     operatorScope as unknown as OperatorScopeService,
+    entitlements as unknown as EntitlementService,
   )
-  return { prisma, operatorScope, service }
+  return { prisma, operatorScope, entitlements, service }
 }
 
 describe('AnalyticsService revenue definition', () => {
@@ -372,5 +376,56 @@ describe('AnalyticsService revenue series', () => {
 
     expect(result.currency).toBe('EUR')
     expect(result.points).toEqual([])
+  })
+})
+
+describe('AnalyticsService advanced analytics gate', () => {
+  const scoped = { kind: 'operator', operatorIds: ['op-a'] } as OperatorScope
+
+  it('refuses an operator whose plan does not include analytics.advanced', async () => {
+    const { service, entitlements, prisma } = setup(scoped, false)
+
+    await expect(service.advancedSummary(operatorUser, { from, to })).rejects.toBeInstanceOf(
+      SubscriptionFeatureRequiredError,
+    )
+    expect(entitlements.hasFeature).toHaveBeenCalledWith('op-a', 'analytics.advanced')
+    expect(prisma.$queryRaw).not.toHaveBeenCalled()
+  })
+
+  // The basic panel is what an operator runs their business on; losing it with a plan would
+  // be a support ticket, not an upsell.
+  it('leaves the basic summary working for that same operator', async () => {
+    const { service } = setup(scoped, false)
+
+    await expect(service.summary(operatorUser, { from, to })).resolves.toMatchObject({
+      currency: 'EUR',
+    })
+  })
+
+  it('compares the range against the equal-length one before it', async () => {
+    const { service, prisma } = setup(scoped)
+    prisma.$queryRaw
+      .mockResolvedValueOnce([revenueRow()])
+      .mockResolvedValueOnce([occupancyRow(50, 100)])
+      .mockResolvedValueOnce([revenueRow({ gross_cents: BigInt(4_000), booking_count: 1 })])
+      .mockResolvedValueOnce([occupancyRow(25, 100)])
+
+    const result = await service.advancedSummary(operatorUser, { from, to })
+
+    expect(result.current.netRevenueCents).toBe(10_000)
+    expect(result.previous.netRevenueCents).toBe(4_000)
+    expect(result.netRevenueDeltaCents).toBe(6_000)
+    expect(result.bookingCountDelta).toBe(3)
+    expect(result.occupancyRatioDelta).toBe(0.25)
+    // Same length as the reported range, ending where it begins.
+    expect(result.previous.range).toEqual({ from: new Date('2026-05-31T00:00:00Z'), to: from })
+  })
+
+  // A platform-wide view is nobody's tenancy, so there is no plan to consult.
+  it('does not gate an unscoped platform caller', async () => {
+    const { service, entitlements } = setup({ kind: 'platform' }, false)
+
+    await expect(service.advancedSummary(platformUser, { from, to })).resolves.toBeDefined()
+    expect(entitlements.hasFeature).not.toHaveBeenCalled()
   })
 })

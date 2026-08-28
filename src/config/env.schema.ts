@@ -3,6 +3,7 @@ import { z, type RefinementCtx } from 'zod'
 const AUTH_PROVIDERS = ['authjs', 'firebase', 'clerk', 'supabase'] as const
 const MAP_PROVIDERS = ['google', 'mapbox'] as const
 const PAYMENT_PROVIDERS = ['mock', 'stripe'] as const
+const SUBSCRIPTION_BILLING_PROVIDERS = ['mock', 'stripe'] as const
 const EMAIL_PROVIDERS = ['console', 'sendgrid', 'postmark'] as const
 
 function requireWhen(
@@ -72,6 +73,34 @@ const envSchema = z
     STRIPE_WEBHOOK_SECRET: z.string().optional(),
     MOCK_WEBHOOK_SECRET: z.string().optional(),
 
+    // Subscription billing, driver and operator alike. A separate provider selector from
+    // PAYMENT_PROVIDER because they are separate engines with separate webhook endpoints and
+    // secrets — a deployment can run real one-shot card payments while subscription plans are
+    // still mocked, and collapsing them into one switch would make that unexpressible.
+    // STRIPE_SECRET_KEY is deliberately shared: it is the same Stripe account either way.
+    SUBSCRIPTION_BILLING_PROVIDER: z.enum(SUBSCRIPTION_BILLING_PROVIDERS).default('mock'),
+    ALLOW_MOCK_SUBSCRIPTION_BILLING_IN_PRODUCTION: z.enum(['true', 'false']).default('false'),
+    // One mock secret covers both webhook routes: the mock is driven locally, and there is no
+    // second provider account whose deliveries would have to be told apart.
+    MOCK_SUBSCRIPTION_WEBHOOK_SECRET: z.string().optional(),
+    STRIPE_SUBSCRIPTION_WEBHOOK_SECRET: z.string().optional(),
+    // The operator webhook's own signing secret. Stripe issues one PER ENDPOINT, and the
+    // driver and operator routes are two endpoints on the one account — sharing a secret
+    // would make each accept the other's deliveries, which is precisely the confusion the
+    // per-endpoint signature exists to prevent.
+    STRIPE_OPERATOR_WEBHOOK_SECRET: z.string().optional(),
+    // This API's own absolute base URL, WEB_APP_URL's counterpart for links that point back
+    // here. Required only for the mock provider, which is the only thing that builds one:
+    // a real Stripe checkout page is hosted by Stripe and needs no address of ours.
+    API_PUBLIC_URL: z.string().optional(),
+
+    // Where an operator's manual upgrade request is mailed. Deliberately optional and never
+    // required-when: it is a destination for a sales notification, not a security control, and
+    // the request it carries is already durable in the audit log before the mail is attempted.
+    // Unset, the send is skipped with a logged warning — refusing to boot the whole API over a
+    // missing marketing inbox would trade a lost email for a lost deployment.
+    PLATFORM_BILLING_CONTACT_EMAIL: z.string().email().optional(),
+
     EMAIL_PROVIDER: z.enum(EMAIL_PROVIDERS).default('console'),
     SENDGRID_API_KEY: z.string().optional(),
     EMAIL_FROM_ADDRESS: z.string().optional(),
@@ -132,6 +161,68 @@ const envSchema = z
         message:
           'PAYMENT_PROVIDER=mock is refused when NODE_ENV=production. Configure a real provider, or set ALLOW_MOCK_PAYMENTS_IN_PRODUCTION=true to opt out explicitly.',
         path: ['PAYMENT_PROVIDER'],
+      })
+    }
+
+    requireWhen(
+      ctx,
+      env.SUBSCRIPTION_BILLING_PROVIDER === 'stripe',
+      'when SUBSCRIPTION_BILLING_PROVIDER=stripe',
+      {
+        STRIPE_SECRET_KEY: env.STRIPE_SECRET_KEY,
+        STRIPE_SUBSCRIPTION_WEBHOOK_SECRET: env.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET,
+        STRIPE_OPERATOR_WEBHOOK_SECRET: env.STRIPE_OPERATOR_WEBHOOK_SECRET,
+      },
+    )
+
+    // Present is not enough: they must DIFFER. Per the comment on
+    // STRIPE_OPERATOR_WEBHOOK_SECRET, the two routes are separate Stripe endpoints and the
+    // per-endpoint signature is the only thing that tells their deliveries apart. Pasted
+    // identical, each route verifies the other's payloads and the separation silently becomes
+    // decoration — a driver-signed body would be accepted by the operator handler, which
+    // resolves subscribers and plans from a different catalog entirely.
+    if (
+      env.SUBSCRIPTION_BILLING_PROVIDER === 'stripe' &&
+      env.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET &&
+      env.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET === env.STRIPE_OPERATOR_WEBHOOK_SECRET
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'STRIPE_OPERATOR_WEBHOOK_SECRET must differ from STRIPE_SUBSCRIPTION_WEBHOOK_SECRET. Stripe issues one signing secret per endpoint, and the driver and operator webhooks are two endpoints: sharing a secret makes each accept the other endpoint’s deliveries, which is exactly what the per-endpoint signature exists to prevent.',
+        path: ['STRIPE_OPERATOR_WEBHOOK_SECRET'],
+      })
+    }
+
+    // Same reasoning as MOCK_WEBHOOK_SECRET: the mock subscription provider verifies
+    // signatures exactly like Stripe and fails closed without a secret, so an unset value
+    // rejects every delivery rather than quietly accepting forged ones. API_PUBLIC_URL joins
+    // it because the mock checkout URL handed to the client is built from it — unset, every
+    // rider is sent to a link that resolves nowhere.
+    requireWhen(
+      ctx,
+      env.SUBSCRIPTION_BILLING_PROVIDER === 'mock',
+      'when SUBSCRIPTION_BILLING_PROVIDER=mock',
+      {
+        MOCK_SUBSCRIPTION_WEBHOOK_SECRET: env.MOCK_SUBSCRIPTION_WEBHOOK_SECRET,
+        API_PUBLIC_URL: env.API_PUBLIC_URL,
+      },
+    )
+
+    // The mock subscription provider grants a paid plan's perks without taking a cent, so a
+    // production deployment defaulting to it gives discounts away. Same explicit opt-out as
+    // ALLOW_MOCK_PAYMENTS_IN_PRODUCTION, and separate from it: the two engines are configured
+    // independently, so one opt-out must never imply the other.
+    if (
+      env.NODE_ENV === 'production' &&
+      env.SUBSCRIPTION_BILLING_PROVIDER === 'mock' &&
+      env.ALLOW_MOCK_SUBSCRIPTION_BILLING_IN_PRODUCTION !== 'true'
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'SUBSCRIPTION_BILLING_PROVIDER=mock is refused when NODE_ENV=production. Configure a real provider, or set ALLOW_MOCK_SUBSCRIPTION_BILLING_IN_PRODUCTION=true to opt out explicitly.',
+        path: ['SUBSCRIPTION_BILLING_PROVIDER'],
       })
     }
 

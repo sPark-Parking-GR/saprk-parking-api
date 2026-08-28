@@ -1043,6 +1043,28 @@ describe('BookingService createBooking idempotency', () => {
     expect(held.tariffPlanVersion).toBe(7)
   })
 
+  /**
+   * The quote already subtracted this from totalCents; carrying it onto the hold is the only
+   * thing that makes a rider's saving answerable later. Without it the figure exists for the
+   * duration of one HTTP request and is then gone.
+   */
+  it('carries the discount the quote applied onto the hold', async () => {
+    prisma.booking.findUnique.mockResolvedValue(null)
+    tariff.computeQuote.mockResolvedValue({
+      totalCents: 450,
+      discountCents: 50,
+      currency: 'EUR',
+      expiresAt: new Date(Date.now() + 60_000),
+      planId: 'plan1',
+      planVersion: 7,
+    })
+    inventory.holdSlot.mockResolvedValue({ bookingId: 'b1', expiresAt: new Date() })
+
+    await service.createBooking(request)
+
+    expect(inventory.holdSlot.mock.calls[0]![0].discountCents).toBe(50)
+  })
+
   describe('access code', () => {
     const codeOf = () => inventory.holdSlot.mock.calls.at(-1)![0].accessCode as string
 

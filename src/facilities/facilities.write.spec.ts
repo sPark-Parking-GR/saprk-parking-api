@@ -26,6 +26,7 @@ import type { LifecycleService } from '../lifecycle/lifecycle.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { EntitlementService } from '../subscriptions/entitlement.service'
 import type { TariffService } from '../tariff/tariff.service'
+import type { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
 import {
   bulkFacilitySchema,
   createFacilitySchema,
@@ -33,6 +34,10 @@ import {
   type BulkFacilityDto,
   type CreateFacilityDto,
 } from './dto/facility.dto'
+
+const quotaThresholdStub = (): { checkOperatorQuotaThresholds: jest.Mock } => ({
+  checkOperatorQuotaThresholds: jest.fn().mockResolvedValue(undefined),
+})
 
 const decimal = (n: number) => ({ toNumber: () => n }) as never
 
@@ -221,6 +226,7 @@ describe('FacilitiesService admin writes', () => {
       entitlements as unknown as EntitlementService,
       lifecycle as unknown as LifecycleService,
       {} as unknown as FacilityClusterIndexService,
+      quotaThresholdStub() as unknown as QuotaThresholdService,
     )
   })
 

@@ -1,28 +1,6 @@
+import { SUBSCRIPTION_FEATURES } from '@spark/types'
+import type { EntitlementOverride, Entitlements, SubscriptionFeature } from '@spark/types'
 import { z } from 'zod'
-
-/**
- * A closed set, not free-form strings. A feature flag that only ever exists as a typo in
- * one plan's JSON is indistinguishable from a feature nobody bought, and the failure is
- * silent in the direction that matters: the customer paid and the check returns false.
- */
-export const SUBSCRIPTION_FEATURES = [
-  'analytics.advanced',
-  'api.access',
-  'branding.custom',
-  'support.priority',
-  /**
-   * Unlocks the team surface: inviting staff, and setting what each of them may do.
-   *
-   * Separate from maxStaffSeats because they answer different questions. The feature is
-   * whether the operator bought team management at all; the seat count is how many people
-   * it covers. Collapsing them into "seats > 0" would make a plan that sells the capability
-   * with no seats yet unexpressible, and would put the reason for a refusal — unbought
-   * versus outgrown — beyond the API's ability to say.
-   */
-  'team.management',
-] as const
-
-export type SubscriptionFeature = (typeof SUBSCRIPTION_FEATURES)[number]
 
 /**
  * `null` is unlimited; `0` is a real limit that permits nothing. They are deliberately
@@ -32,6 +10,20 @@ export type SubscriptionFeature = (typeof SUBSCRIPTION_FEATURES)[number]
 const limitSchema = z.number().int().min(0).max(1_000_000).nullable()
 
 /**
+ * Declared as a mapped type over `Entitlements` rather than a bare object literal, which is
+ * what keeps the wire contract and the shared shape from drifting: a key added to one and
+ * not the other fails to compile here — a missing key is a missing property, an extra key
+ * is an excess property on a fresh literal.
+ */
+const entitlementsShape: { [K in keyof Entitlements]: z.ZodType<Entitlements[K]> } = {
+  maxFacilities: limitSchema,
+  maxTariffPlans: limitSchema,
+  maxStaffSeats: limitSchema,
+  features: z.array(z.enum(SUBSCRIPTION_FEATURES)),
+  commissionBps: z.number().int().min(0).max(10_000),
+}
+
+/**
  * The contract for what a plan grants. `.strict()` is load-bearing: an unknown key is a
  * typo or a stale field from a schema that has moved on, and accepting it silently is how
  * a JSON blob drifts away from the code that reads it. Every crossing of this boundary —
@@ -39,17 +31,7 @@ const limitSchema = z.number().int().min(0).max(1_000_000).nullable()
  * so a blob that predates a schema change fails loudly at read time rather than granting
  * whatever `undefined` happens to mean at the comparison site.
  */
-export const entitlementsSchema = z
-  .object({
-    maxFacilities: limitSchema,
-    maxTariffPlans: limitSchema,
-    maxStaffSeats: limitSchema,
-    features: z.array(z.enum(SUBSCRIPTION_FEATURES)),
-    commissionBps: z.number().int().min(0).max(10_000),
-  })
-  .strict()
-
-export type Entitlements = z.infer<typeof entitlementsSchema>
+export const entitlementsSchema = z.object(entitlementsShape).strict()
 
 /**
  * A negotiated deviation states only the keys that differ, so "Starter, but four
@@ -59,8 +41,6 @@ export type Entitlements = z.infer<typeof entitlementsSchema>
  * of later catalog corrections.
  */
 export const entitlementOverrideSchema = entitlementsSchema.partial()
-
-export type EntitlementOverride = z.infer<typeof entitlementOverrideSchema>
 
 export const QUOTA_KEYS = ['maxFacilities', 'maxTariffPlans', 'maxStaffSeats'] as const
 

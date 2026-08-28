@@ -1,0 +1,29 @@
+-- Persists the driver-subscription discount that pricing-engine has been computing since
+-- 20260827100000 and throwing away. `PriceQuote.discountCents` reached the booking path,
+-- was subtracted from `quotedPriceCents`, and then existed nowhere — so "how much has this
+-- rider saved" was unanswerable from the database, and the engagement nudge that asks it
+-- had nothing to read.
+--
+-- WHY NULLABLE RATHER THAN `DEFAULT 0`. Both are one statement here; they differ entirely
+-- in what they claim about the rows that already exist. A default backfills every historical
+-- booking with the assertion "this rider saved nothing on this stay", which is false for any
+-- subscriber who booked between 20260827100000 and today — their discount WAS applied to the
+-- price they paid, it simply was not recorded. NULL says the honest thing: unknown. That
+-- matches the precedent set by the two Int? money columns already on this table
+-- (`finalPriceCents`, `priceAdjustmentCents`), both of which use NULL for "no trustworthy
+-- figure yet" rather than a zero that reads as a real measurement.
+--
+-- Everything written from now on stores the real number INCLUDING an explicit 0 for a rider
+-- with no perk, so NULL is unambiguously "predates this column" and a SUM over non-NULL rows
+-- is exact. No backfill accompanies this migration for the same reason: the discount is a
+-- function of the entitlement resolved at quote time, and that resolution is not recoverable
+-- from a Booking row after the fact.
+--
+-- No index. The one sweeping consumer (the savings-summary job) filters by status and a
+-- trailing 30-day `startsAt` window across all riders — an analytics-shaped scan that runs
+-- once a day, not a request-path lookup — while the per-rider read is already served by
+-- `Booking_userId_idx`. An extra index on the hottest write table in the system would cost
+-- every booking insert to save a background job a scan it can afford.
+
+-- AlterTable
+ALTER TABLE "Booking" ADD COLUMN     "discountCents" INTEGER;

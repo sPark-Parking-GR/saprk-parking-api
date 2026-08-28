@@ -55,6 +55,8 @@ export class InventoryService {
       startsAt: Date
       endsAt: Date
       quotedPriceCents: number
+      /** Already deducted from quotedPriceCents by the quote; 0 when the rider has no perk. */
+      discountCents: number
       vehiclePlate: string
       vehicleType: string
       accessCode: string
@@ -108,6 +110,7 @@ export class InventoryService {
           startsAt: params.startsAt,
           endsAt: params.endsAt,
           quotedPriceCents: params.quotedPriceCents,
+          discountCents: params.discountCents,
           accessCode: params.accessCode,
           tariffPlanId: params.tariffPlanId,
           tariffPlanVersion: params.tariffPlanVersion,

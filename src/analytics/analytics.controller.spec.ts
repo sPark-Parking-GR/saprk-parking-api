@@ -9,6 +9,7 @@ const to = new Date('2026-08-01T00:00:00Z')
 function setup() {
   const analytics = {
     summary: jest.fn().mockResolvedValue({}),
+    advancedSummary: jest.fn().mockResolvedValue({}),
     revenueSeries: jest.fn().mockResolvedValue({}),
     topFacilities: jest.fn().mockResolvedValue({}),
   }
@@ -28,6 +29,7 @@ describe('AnalyticsController authorization', () => {
       const user = { id: 'u1', role } as unknown as AuthUser
 
       expect(() => controller.summary({ from, to }, user)).toThrow(ForbiddenException)
+      expect(() => controller.advancedSummary({ from, to }, user)).toThrow(ForbiddenException)
       expect(() => controller.revenueSeries({ from, to, bucket: 'day' }, user)).toThrow(
         ForbiddenException,
       )

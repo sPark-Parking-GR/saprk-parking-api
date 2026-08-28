@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common'
 import { LifecycleModule } from '../lifecycle/lifecycle.module'
+import { DriverSubscriptionsModule } from '../subscriptions/driver-subscriptions.module'
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module'
+import { AdminDriverSubscriptionsController } from './admin-driver-subscriptions.controller'
 import { AdminLifecycleController } from './admin-lifecycle.controller'
 import { AdminSubscriptionsController } from './admin-subscriptions.controller'
 
@@ -10,7 +12,11 @@ import { AdminSubscriptionsController } from './admin-subscriptions.controller'
 // entitlement service is consumed by the facility, tariff and seat write paths, and this
 // is what puts its administration on the wire.
 @Module({
-  imports: [LifecycleModule, SubscriptionsModule],
-  controllers: [AdminLifecycleController, AdminSubscriptionsController],
+  imports: [LifecycleModule, SubscriptionsModule, DriverSubscriptionsModule],
+  controllers: [
+    AdminLifecycleController,
+    AdminSubscriptionsController,
+    AdminDriverSubscriptionsController,
+  ],
 })
 export class AdminModule {}

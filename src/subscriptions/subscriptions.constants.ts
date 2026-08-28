@@ -1,5 +1,5 @@
 import { SubscriptionStatus } from '@prisma/client'
-import type { Entitlements } from './entitlements.schema'
+import type { Entitlements } from '@spark/types'
 
 /**
  * The plan an operator resolves to when it holds no live subscription. Every operator

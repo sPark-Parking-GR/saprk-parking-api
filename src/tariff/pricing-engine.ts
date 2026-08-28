@@ -51,9 +51,48 @@ interface RawCharge {
   subtotalCents: number
 }
 
+// The platform's take, in integer cents of the stay total. Basis points because a
+// percentage cannot express the quarter-point differences plan tiers are sold on.
+//
+// Rounded rather than floored or ceiled: the split is between the platform and the operator
+// and neither side should be systematically favoured by the half-cent, which floor and ceil
+// both are. What the DRIVER pays is untouched either way — commission comes out of the
+// total, it is never added to it — so no rounding here can make a stay cost more.
+export function commissionOn(totalCents: number, commissionBps: number): number {
+  return Math.round((totalCents * commissionBps) / 10_000)
+}
+
+// A subscribed rider's perk, in integer cents off the stay total. Unlike commission this
+// DOES change what the driver pays, which is why it is a visible line item rather than a
+// bookkeeping figure.
+//
+// Rounded like commission, and then clamped to the total: a 100% discount must land on
+// exactly zero and never below it, or a stay would owe the rider money.
+export function discountOn(totalCents: number, bookingDiscountBps: number | null): number {
+  if (!bookingDiscountBps || totalCents <= 0) return 0
+  return Math.min(totalCents, Math.round((totalCents * bookingDiscountBps) / 10_000))
+}
+
 // Block-straddling rule: a PER_BLOCK / FLAT charge is priced by the window active at
 // its START instant; only PER_MINUTE tiers re-evaluate the window every minute (exact).
-export function priceStay(startsAt: Date, endsAt: Date, plan: CompiledPlan): PriceResult {
+//
+// commissionBps is required rather than defaulted: a caller that forgets it would silently
+// price the platform's take at zero on a real booking, and no test would notice. The
+// pure-schedule callers — plan simulation and the map's bulk totals — pass 0 explicitly,
+// which is the honest statement that neither prices a stay anyone is billed for.
+//
+// bookingDiscountBps is required for the identical reason, and the failure direction is
+// worse: a forgotten default would quietly charge a subscribed rider full price for a perk
+// they are paying a monthly fee to hold. `null` is the honest value where no rider is
+// identified — the unauthenticated quote preview, plan simulation, the map's bulk totals —
+// and is distinct from a real 0 bps only in intent, never in outcome.
+export function priceStay(
+  startsAt: Date,
+  endsAt: Date,
+  plan: CompiledPlan,
+  commissionBps: number,
+  bookingDiscountBps: number | null,
+): PriceResult {
   const rawMinutes = Math.max(0, ceilDiv(endsAt.getTime() - startsAt.getTime(), 60_000))
   const billable = ceilToIncrement(
     Math.max(0, rawMinutes - plan.graceMinutes),
@@ -67,7 +106,14 @@ export function priceStay(startsAt: Date, endsAt: Date, plan: CompiledPlan): Pri
   }
 
   if (billable === 0) {
-    return { lineItems: [], totalCents: 0, billableMinutes: 0 }
+    return {
+      lineItems: [],
+      totalCents: 0,
+      billableMinutes: 0,
+      discountCents: 0,
+      commissionBps,
+      commissionCents: 0,
+    }
   }
 
   const base = DateTime.fromJSDate(startsAt, { zone: 'utc' }).setZone(plan.timezone)
@@ -124,20 +170,48 @@ export function priceStay(startsAt: Date, endsAt: Date, plan: CompiledPlan): Pri
   }
 
   const rawTotal = charges.reduce((sum, c) => sum + c.subtotalCents, 0)
-  const total = applyCaps(rawTotal, charges, plan.caps)
+  const capped = applyCaps(rawTotal, charges, plan.caps)
+
+  // After caps, before commission. Both halves of that order matter: discounting the
+  // pre-cap total would hand a capped stay a discount larger than the cap ever charged for,
+  // and taking commission before the discount would bill the operator a share of money the
+  // platform chose to give away.
+  const discountCents = discountOn(capped, bookingDiscountBps)
+  const total = capped - discountCents
 
   const lineItems = coalesce(charges)
-  if (total !== rawTotal) {
+  if (capped !== rawTotal) {
     lineItems.push({
       label: 'Cap adjustment',
       durationMinutes: billable,
       unitPriceCents: 0,
       quantity: 1,
-      subtotalCents: total - rawTotal,
+      subtotalCents: capped - rawTotal,
+    })
+  }
+  // Its own negative line item, following the cap adjustment's pattern: a rider paying for a
+  // plan has to be able to SEE the perk applied, and a total that is simply smaller than the
+  // schedule implies looks like a pricing bug rather than a benefit.
+  if (discountCents > 0) {
+    lineItems.push({
+      label: 'Subscription discount',
+      durationMinutes: billable,
+      unitPriceCents: 0,
+      quantity: 1,
+      subtotalCents: -discountCents,
     })
   }
 
-  return { lineItems, totalCents: total, billableMinutes: billable }
+  // Commission is a share of what is actually charged, so a capped or discounted stay that
+  // took less money owes the platform proportionally less.
+  return {
+    lineItems,
+    totalCents: total,
+    billableMinutes: billable,
+    discountCents,
+    commissionBps,
+    commissionCents: commissionOn(total, commissionBps),
+  }
 }
 
 // STAY caps clamp the whole-stay total. ROLLING caps clamp each fixed-width duration

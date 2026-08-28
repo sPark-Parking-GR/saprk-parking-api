@@ -5,11 +5,12 @@ import type { PaymentsService } from '../payments/payments.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import { PaymentEventsService } from './payment-events.service'
 
+/** The replay gate as PostgreSQL reports it: BOTH halves of the compound key. */
 const duplicateError = () =>
   new Prisma.PrismaClientKnownRequestError('unique violation', {
     code: 'P2002',
     clientVersion: 'test',
-    meta: { target: ['providerEventId'] },
+    meta: { target: ['providerEventId', 'surface'] },
   })
 
 const succeededEvent: PaymentWebhookEvent = {
@@ -104,6 +105,47 @@ describe('PaymentEventsService', () => {
 
     expect(tx.payment.findUnique).toHaveBeenCalledTimes(1)
     expect(tx.booking.update).toHaveBeenCalledTimes(1)
+  })
+
+  // The ledger is shared with the two subscription handlers, and the unique key that gates
+  // replays is compound. Filing under the wrong surface — or omitting it — would stop the
+  // gate matching and let every redelivery confirm a booking twice.
+  it('files its ledger row under the payments surface', async () => {
+    tx.payment.findUnique.mockResolvedValue(
+      paymentRow(PaymentStatus.PENDING, BookingStatus.PENDING_PAYMENT),
+    )
+
+    await service.process(succeededEvent)
+
+    expect(tx.webhookEvent.create.mock.calls[0]![0].data).toMatchObject({
+      providerEventId: 'evt_1',
+      surface: 'payments',
+    })
+    expect(tx.webhookEvent.update.mock.calls[0]![0].where).toEqual({
+      providerEventId_surface: { providerEventId: 'evt_1', surface: 'payments' },
+    })
+  })
+
+  /**
+   * Only the replay gate is a replay. The same transaction writes Payment, Booking and
+   * Refund, and answering 200 to one of THEIR uniqueness failures would file a genuine
+   * unhandled error as a harmless duplicate the provider then never retries.
+   */
+  it('propagates a uniqueness failure that is not the replay gate', async () => {
+    tx.payment.findUnique.mockResolvedValue(
+      paymentRow(PaymentStatus.PENDING, BookingStatus.PENDING_PAYMENT),
+    )
+    tx.booking.update.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('unique violation', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: ['accessCode'] },
+      }),
+    )
+
+    await expect(service.process(succeededEvent)).rejects.toBeInstanceOf(
+      Prisma.PrismaClientKnownRequestError,
+    )
   })
 
   it('acknowledges an unknown event type instead of failing into a retry loop', async () => {
