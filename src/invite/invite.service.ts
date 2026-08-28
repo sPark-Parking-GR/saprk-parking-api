@@ -25,10 +25,12 @@ import { OperatorAccessService } from '../operators/operator-access.service'
 import { OperatorNotFoundError } from '../operators/operators.types'
 import { PrismaService } from '../prisma/prisma.service'
 import { EntitlementService } from '../subscriptions/entitlement.service'
+import { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
 import { InviteTokenService } from './invite-token.service'
 import type { CreateInviteDto, CreateMemberInviteDto } from './dto/invite.dto'
 import {
   InviteAlreadyAcceptedError,
+  InviteBusinessNameRequiredError,
   InviteEmailTakenError,
   InviteExpiredError,
   InviteNotFoundError,
@@ -59,6 +61,7 @@ export class InviteService {
     private readonly config: ConfigService,
     private readonly access: OperatorAccessService,
     private readonly entitlements: EntitlementService,
+    private readonly quotaThresholds: QuotaThresholdService,
     private readonly tokens: InviteTokenService,
     @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: IAuthProvider,
   ) {}
@@ -81,13 +84,16 @@ export class InviteService {
         kind: OperatorInviteKind.ONBOARDING,
         status: InviteStatus.PENDING,
       })
+      // The business itself has no name yet — the invitee chooses one when they accept,
+      // alongside their password. This shell exists only to hold the id the invite points
+      // at and the PENDING status accept() flips to VERIFIED.
       const operator = await tx.parkingOperator.create({
-        data: { name: dto.businessName, status: OperatorStatus.PENDING },
+        data: { name: '', status: OperatorStatus.PENDING },
       })
       const created = await tx.operatorInvite.create({
         data: {
           email,
-          businessName: dto.businessName,
+          businessName: '',
           operatorId: operator.id,
           kind: OperatorInviteKind.ONBOARDING,
           role: OperatorMemberRole.ADMIN,
@@ -106,7 +112,6 @@ export class InviteService {
 
     const delivered = await this.notifications.sendOperatorInvite({
       to: email,
-      businessName: dto.businessName,
       acceptUrl: this.acceptUrl(rawToken),
     })
 
@@ -184,6 +189,11 @@ export class InviteService {
       isAdmin: dto.role === OperatorMemberRole.ADMIN,
     })
 
+    // A pending invite already consumes a seat, so the threshold moves here rather than at
+    // accept. Same after-commit placement as the invite mail above, and never throws — see
+    // QuotaThresholdService.
+    await this.quotaThresholds.checkOperatorQuotaThresholds(operatorId)
+
     return { ...this.toSummary(invite), delivered }
   }
 
@@ -239,7 +249,6 @@ export class InviteService {
           })
         : await this.notifications.sendOperatorInvite({
             to: invite.email,
-            businessName: invite.businessName,
             acceptUrl,
           })
 
@@ -330,7 +339,14 @@ export class InviteService {
   async validate(token: string): Promise<InviteValidation> {
     const invite = await this.prisma.operatorInvite.findUnique({
       where: { tokenHash: this.hashToken(token) },
-      select: { businessName: true, email: true, status: true, expiresAt: true, role: true },
+      select: {
+        businessName: true,
+        email: true,
+        status: true,
+        expiresAt: true,
+        role: true,
+        kind: true,
+      },
     })
     if (!invite) throw new InviteNotFoundError()
 
@@ -338,11 +354,12 @@ export class InviteService {
       businessName: invite.businessName,
       email: invite.email,
       role: invite.role,
+      kind: invite.kind,
       expired: invite.status !== InviteStatus.PENDING || invite.expiresAt < new Date(),
     }
   }
 
-  async accept(token: string, password: string): Promise<AuthResult> {
+  async accept(token: string, password: string, businessName?: string): Promise<AuthResult> {
     const invite = await this.prisma.operatorInvite.findUnique({
       where: { tokenHash: this.hashToken(token) },
     })
@@ -368,6 +385,11 @@ export class InviteService {
     // narrowing across the `await` below (property narrowing doesn't survive a call).
     const operatorId = invite.operatorId
     const isOnboarding = invite.kind === OperatorInviteKind.ONBOARDING
+
+    // Only onboarding collects a business name here — a member invite attaches to an
+    // operator that already has one. Checked before Firebase signUp so a missing name
+    // never provisions an identity it can't finish attaching.
+    const resolvedBusinessName = isOnboarding ? this.requireBusinessName(businessName) : undefined
 
     // A member invite points at an operator that has been live in the meantime and may
     // have been suspended or unverified since; a tenant in either state must not gain
@@ -397,7 +419,7 @@ export class InviteService {
       password,
       // The business name is the new operator's own name on the onboarding flow; on a
       // member invite it belongs to the employer, not the employee.
-      displayName: isOnboarding ? invite.businessName : undefined,
+      displayName: resolvedBusinessName,
       role: grantedRole,
     })
     const newUserId = authResult.session.user.id
@@ -420,7 +442,11 @@ export class InviteService {
         if (isOnboarding) {
           await tx.parkingOperator.update({
             where: { id: operatorId },
-            data: { status: OperatorStatus.VERIFIED, verifiedAt: new Date() },
+            data: {
+              name: resolvedBusinessName!,
+              status: OperatorStatus.VERIFIED,
+              verifiedAt: new Date(),
+            },
           })
         }
         await tx.user.update({ where: { id: newUserId }, data: { emailVerified: true } })
@@ -430,7 +456,11 @@ export class InviteService {
         // failed count rolls the whole attachment back (and the identity with it).
         const { count } = await tx.operatorInvite.updateMany({
           where: { id: invite.id, tokenHash: invite.tokenHash, status: InviteStatus.PENDING },
-          data: { status: InviteStatus.ACCEPTED, acceptedAt: new Date() },
+          data: {
+            status: InviteStatus.ACCEPTED,
+            acceptedAt: new Date(),
+            ...(isOnboarding ? { businessName: resolvedBusinessName! } : {}),
+          },
         })
         if (count === 0) throw new InviteExpiredError()
 
@@ -541,6 +571,12 @@ export class InviteService {
     if (!hasPlatformPermission(actor.role, 'platform:role.grant')) {
       throw new ForbiddenException('Only platform admins may manage operator invites')
     }
+  }
+
+  private requireBusinessName(input: string | undefined): string {
+    const trimmed = input?.trim()
+    if (!trimmed) throw new InviteBusinessNameRequiredError()
+    return trimmed
   }
 
   private mintToken(): { rawToken: string; tokenHash: string; expiresAt: Date } {

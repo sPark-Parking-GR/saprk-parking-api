@@ -57,7 +57,6 @@ describe('NotificationsService', () => {
 
     await service.sendOperatorInvite({
       to: 'owner@example.com',
-      businessName: 'Acme Parking',
       acceptUrl: 'https://app.spark.example/invite/accept?token=abc123secret',
     })
 
@@ -94,7 +93,6 @@ describe('NotificationsService', () => {
     await expect(
       service.sendOperatorInvite({
         to: 'owner@example.com',
-        businessName: 'Acme Parking',
         acceptUrl: 'https://app.spark.example/invite/accept?token=abc123secret',
       }),
     ).resolves.toBe(false)
@@ -102,7 +100,6 @@ describe('NotificationsService', () => {
     await expect(
       service.sendOperatorInvite({
         to: 'owner@example.com',
-        businessName: 'Acme Parking',
         acceptUrl: 'https://app.spark.example/invite/accept?token=abc123secret',
       }),
     ).resolves.toBe(true)

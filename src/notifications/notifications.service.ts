@@ -3,6 +3,12 @@ import type { EmailContext } from '@spark/notifications'
 import { NOTIFICATIONS_EMAIL_CONTEXT_TOKEN } from './notifications.constants'
 import type { BookingNotificationData } from './notification.types'
 
+// en-GB to match the date formatting the templates already use, so one email does not
+// present its money and its dates in two different conventions.
+function formatMoney(cents: number, currency: string): string {
+  return new Intl.NumberFormat('en-GB', { style: 'currency', currency }).format(cents / 100)
+}
+
 // ESP failures (SendGrid/Postmark) routinely echo the recipient address back in
 // error.message; redact-by-key can't reach text embedded inside a message, so it is
 // scrubbed before the error ever reaches the logger.
@@ -50,16 +56,12 @@ export class NotificationsService {
   // reporting the outcome tells them nothing about an account they could not already
   // enumerate — the enumeration argument that keeps sendPasswordReset silent does not
   // apply here.
-  async sendOperatorInvite(data: {
-    to: string
-    businessName: string
-    acceptUrl: string
-  }): Promise<boolean> {
+  async sendOperatorInvite(data: { to: string; acceptUrl: string }): Promise<boolean> {
     return this.safeSend(
       () =>
         this.emailContext.send({
           to: data.to,
-          subject: `You're invited to sPark — ${data.businessName}`,
+          subject: `You're invited to sPark`,
           template: 'operator-invite',
           data: { ...data },
         }),
@@ -102,6 +104,101 @@ export class NotificationsService {
           data: { ...data },
         }),
       'platform admin invite',
+    )
+  }
+
+  // Inbound rather than outbound: the recipient is sPark's own billing contact, not a
+  // customer. Returns delivery success because the caller reports it back to the operator who
+  // asked — a request nobody was told about should not read as one that was received.
+  async sendOperatorUpgradeRequest(data: {
+    to: string
+    operatorName: string
+    requesterName: string
+    requesterEmail: string
+    requestedPlanName: string | null
+    message: string | null
+    operatorUrl: string
+  }): Promise<boolean> {
+    return this.safeSend(
+      () =>
+        this.emailContext.send({
+          to: data.to,
+          subject: `Upgrade requested — ${data.operatorName}`,
+          template: 'operator-upgrade-requested',
+          data: { ...data },
+        }),
+      'operator upgrade request',
+    )
+  }
+
+  // A nudge, not a refusal: the create that triggered it already succeeded, and the threshold
+  // is already recorded in the audit log by the time this runs. Stays on safeSend so a
+  // bounced nudge costs an email and never the write that earned it.
+  async sendOperatorQuotaThreshold(data: {
+    to: string
+    businessName: string
+    resourceLabel: string
+    current: number
+    limit: number
+    threshold: 80 | 100
+    billingUrl: string
+  }): Promise<boolean> {
+    const subject =
+      data.threshold === 100
+        ? `You have used all of your ${data.resourceLabel} — ${data.businessName}`
+        : `You are close to your ${data.resourceLabel} limit — ${data.businessName}`
+
+    return this.safeSend(
+      () =>
+        this.emailContext.send({
+          to: data.to,
+          subject,
+          template: 'operator-quota-threshold',
+          data: { ...data },
+        }),
+      'operator quota threshold',
+      { threshold: data.threshold, resource: data.resourceLabel },
+    )
+  }
+
+  // The only unsolicited mail in the system: nobody triggered it, it arrives on a schedule,
+  // and its whole job is to make a rider notice what their plan is worth. The boolean is
+  // load-bearing rather than incidental — DriverSavingsService records the period as
+  // summarised only when this returns true, so a bounced nudge is retried on the next sweep
+  // instead of silently consuming the rider's one slot for the window.
+  //
+  // The amount is formatted HERE, once, and the same string goes to the subject line and to
+  // the template. Formatting it on both sides of the package boundary would let a headline
+  // and a body disagree about how much someone saved.
+  async sendDriverSavingsSummary(data: {
+    to: string
+    riderName: string | null
+    savedCents: number
+    currency: string
+    planName: string | null
+    periodStart: Date
+    periodEnd: Date
+  }): Promise<boolean> {
+    return this.safeSend(
+      () => {
+        // Inside the closure so an unsupported currency code surfaces as one skipped rider
+        // in the sweep's log rather than an exception out of the job processor.
+        const savedFormatted = formatMoney(data.savedCents, data.currency)
+        return this.emailContext.send({
+          to: data.to,
+          subject: `You saved ${savedFormatted} with sPark`,
+          template: 'driver-savings-summary',
+          data: {
+            riderName: data.riderName,
+            savedFormatted,
+            planName: data.planName,
+            periodStart: data.periodStart,
+            periodEnd: data.periodEnd,
+          },
+        })
+      },
+      'driver savings summary',
+      { savedCents: data.savedCents, currency: data.currency },
     )
   }
 

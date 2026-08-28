@@ -19,14 +19,20 @@ import type { EntitlementService } from '../subscriptions/entitlement.service'
 import type { NotificationsService } from '../notifications/notifications.service'
 import { InviteService } from './invite.service'
 import { InviteTokenService } from './invite-token.service'
+import type { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
 import {
   InviteAlreadyAcceptedError,
+  InviteBusinessNameRequiredError,
   InviteEmailTakenError,
   InviteExpiredError,
   InviteNotFoundError,
   InviteNotResendableError,
   InviteNotRevocableError,
 } from './invite.types'
+
+const quotaThresholdStub = (): { checkOperatorQuotaThresholds: jest.Mock } => ({
+  checkOperatorQuotaThresholds: jest.fn().mockResolvedValue(undefined),
+})
 
 const platformUser: AuthUser = {
   id: 'admin-1',
@@ -178,6 +184,7 @@ describe('InviteService', () => {
       config as unknown as ConfigService,
       new OperatorAccessService(prismaService, new OperatorScopeService(prismaService)),
       entitlements as unknown as EntitlementService,
+      quotaThresholdStub() as unknown as QuotaThresholdService,
       new InviteTokenService(config as unknown as ConfigService),
       firebase as unknown as IAuthProvider,
     )
@@ -202,11 +209,10 @@ describe('InviteService', () => {
 
       const summary = await service.create(platformUser, {
         email: 'Owner@Biz.com',
-        businessName: 'Biz Parking',
       })
 
       expect(tx.parkingOperator.create.mock.calls[0]![0].data).toMatchObject({
-        name: 'Biz Parking',
+        name: '',
         status: 'PENDING',
       })
 
@@ -228,7 +234,7 @@ describe('InviteService', () => {
       expect(summary).toMatchObject({
         id: 'inv-1',
         email: 'owner@biz.com',
-        businessName: 'Biz Parking',
+        businessName: '',
         kind: OperatorInviteKind.ONBOARDING,
         role: OperatorMemberRole.ADMIN,
         delivered: true,
@@ -240,7 +246,7 @@ describe('InviteService', () => {
       tx.operatorInvite.create.mockResolvedValue({
         id: 'inv-1',
         email: 'owner@biz.com',
-        businessName: 'Biz Parking',
+        businessName: '',
         status: InviteStatus.PENDING,
         kind: OperatorInviteKind.ONBOARDING,
         role: OperatorMemberRole.ADMIN,
@@ -252,7 +258,6 @@ describe('InviteService', () => {
 
       const summary = await service.create(platformUser, {
         email: 'owner@biz.com',
-        businessName: 'Biz Parking',
       })
 
       expect(summary.delivered).toBe(false)
@@ -263,7 +268,7 @@ describe('InviteService', () => {
       tx.operatorInvite.create.mockResolvedValue({
         id: 'inv-1',
         email: 'owner@biz.com',
-        businessName: 'Biz Parking',
+        businessName: '',
         status: InviteStatus.PENDING,
         kind: OperatorInviteKind.ONBOARDING,
         role: OperatorMemberRole.ADMIN,
@@ -273,7 +278,7 @@ describe('InviteService', () => {
       })
 
       await RequestContext.run({ ip: '198.51.100.4' }, () =>
-        service.create(platformUser, { email: 'Owner@Biz.com', businessName: 'Biz Parking' }),
+        service.create(platformUser, { email: 'Owner@Biz.com' }),
       )
 
       expect(tx.auditLog.create).toHaveBeenCalledTimes(1)
@@ -292,9 +297,9 @@ describe('InviteService', () => {
     })
 
     it('rejects a non-platform-admin actor (service-layer re-check)', async () => {
-      await expect(
-        service.create(operatorUser, { email: 'a@b.com', businessName: 'X' }),
-      ).rejects.toBeInstanceOf(ForbiddenException)
+      await expect(service.create(operatorUser, { email: 'a@b.com' })).rejects.toBeInstanceOf(
+        ForbiddenException,
+      )
       expect(prisma.$transaction).not.toHaveBeenCalled()
     })
   })
@@ -867,6 +872,7 @@ describe('InviteService', () => {
         businessName: 'Biz',
         email: 'a@b.com',
         role: OperatorMemberRole.STAFF,
+        kind: OperatorInviteKind.MEMBER,
         status: InviteStatus.PENDING,
         expiresAt: futureDate(),
       })
@@ -874,6 +880,7 @@ describe('InviteService', () => {
         businessName: 'Biz',
         email: 'a@b.com',
         role: OperatorMemberRole.STAFF,
+        kind: OperatorInviteKind.MEMBER,
         expired: false,
       })
     })
@@ -883,6 +890,7 @@ describe('InviteService', () => {
         businessName: 'Biz',
         email: 'a@b.com',
         role: OperatorMemberRole.ADMIN,
+        kind: OperatorInviteKind.ONBOARDING,
         status: InviteStatus.ACCEPTED,
         expiresAt: futureDate(),
       })
@@ -917,7 +925,7 @@ describe('InviteService', () => {
       const expected = authResult('user-new')
       firebase.signUp.mockResolvedValue(expected)
 
-      const result = await service.accept('tok', 'password123')
+      const result = await service.accept('tok', 'password123', 'Biz Parking')
 
       expect(firebase.signUp).toHaveBeenCalledWith({
         email: 'new@spark.gr',
@@ -933,7 +941,7 @@ describe('InviteService', () => {
       expect(tx.parkingOperator.update).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { id: 'op-new' },
-          data: expect.objectContaining({ status: 'VERIFIED' }),
+          data: expect.objectContaining({ name: 'Biz Parking', status: 'VERIFIED' }),
         }),
       )
       expect(tx.user.update).toHaveBeenCalledWith({
@@ -943,11 +951,29 @@ describe('InviteService', () => {
       expect(tx.operatorInvite.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { id: 'inv-1', tokenHash: sha256('tok'), status: InviteStatus.PENDING },
-          data: expect.objectContaining({ status: 'ACCEPTED' }),
+          data: expect.objectContaining({ status: 'ACCEPTED', businessName: 'Biz Parking' }),
         }),
       )
       expect(firebase.deleteUser).not.toHaveBeenCalled()
       expect(result).toBe(expected)
+    })
+
+    it('refuses to complete onboarding without a business name', async () => {
+      prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
+
+      await expect(service.accept('tok', 'password123')).rejects.toBeInstanceOf(
+        InviteBusinessNameRequiredError,
+      )
+      expect(firebase.signUp).not.toHaveBeenCalled()
+    })
+
+    it('refuses a blank or whitespace-only business name', async () => {
+      prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
+
+      await expect(service.accept('tok', 'password123', '   ')).rejects.toBeInstanceOf(
+        InviteBusinessNameRequiredError,
+      )
+      expect(firebase.signUp).not.toHaveBeenCalled()
     })
 
     it('yields operator_staff and a STAFF membership for a staff invite, leaving the operator untouched', async () => {
@@ -997,7 +1023,9 @@ describe('InviteService', () => {
       firebase.signUp.mockResolvedValue(authResult('user-new'))
       tx.operatorInvite.updateMany.mockResolvedValue({ count: 0 })
 
-      await expect(service.accept('tok', 'password123')).rejects.toBeInstanceOf(InviteExpiredError)
+      await expect(
+        service.accept('tok', 'password123', 'Biz Parking'),
+      ).rejects.toBeInstanceOf(InviteExpiredError)
       expect(firebase.deleteUser).toHaveBeenCalledWith('user-new')
       expect(tx.auditLog.create).not.toHaveBeenCalled()
     })
@@ -1006,7 +1034,9 @@ describe('InviteService', () => {
       prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
       firebase.signUp.mockResolvedValue(authResult('user-new'))
 
-      await RequestContext.run({ ip: '192.0.2.7' }, () => service.accept('tok', 'p4ssw0rd!'))
+      await RequestContext.run({ ip: '192.0.2.7' }, () =>
+        service.accept('tok', 'p4ssw0rd!', 'Biz Parking'),
+      )
 
       expect(tx.auditLog.create).toHaveBeenCalledTimes(1)
       const auditCall = tx.auditLog.create.mock.calls[0]![0]
@@ -1029,7 +1059,7 @@ describe('InviteService', () => {
       const boom = new Error('audit insert failed')
       tx.auditLog.create.mockRejectedValue(boom)
 
-      await expect(service.accept('tok', 'password123')).rejects.toBe(boom)
+      await expect(service.accept('tok', 'password123', 'Biz Parking')).rejects.toBe(boom)
 
       // The audit write shares the `tx` client with the membership/status/invite writes,
       // so a real database rolls all of them back together; the compensating Firebase
@@ -1074,7 +1104,7 @@ describe('InviteService', () => {
       const boom = new Error('db down')
       prisma.$transaction.mockRejectedValue(boom)
 
-      await expect(service.accept('tok', 'password123')).rejects.toBe(boom)
+      await expect(service.accept('tok', 'password123', 'Biz Parking')).rejects.toBe(boom)
       expect(firebase.deleteUser).toHaveBeenCalledWith('user-new')
     })
   })
@@ -1111,7 +1141,7 @@ describe('InviteService', () => {
       prisma.user.findFirst.mockResolvedValue({ id: 'existing' })
 
       await expect(
-        service.create(platformUser, { email: 'Owner@Biz.com', businessName: 'Biz Parking' }),
+        service.create(platformUser, { email: 'Owner@Biz.com' }),
       ).rejects.toBeInstanceOf(InviteEmailTakenError)
 
       expect(tx.parkingOperator.create).not.toHaveBeenCalled()
@@ -1141,9 +1171,9 @@ describe('InviteService', () => {
       prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
       prisma.user.findFirst.mockResolvedValue({ id: 'existing' })
 
-      await expect(service.accept('tok', 'password123')).rejects.toBeInstanceOf(
-        InviteEmailTakenError,
-      )
+      await expect(
+        service.accept('tok', 'password123', 'Biz Parking'),
+      ).rejects.toBeInstanceOf(InviteEmailTakenError)
       expect(firebase.signUp).not.toHaveBeenCalled()
     })
 
@@ -1156,7 +1186,7 @@ describe('InviteService', () => {
       tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
       tx.operatorInvite.create.mockResolvedValue(inviteRow())
 
-      await service.create(platformUser, { email: 'owner@biz.com', businessName: 'Biz Parking' })
+      await service.create(platformUser, { email: 'owner@biz.com' })
 
       const where = prisma.user.findFirst.mock.calls[0]![0].where as Record<string, unknown>
       expect(where).toMatchObject({ email: 'owner@biz.com' })
@@ -1176,7 +1206,7 @@ describe('InviteService', () => {
       tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
       tx.operatorInvite.create.mockResolvedValue(inviteRow())
 
-      await service.create(platformUser, { email: 'owner@biz.com', businessName: 'Biz Parking' })
+      await service.create(platformUser, { email: 'owner@biz.com' })
 
       expect(tx.operatorInvite.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1199,7 +1229,7 @@ describe('InviteService', () => {
       tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
       tx.operatorInvite.create.mockResolvedValue(inviteRow())
 
-      await service.create(platformUser, { email: 'owner@biz.com', businessName: 'Biz Parking' })
+      await service.create(platformUser, { email: 'owner@biz.com' })
 
       expect(tx.parkingOperator.deleteMany).toHaveBeenCalledWith({
         where: {
@@ -1219,7 +1249,7 @@ describe('InviteService', () => {
       tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
       tx.operatorInvite.create.mockResolvedValue(inviteRow())
 
-      await service.create(platformUser, { email: 'owner@biz.com', businessName: 'Biz Parking' })
+      await service.create(platformUser, { email: 'owner@biz.com' })
 
       const superseded = tx.auditLog.create.mock.calls
         .map((call) => call[0].data as { action: string; entityId: string })
@@ -1262,7 +1292,7 @@ describe('InviteService', () => {
       tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
       tx.operatorInvite.create.mockResolvedValue(inviteRow())
 
-      await service.create(platformUser, { email: 'owner@biz.com', businessName: 'Biz Parking' })
+      await service.create(platformUser, { email: 'owner@biz.com' })
 
       expect(tx.operatorInvite.updateMany).not.toHaveBeenCalled()
       expect(tx.parkingOperator.deleteMany).not.toHaveBeenCalled()

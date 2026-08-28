@@ -3,7 +3,6 @@ import { z } from 'zod'
 
 export const createInviteSchema = z.object({
   email: z.string().email(),
-  businessName: z.string().min(1).max(200),
 })
 
 export type CreateInviteDto = z.infer<typeof createInviteSchema>
@@ -21,6 +20,10 @@ export type CreateMemberInviteDto = z.infer<typeof createMemberInviteSchema>
 
 export const acceptInviteSchema = z.object({
   password: z.string().min(8).max(128),
+  // Only the ONBOARDING flow needs this — a MEMBER invite attaches to an operator that
+  // already has a name. Enforced as required for that kind in the service layer, where
+  // the invite's kind is actually known.
+  businessName: z.string().trim().min(1).max(200).optional(),
 })
 
 export type AcceptInviteDto = z.infer<typeof acceptInviteSchema>

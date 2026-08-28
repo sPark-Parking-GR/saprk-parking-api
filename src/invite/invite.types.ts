@@ -38,6 +38,15 @@ export class InviteNotRevocableError extends DomainError {
   }
 }
 
+// ONBOARDING no longer collects a business name at issue time — the invitee sets it
+// alongside their password. MEMBER never sends one; the operator it attaches to already
+// has a name, so this only fires on the flow that actually needs it.
+export class InviteBusinessNameRequiredError extends DomainError {
+  constructor() {
+    super('Business name is required to complete onboarding')
+  }
+}
+
 // A lapsed invite IS resendable — reissuing it is the whole point — so only the two
 // terminal states are refused.
 export class InviteNotResendableError extends DomainError {
@@ -69,5 +78,6 @@ export interface InviteValidation {
   businessName: string
   email: string
   role: string
+  kind: string
   expired: boolean
 }
