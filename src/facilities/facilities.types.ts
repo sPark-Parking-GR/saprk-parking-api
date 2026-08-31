@@ -18,6 +18,9 @@ export interface FacilitySearchParams {
   startsAt: Date
   endsAt: Date
   vehicleType?: VehicleType
+  // The client's last-seen mode for this map session, used to apply hysteresis
+  // around SEARCH_RENDER_BUDGET rather than a bare threshold comparison.
+  preferMode?: 'points' | 'clusters'
 }
 
 export interface ResolvedTariffAssignment {

@@ -8,10 +8,11 @@ import {
   QuoteExpiredError,
   RefundFailedError,
 } from '../common/errors/domain.errors'
-import { isPlatformRole, type AuthUser } from '@spark/types'
+import { isPlatformRole, type AuthUser, type OrgPermission } from '@spark/types'
 import { Prisma } from '@prisma/client'
 import { OperatorScopeService, type OperatorScope } from '../common/authz/operator-scope.service'
 import { InventoryService } from '../inventory/inventory.service'
+import { OperatorAccessService } from '../operators/operator-access.service'
 import { NotificationsService } from '../notifications/notifications.service'
 import { PaymentsService } from '../payments/payments.service'
 import { PrismaService } from '../prisma/prisma.service'
@@ -67,6 +68,7 @@ export class BookingService {
     private readonly payments: PaymentsService,
     private readonly notifications: NotificationsService,
     private readonly operatorScope: OperatorScopeService,
+    private readonly access: OperatorAccessService,
   ) {}
 
   async adminList(user: AuthUser, query: ListBookingsDto): Promise<BookingList> {
@@ -334,7 +336,7 @@ export class BookingService {
    * Idempotent: a booking already CONFIRMED returns its current state.
    */
   async confirmBooking(bookingId: string, user: AuthUser): Promise<ConfirmedBooking> {
-    await this.assertBookingAccess(bookingId, user)
+    await this.assertBookingAccess(bookingId, user, 'org:booking.write')
     return this.captureAndConfirm(bookingId)
   }
 
@@ -461,7 +463,7 @@ export class BookingService {
    * in-flight, instead of returned money the system knows nothing about.
    */
   async cancelBooking(bookingId: string, user: AuthUser): Promise<void> {
-    await this.assertBookingAccess(bookingId, user)
+    await this.assertBookingAccess(bookingId, user, 'org:booking.write')
 
     const booking = await this.prisma.booking.findUnique({
       where: { id: bookingId },
@@ -893,8 +895,19 @@ export class BookingService {
   /**
    * The one ownership predicate for consumer-facing booking access: the booking's own
    * user, or operator/platform staff scoped to the facility holding it.
+   *
+   * `staffScope`, when given, is the org permission the STAFF branch additionally has to
+   * hold in that specific operator. The owner branch never consults it — a customer
+   * cancelling their own booking holds no org scopes at all — and platform callers are
+   * unscoped, which assertScope itself short-circuits. Without it, tenancy was the only
+   * gate on these routes: any staff member at the operator could cancel a booking (and
+   * trigger its refund) or capture payment on a pending one, whatever their scopes said.
    */
-  private async assertBookingAccess(bookingId: string, user: AuthUser): Promise<void> {
+  private async assertBookingAccess(
+    bookingId: string,
+    user: AuthUser,
+    staffScope?: OrgPermission,
+  ): Promise<void> {
     const booking = await this.prisma.booking.findUnique({
       where: { id: bookingId },
       select: { userId: true, facility: { select: { operatorId: true } } },
@@ -906,11 +919,12 @@ export class BookingService {
     // a 403, and that distinct status is itself the existence leak this method prevents.
     if (this.isStaff(user)) {
       const scope = await this.operatorScope.resolve(user)
-      if (
-        scope.kind === 'platform' ||
-        (booking.facility.operatorId !== null &&
-          scope.operatorIds.includes(booking.facility.operatorId))
-      ) {
+      const operatorId = booking.facility.operatorId
+      if (scope.kind === 'platform') return
+      if (operatorId !== null && scope.operatorIds.includes(operatorId)) {
+        // Tenancy has already matched, so the caller is entitled to know this booking
+        // exists: a missing scope is an honest 403 here, not a masked 404.
+        if (staffScope) await this.access.assertScope(user, operatorId, staffScope)
         return
       }
     }
@@ -921,7 +935,9 @@ export class BookingService {
   }
 
   private isStaff(user: AuthUser): boolean {
-    return user.role === 'operator_staff' || user.role === 'operator_admin' || isPlatformRole(user.role)
+    return (
+      user.role === 'operator_staff' || user.role === 'operator_admin' || isPlatformRole(user.role)
+    )
   }
 
   private async transitionByOperator(

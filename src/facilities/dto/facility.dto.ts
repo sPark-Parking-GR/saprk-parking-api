@@ -13,6 +13,10 @@ export const searchFacilitiesSchema = z
     startsAt: z.coerce.date(),
     endsAt: z.coerce.date(),
     vehicleType: z.nativeEnum(VehicleType).optional(),
+    // Echoed back by the client from the `mode` of its previous response, so the
+    // server can apply hysteresis around SEARCH_RENDER_BUDGET instead of flipping
+    // the whole viewport between points and clusters on every small pan/zoom.
+    preferMode: z.enum(['points', 'clusters']).optional(),
   })
   .refine((data) => data.endsAt > data.startsAt, {
     message: 'endsAt must be after startsAt',

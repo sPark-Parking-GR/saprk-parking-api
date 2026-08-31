@@ -1,7 +1,5 @@
 import type { AuthUser } from '@spark/types'
-import { Prisma, type FacilityKind,
-  OperatorStatus,
-} from '@prisma/client'
+import { Prisma, type FacilityKind, OperatorStatus } from '@prisma/client'
 import { FacilitiesService } from './facilities.service'
 import type { FacilityClusterIndexService } from './facility-cluster-index.service'
 import type { BookingService } from '../booking/booking.service'
@@ -34,6 +32,15 @@ import {
   type BulkFacilityDto,
   type CreateFacilityDto,
 } from './dto/facility.dto'
+import { ForbiddenException } from '@nestjs/common'
+import type { OperatorAccessService } from '../operators/operator-access.service'
+
+// Every create path now asks OperatorAccessService whether the caller holds the scope in
+// THAT operator, not merely somewhere. The permissive stub keeps unrelated cases focused;
+// the tests that care about the check pass their own.
+function accessStub() {
+  return { assertScope: jest.fn().mockResolvedValue(undefined) }
+}
 
 const quotaThresholdStub = (): { checkOperatorQuotaThresholds: jest.Mock } => ({
   checkOperatorQuotaThresholds: jest.fn().mockResolvedValue(undefined),
@@ -134,7 +141,9 @@ describe('FacilitiesService admin writes', () => {
   // on drift away from the one production runs.
   let scope: OperatorScopeService
   let bookings: { cancelBooking: jest.Mock }
+  let inventory: { checkAvailability: jest.Mock }
   let entitlements: { assertCanCreateFacility: jest.Mock }
+  let access: { assertScope: jest.Mock }
   let lifecycle: { archiveFacility: jest.Mock }
   let service: FacilitiesService
 
@@ -215,11 +224,20 @@ describe('FacilitiesService admin writes', () => {
     }
     scope = new OperatorScopeService(prisma as unknown as PrismaService)
     bookings = { cancelBooking: jest.fn() }
+    inventory = {
+      checkAvailability: jest.fn().mockResolvedValue({
+        available: true,
+        onlineQuota: 0,
+        overlappingCount: 0,
+        remainingSlots: 0,
+      }),
+    }
     entitlements = { assertCanCreateFacility: jest.fn().mockResolvedValue(undefined) }
+    access = accessStub()
     lifecycle = { archiveFacility: jest.fn().mockResolvedValue(undefined) }
     service = new FacilitiesService(
       prisma as unknown as PrismaService,
-      {} as unknown as InventoryService,
+      inventory as unknown as InventoryService,
       {} as unknown as TariffService,
       scope,
       bookings as unknown as BookingService,
@@ -227,6 +245,7 @@ describe('FacilitiesService admin writes', () => {
       lifecycle as unknown as LifecycleService,
       {} as unknown as FacilityClusterIndexService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      access as unknown as OperatorAccessService,
     )
   })
 
@@ -464,6 +483,32 @@ describe('FacilitiesService admin writes', () => {
       expect(tx.facility.create).not.toHaveBeenCalled()
     })
 
+    /**
+     * targetOperatorId honours any operator in the caller's membership UNION, and
+     * OrgPermissionGuard only asks whether SOME membership grants the scope. Between them,
+     * an administrator of one operator who is an attendant at another could create there.
+     * This is the check that tells the two memberships apart.
+     */
+    it('asserts the write scope in the operator being created into', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.create.mockResolvedValue(makeRow())
+
+      await service.create(operatorUser, { ...validCreate })
+
+      expect(access.assertScope).toHaveBeenCalledWith(operatorUser, 'op1', 'org:facility.write')
+    })
+
+    it('creates nothing when that scope is refused', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      access.assertScope.mockRejectedValueOnce(new ForbiddenException('nope'))
+
+      await expect(service.create(operatorUser, { ...validCreate })).rejects.toBeInstanceOf(
+        ForbiddenException,
+      )
+      expect(tx.facility.create).not.toHaveBeenCalled()
+      expect(entitlements.assertCanCreateFacility).not.toHaveBeenCalled()
+    })
+
     // The dropped unique index used to be the backstop for a check-then-act race. This
     // ordering IS the replacement guarantee, so it is asserted rather than assumed.
     it('locks the operator row (FOR UPDATE) before the quota check', async () => {
@@ -490,21 +535,34 @@ describe('FacilitiesService admin writes', () => {
   })
 
   /**
-   * The two flags are independent axes and each has its own owner: isActive is system-wide
-   * availability only the platform grants, isPublished is mobile visibility the managing
-   * operator runs day to day.
+   * The two flags are both axes of going live and both belong to the managing operator:
+   * public visibility needs isActive AND isPublished, so an operator that could only set
+   * isPublished could never make its own facility reachable. The managed-rows lookup, not
+   * the field list, is what keeps either flag to facilities they actually run.
    */
   describe('isActive vs isPublished (the two axes)', () => {
-    it('operator update cannot set isActive', async () => {
+    it('operator update may set isActive on a facility it manages', async () => {
       setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
+      prisma.facility.update.mockResolvedValue(makeRow({ isActive: true }))
 
-      const error = await service
-        .update(operatorUser, 'f1', { isActive: true })
-        .catch((e: Error) => e)
+      const res = await service.update(operatorUser, 'f1', { isActive: true })
 
-      expect(error).toBeInstanceOf(FacilityFieldForbiddenError)
-      expect((error as Error).message).toContain('isActive')
+      expect(prisma.facility.findFirst.mock.calls[0]![0].where).toEqual({
+        id: 'f1',
+        ...managed(['op1'], operatorUser.id),
+      })
+      expect(prisma.facility.update.mock.calls[0]![0].data.isActive).toBe(true)
+      expect(res.isActive).toBe(true)
+    })
+
+    it('an operator cannot activate a facility it does not manage', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.findFirst.mockResolvedValue(null)
+
+      await expect(
+        service.update(operatorUser, 'f-other', { isActive: true }),
+      ).rejects.toBeInstanceOf(FacilityNotFoundError)
       expect(prisma.facility.update).not.toHaveBeenCalled()
     })
 
@@ -1283,26 +1341,40 @@ describe('FacilitiesService admin writes', () => {
 
   // deploy/enable/disable all move isActive, which is platform-only. publish/unpublish move
   // isPublished alone, which the managing operator owns.
-  describe('bulk actions split along the isActive boundary', () => {
+  describe('bulk actions carry the same isActive rule as update', () => {
     const isActiveActions: BulkFacilityDto[] = [
       { action: 'deploy', ids: ['a'] },
       { action: 'enable', ids: ['a'] },
-      { action: 'disable', ids: ['a'], force: false },
     ]
 
-    it.each(isActiveActions)(
-      'operator cannot bulk $action (isActive is platform-only)',
-      async (dto) => {
-        setScope({ kind: 'operator', operatorIds: ['op1'] })
+    // The scope predicate, not a field check, is the boundary: the same call that succeeds
+    // on a managed facility silently affects nothing when the ids are someone else's.
+    it.each(isActiveActions)('operator may bulk $action its own facilities', async (dto) => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.updateMany.mockResolvedValue({ count: 1 })
 
-        const error = await service.bulkUpdate(operatorUser, dto).catch((e: Error) => e)
+      const res = await service.bulkUpdate(operatorUser, dto)
 
-        expect(error).toBeInstanceOf(FacilityFieldForbiddenError)
-        expect((error as Error).message).toContain('isActive')
-        expect(prisma.facility.updateMany).not.toHaveBeenCalled()
-        expect(lifecycle.archiveFacility).not.toHaveBeenCalled()
-      },
-    )
+      expect(res).toEqual({ affected: 1 })
+      expect(prisma.facility.updateMany.mock.calls[0]![0].where).toEqual({
+        id: { in: ['a'] },
+        ...managed(['op1'], operatorUser.id),
+      })
+      expect(prisma.facility.updateMany.mock.calls[0]![0].data.isActive).toBe(true)
+    })
+
+    it('operator bulk deploy reaches no facility it does not manage', async () => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.updateMany.mockResolvedValue({ count: 0 })
+
+      const res = await service.bulkUpdate(operatorUser, { action: 'deploy', ids: ['other'] })
+
+      expect(res).toEqual({ affected: 0 })
+      expect(prisma.facility.updateMany.mock.calls[0]![0].where).toEqual({
+        id: { in: ['other'] },
+        ...managed(['op1'], operatorUser.id),
+      })
+    })
 
     it('platform may bulk enable', async () => {
       setScope({ kind: 'platform' })
@@ -1330,7 +1402,7 @@ describe('FacilitiesService admin writes', () => {
     })
   })
 
-  it('operator can bulk publish own facilities (isPublished is theirs; isActive is not)', async () => {
+  it('operator can bulk publish own facilities', async () => {
     setScope({ kind: 'operator', operatorIds: ['op1'] })
     prisma.facility.updateMany.mockResolvedValue({ count: 2 })
 
@@ -1395,6 +1467,43 @@ describe('FacilitiesService admin writes', () => {
       expect(res).toEqual({ facilityId: 'f1', vehicleType: 'CAR', tariffPlanId: 'plan1' })
     })
 
+    // Each side is validated against the CALLER's scope, never against the other. Anyone
+    // whose scope spans two tenants — a platform admin, or a manager on both ends — could
+    // otherwise publish one operator's rate schedule on another operator's facility, which
+    // GET /facilities/:id then serves anonymously.
+    it('refuses a plan whose operator differs from the facility operator', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', operatorId: 'op-a' })
+      prisma.tariffPlan.findFirst.mockResolvedValue({
+        id: 'plan1',
+        vehicleTypes: [],
+        operatorId: 'op-b',
+      })
+
+      const error = await service
+        .assignTariff(platformUser, 'f1', 'CAR' as never, 'plan1')
+        .catch((e: Error) => e)
+
+      expect(error).toBeInstanceOf(TariffAssignmentMismatchError)
+      expect((error as Error).message).toContain('different operators')
+      expect(tx.facilityTariffAssignment.create).not.toHaveBeenCalled()
+      expect(tx.facilityTariffAssignment.deleteMany).not.toHaveBeenCalled()
+    })
+
+    it('allows a plan and facility that share an operator', async () => {
+      setScope({ kind: 'platform' })
+      prisma.facility.findFirst.mockResolvedValue({ id: 'f1', operatorId: 'op-a' })
+      prisma.tariffPlan.findFirst.mockResolvedValue({
+        id: 'plan1',
+        vehicleTypes: [],
+        operatorId: 'op-a',
+      })
+
+      await expect(
+        service.assignTariff(platformUser, 'f1', 'CAR' as never, 'plan1'),
+      ).resolves.toEqual({ facilityId: 'f1', vehicleType: 'CAR', tariffPlanId: 'plan1' })
+    })
+
     it('rejects a concrete slot the plan does not price (consistency guardrail)', async () => {
       setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.facility.findFirst.mockResolvedValue({ id: 'f1' })
@@ -1452,10 +1561,13 @@ describe('FacilitiesService admin writes', () => {
     it('assigns multiple slots across scoped facilities after validating every plan', async () => {
       setScope({ kind: 'operator', operatorIds: ['op1'] })
       prisma.tariffPlan.findMany.mockResolvedValue([
-        { id: 'planCar', vehicleTypes: ['CAR'] },
-        { id: 'planTruck', vehicleTypes: [] },
+        { id: 'planCar', vehicleTypes: ['CAR'], operatorId: 'op1' },
+        { id: 'planTruck', vehicleTypes: [], operatorId: 'op1' },
       ])
-      tx.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
+      tx.facility.findMany.mockResolvedValue([
+        { id: 'a', operatorId: 'op1' },
+        { id: 'b', operatorId: 'op1' },
+      ])
 
       const res = await service.bulkUpdate(operatorUser, {
         action: 'assignTariff',
@@ -1495,11 +1607,52 @@ describe('FacilitiesService admin writes', () => {
       expect(res).toEqual({ affected: 2 })
     })
 
+    it('refuses a bulk assignment that crosses two operators', async () => {
+      setScope({ kind: 'platform' })
+      prisma.tariffPlan.findMany.mockResolvedValue([
+        { id: 'plan1', vehicleTypes: [], operatorId: 'op-a' },
+      ])
+      tx.facility.findMany.mockResolvedValue([
+        { id: 'a', operatorId: 'op-a' },
+        { id: 'b', operatorId: 'op-b' },
+      ])
+
+      await expect(
+        service.bulkUpdate(platformUser, {
+          ids: ['a', 'b'],
+          action: 'assignTariff',
+          assignments: [{ vehicleType: 'CAR' as never, tariffPlanId: 'plan1' }],
+        }),
+      ).rejects.toBeInstanceOf(TariffAssignmentMismatchError)
+      expect(tx.facilityTariffAssignment.createMany).not.toHaveBeenCalled()
+    })
+
+    it('refuses a bulk assignment whose plans come from two operators', async () => {
+      setScope({ kind: 'platform' })
+      prisma.tariffPlan.findMany.mockResolvedValue([
+        { id: 'plan1', vehicleTypes: ['CAR'], operatorId: 'op-a' },
+        { id: 'plan2', vehicleTypes: ['TRUCK'], operatorId: 'op-b' },
+      ])
+
+      await expect(
+        service.bulkUpdate(platformUser, {
+          ids: ['a'],
+          action: 'assignTariff',
+          assignments: [
+            { vehicleType: 'CAR' as never, tariffPlanId: 'plan1' },
+            { vehicleType: 'TRUCK' as never, tariffPlanId: 'plan2' },
+          ],
+        }),
+      ).rejects.toBeInstanceOf(TariffAssignmentMismatchError)
+    })
+
     it('only in-scope facilities are affected; foreign ids are silently excluded', async () => {
       setScope({ kind: 'operator', operatorIds: ['op1'] })
-      prisma.tariffPlan.findMany.mockResolvedValue([{ id: 'plan1', vehicleTypes: [] }])
+      prisma.tariffPlan.findMany.mockResolvedValue([
+        { id: 'plan1', vehicleTypes: [], operatorId: 'op1' },
+      ])
       // Only 'mine' matches id IN (...) AND operatorId = op1.
-      tx.facility.findMany.mockResolvedValue([{ id: 'mine' }])
+      tx.facility.findMany.mockResolvedValue([{ id: 'mine', operatorId: 'op1' }])
 
       const res = await service.bulkUpdate(operatorUser, {
         action: 'assignTariff',
@@ -1539,7 +1692,10 @@ describe('FacilitiesService admin writes', () => {
 
     it('bulk clear (all null plans) deletes the targeted slots and inserts nothing', async () => {
       setScope({ kind: 'operator', operatorIds: ['op1'] })
-      tx.facility.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
+      tx.facility.findMany.mockResolvedValue([
+        { id: 'a', operatorId: 'op1' },
+        { id: 'b', operatorId: 'op1' },
+      ])
 
       await service.bulkUpdate(operatorUser, {
         action: 'assignTariff',
@@ -1671,9 +1827,7 @@ describe('facility DTO validation', () => {
     expect(ok.success).toBe(true)
     if (ok.success) expect(ok.data.kind).toBe('FREE_PUBLIC')
 
-    expect(createFacilitySchema.safeParse({ ...validCreate, kind: 'business' }).success).toBe(
-      false,
-    )
+    expect(createFacilitySchema.safeParse({ ...validCreate, kind: 'business' }).success).toBe(false)
     expect(createFacilitySchema.safeParse({ ...validCreate, kind: 'NOT_A_KIND' }).success).toBe(
       false,
     )
@@ -1690,9 +1844,9 @@ describe('facility DTO validation', () => {
 
   it('still requires capacity, vehicles and hours when kind is BUSINESS or omitted', () => {
     expect(createFacilitySchema.safeParse(minimalCreate).success).toBe(false)
-    expect(
-      createFacilitySchema.safeParse({ ...minimalCreate, kind: 'BUSINESS' }).success,
-    ).toBe(false)
+    expect(createFacilitySchema.safeParse({ ...minimalCreate, kind: 'BUSINESS' }).success).toBe(
+      false,
+    )
   })
 
   it('does not require capacity, vehicles or hours for a non-BUSINESS kind', () => {

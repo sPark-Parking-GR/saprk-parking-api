@@ -1,7 +1,7 @@
 import { ForbiddenException } from '@nestjs/common'
 import type { ConfigService } from '@nestjs/config'
 import { InviteStatus } from '@prisma/client'
-import type { IAuthProvider } from '@spark/auth'
+import type { AuthContext } from '@spark/auth'
 import type { AuthUser } from '@spark/types'
 import { InviteTokenService } from '../invite/invite-token.service'
 import type { NotificationsService } from '../notifications/notifications.service'
@@ -77,7 +77,7 @@ function makeHarness() {
     prisma as unknown as PrismaService,
     notifications as unknown as NotificationsService,
     new InviteTokenService(config as unknown as ConfigService),
-    firebase as unknown as IAuthProvider,
+    firebase as unknown as AuthContext,
   )
 
   return { service, prisma, tx, notifications, firebase }

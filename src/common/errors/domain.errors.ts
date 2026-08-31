@@ -152,18 +152,30 @@ export class FacilityFieldForbiddenError extends DomainError {
   }
 }
 
+// The three quota nouns this codebase counts, as explicit pairs rather than a stemming
+// rule: there are only three, and any rule that turns "staff seats" into "staff seat" also
+// turns "premises" into "premise". Starter really does allow exactly one of two of them, so
+// the singular form is the common case, not an edge one.
+const RESOURCE_SINGULAR: Record<string, string> = {
+  facilities: 'facility',
+  'tariff plans': 'tariff plan',
+  'staff seats': 'staff seat',
+}
+
 // A quota refusal, replacing the hardcoded one-facility-per-operator cap. Names the limit
 // and the number in use rather than saying "limit reached": the caller cannot tell an
 // upgrade from a cleanup without both, and a refusal with no number is a support ticket.
-// `resource` is already plural ("facilities") — quotas are never expressed as one.
+// `resource` is given plural; the message picks the right form for the number it prints.
 export class EntitlementLimitExceededError extends DomainError {
   constructor(
     readonly resource: string,
     readonly limit: number,
     readonly current: number,
   ) {
+    const noun = limit === 1 ? (RESOURCE_SINGULAR[resource] ?? resource) : resource
+    const verb = current === 1 ? 'is' : 'are'
     super(
-      `This operator's plan allows ${limit} ${resource} and ${current} are already in use. Upgrade the plan or remove one first.`,
+      `This operator's plan allows ${limit} ${noun} and ${current} ${verb} already in use. Upgrade the plan or remove one first.`,
     )
   }
 }

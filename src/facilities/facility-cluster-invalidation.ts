@@ -36,6 +36,27 @@ export function invalidateFacilityClusterIndex(): void {
   pendingBump.unref()
 }
 
+/**
+ * The un-debounced bump, for writers the Prisma extension cannot see.
+ *
+ * The extension hooks Prisma's Facility operations, so raw SQL is invisible to it — the
+ * service's own notes already say a raw write "would have to invalidate by hand", and until
+ * now there was no hand to do it with. A caller that has just changed the table out of band
+ * needs the next read to rebuild, not a rebuild a second from now: it knows the write is
+ * finished, which is the thing the debounce is guessing at.
+ *
+ * This matters more than it used to. Cluster mode now hands back facility IDS for the
+ * groups too small to bubble, so a stale index no longer costs a slightly-off count — the
+ * ids resolve to nothing and those markers vanish from the map.
+ */
+export function invalidateFacilityClusterIndexNow(): void {
+  if (pendingBump) {
+    clearTimeout(pendingBump)
+    pendingBump = null
+  }
+  version++
+}
+
 export function getFacilityClusterIndexVersion(): number {
   return version
 }

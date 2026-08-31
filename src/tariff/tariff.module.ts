@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common'
 import { OperatorScopeService } from '../common/authz/operator-scope.service'
+import { OperatorAccessService } from '../operators/operator-access.service'
 import { LifecycleModule } from '../lifecycle/lifecycle.module'
 import { DriverSubscriptionsModule } from '../subscriptions/driver-subscriptions.module'
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module'
@@ -13,7 +14,7 @@ import { TariffService } from './tariff.service'
 @Module({
   imports: [SubscriptionsModule, DriverSubscriptionsModule, LifecycleModule],
   controllers: [TariffController],
-  providers: [TariffService, OperatorScopeService],
+  providers: [TariffService, OperatorScopeService, OperatorAccessService],
   exports: [TariffService],
 })
 export class TariffModule {}

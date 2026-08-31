@@ -1,6 +1,6 @@
 import { ForbiddenException, Inject, Injectable, Logger } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
-import type { IAuthProvider } from '@spark/auth'
+import type { AuthContext } from '@spark/auth'
 import {
   DEFAULT_STAFF_SCOPES,
   hasPlatformPermission,
@@ -16,7 +16,9 @@ import {
   OperatorStatus,
   type Prisma,
 } from '@prisma/client'
-import { FIREBASE_AUTH_PROVIDER_TOKEN } from '../auth/auth.constants'
+import { AccountLinkingService } from '../auth/account-linking.service'
+import { AUTH_CONTEXT_TOKEN } from '../auth/auth.constants'
+import { TO_PRISMA } from '../auth/authjs-user.store'
 import { RequestContext } from '../common/context/request-context'
 import { OperatorSuspendedError } from '../common/errors/domain.errors'
 import { NotificationsService } from '../notifications/notifications.service'
@@ -63,7 +65,12 @@ export class InviteService {
     private readonly entitlements: EntitlementService,
     private readonly quotaThresholds: QuotaThresholdService,
     private readonly tokens: InviteTokenService,
-    @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: IAuthProvider,
+    // The CONFIGURED provider, not a directly-constructed Firebase one. Provisioning used
+    // to bypass AUTH_PROVIDER entirely, so every invited account was Firebase-backed
+    // whatever the deployment had selected — which is both the strategy-pattern violation
+    // CLAUDE.md forbids and the reason no e2e suite could ever redeem an invite.
+    @Inject(AUTH_CONTEXT_TOKEN) private readonly auth: AuthContext,
+    private readonly accountLinking: AccountLinkingService,
   ) {}
 
   async create(actor: AuthUser, dto: CreateInviteDto): Promise<InviteIssued> {
@@ -74,7 +81,12 @@ export class InviteService {
     }
 
     const email = dto.email.toLowerCase()
-    await this.assertEmailFree(email)
+    // Issuance never needs ownership proof — only redemption (accept()) does. An address
+    // that already has a mobile-only account may still be invited; that account is who
+    // will end up redeeming it, by proving they own it with its own password.
+    if ((await this.accountLinking.resolve(email)).kind === 'taken') {
+      throw new InviteEmailTakenError(email)
+    }
 
     const { rawToken, tokenHash, expiresAt } = this.mintToken()
 
@@ -142,7 +154,10 @@ export class InviteService {
     if (operator.status !== OperatorStatus.VERIFIED) throw new OperatorNotFoundError(operatorId)
 
     const email = dto.email.toLowerCase()
-    await this.assertEmailFree(email)
+    // See create(): issuance never needs ownership proof, only redemption does.
+    if ((await this.accountLinking.resolve(email)).kind === 'taken') {
+      throw new InviteEmailTakenError(email)
+    }
 
     const { rawToken, tokenHash, expiresAt } = this.mintToken()
 
@@ -222,7 +237,36 @@ export class InviteService {
     // revocable, and no longer-lived than a brand-new invite.
     const { rawToken, tokenHash, expiresAt } = this.mintToken()
 
+    // Reviving a MEMBER invite that is not currently live is an ISSUANCE, and has to pay for
+    // a seat like one. countStaffSeats counts only PENDING invites that have not lapsed, so
+    // an EXPIRED — or PENDING-but-lapsed — invite costs nothing while it sits there and
+    // would become a redeemable seat the moment this rotates it back to PENDING. accept()
+    // performs no seat check by design, so an unpaid seat here is an unpaid seat forever.
+    // A still-live invite already occupies its seat: asserting for it would count the very
+    // invite being resent and refuse an operator exactly at their limit.
+    const revivesASeat =
+      invite.kind === OperatorInviteKind.MEMBER &&
+      invite.operatorId !== null &&
+      !(invite.status === InviteStatus.PENDING && invite.expiresAt > new Date())
+
     await this.prisma.$transaction(async (tx) => {
+      if (revivesASeat) {
+        const operatorId = invite.operatorId as string
+        // Same lock the create paths take, and for the same reason: it is the only thing
+        // serialising two concurrent issuances against one quota.
+        await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${operatorId} FOR UPDATE`
+        // createMember refuses to issue into an operator that is not VERIFIED; a resend is
+        // the same act and must not be the way around that.
+        const operator = await tx.parkingOperator.findUnique({
+          where: { id: operatorId },
+          select: { status: true },
+        })
+        if (!operator || operator.status !== OperatorStatus.VERIFIED) {
+          throw new OperatorNotFoundError(operatorId)
+        }
+        await this.entitlements.assertCanAddStaffSeat(operatorId, tx)
+      }
+
       // Conditional on the hash that was read: if a concurrent resend already rotated the
       // token, this one must not overwrite the link that request emailed.
       const { count } = await tx.operatorInvite.updateMany({
@@ -350,16 +394,25 @@ export class InviteService {
     })
     if (!invite) throw new InviteNotFoundError()
 
+    const resolution = await this.accountLinking.resolve(invite.email)
+
     return {
       businessName: invite.businessName,
       email: invite.email,
       role: invite.role,
       kind: invite.kind,
       expired: invite.status !== InviteStatus.PENDING || invite.expiresAt < new Date(),
+      alreadyAccepted: invite.status === InviteStatus.ACCEPTED,
+      requiresExistingPassword: resolution.kind === 'linkable',
     }
   }
 
-  async accept(token: string, password: string, businessName?: string): Promise<AuthResult> {
+  async accept(
+    token: string,
+    password: string,
+    businessName?: string,
+    displayName?: string,
+  ): Promise<AuthResult> {
     const invite = await this.prisma.operatorInvite.findUnique({
       where: { tokenHash: this.hashToken(token) },
     })
@@ -414,12 +467,14 @@ export class InviteService {
 
     // Creates the Firebase identity AND the local User row; session.user.id is the
     // local Postgres id.
-    const authResult = await this.firebase.signUp({
+    const authResult = await this.auth.signUp({
       email: invite.email,
       password,
-      // The business name is the new operator's own name on the onboarding flow; on a
-      // member invite it belongs to the employer, not the employee.
-      displayName: resolvedBusinessName,
+      // The person's own name. This used to be the BUSINESS name on the onboarding flow,
+      // which made an operator admin show up as their company in every list that names a
+      // human — and left member invites with no name at all. The business name belongs to
+      // the operator record, which is where it is now written and nowhere else.
+      ...(displayName ? { displayName } : {}),
       role: grantedRole,
     })
     const newUserId = authResult.session.user.id
@@ -435,8 +490,7 @@ export class InviteService {
             // backfilled onto existing ones. Without this the backfill would only ever have
             // helped accounts that predated it, and everyone invited afterwards would
             // arrive able to do nothing. ADMIN stores none and derives all.
-            scopes:
-              invite.role === OperatorMemberRole.STAFF ? [...DEFAULT_STAFF_SCOPES] : [],
+            scopes: invite.role === OperatorMemberRole.STAFF ? [...DEFAULT_STAFF_SCOPES] : [],
           },
         })
         if (isOnboarding) {
@@ -477,7 +531,7 @@ export class InviteService {
       // the identity is created must be compensated by deleting that identity — otherwise
       // an orphaned Firebase+local user with no operator attachment is left behind.
       try {
-        await this.firebase.deleteUser(newUserId)
+        await this.auth.deleteUser(newUserId)
       } catch (cleanupError) {
         this.logger.error(
           `Failed to roll back orphaned identity ${newUserId} after invite-accept failure: ${
@@ -521,7 +575,10 @@ export class InviteService {
     actor: AuthUser,
     where: Prisma.OperatorInviteWhereInput & { email: string },
   ): Promise<void> {
-    const stale = await tx.operatorInvite.findMany({ where, select: { id: true, operatorId: true } })
+    const stale = await tx.operatorInvite.findMany({
+      where,
+      select: { id: true, operatorId: true },
+    })
     if (stale.length === 0) return
 
     const ids = stale.map((invite) => invite.id)

@@ -80,4 +80,13 @@ export interface InviteValidation {
   role: string
   kind: string
   expired: boolean
+  // Distinguishes the two ways a link stops working, which `expired` alone collapses into
+  // one: a redeemed invite means the account exists and the person should sign in, while a
+  // lapsed or revoked one means they need a new invite. Telling a returning operator their
+  // link "expired" sends them back to the admin for a replacement they do not need.
+  alreadyAccepted: boolean
+  // True when the invited address already has a mobile-only account: accepting attaches
+  // this invite's role to that account instead of creating a new one, so the accept form
+  // must collect the EXISTING password rather than let the person choose a new one.
+  requiresExistingPassword: boolean
 }

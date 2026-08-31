@@ -10,6 +10,14 @@ import type { DriverEntitlementService } from '../subscriptions/driver-entitleme
 import type { EntitlementService } from '../subscriptions/entitlement.service'
 
 import type { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
+import type { OperatorAccessService } from '../operators/operator-access.service'
+
+// Every create path now asks OperatorAccessService whether the caller holds the scope in
+// THAT operator, not merely somewhere. The permissive stub keeps unrelated cases focused;
+// the tests that care about the check pass their own.
+function accessStub() {
+  return { assertScope: jest.fn().mockResolvedValue(undefined) }
+}
 
 const quotaThresholdStub = (): { checkOperatorQuotaThresholds: jest.Mock } => ({
   checkOperatorQuotaThresholds: jest.fn().mockResolvedValue(undefined),
@@ -88,7 +96,13 @@ describe('pricing-engine.priceStay', () => {
       windows: [ALL_DAY],
       prices: { 't|wAll': 200 },
     })
-    const r = priceStay(new Date('2026-06-18T10:00:00Z'), new Date('2026-06-18T12:00:00Z'), p, 0, null)
+    const r = priceStay(
+      new Date('2026-06-18T10:00:00Z'),
+      new Date('2026-06-18T12:00:00Z'),
+      p,
+      0,
+      null,
+    )
     expect(r.totalCents).toBe(400)
     expect(r.lineItems).toHaveLength(1)
     expect(r.lineItems[0]).toMatchObject({ unitPriceCents: 200, quantity: 2, subtotalCents: 400 })
@@ -102,7 +116,13 @@ describe('pricing-engine.priceStay', () => {
       windows: [ALL_DAY],
       prices: { 't|wAll': 200 },
     })
-    const r = priceStay(new Date('2026-06-18T10:00:00Z'), new Date('2026-06-18T11:01:00Z'), p, 0, null)
+    const r = priceStay(
+      new Date('2026-06-18T10:00:00Z'),
+      new Date('2026-06-18T11:01:00Z'),
+      p,
+      0,
+      null,
+    )
     expect(r.totalCents).toBe(400)
     expect(r.lineItems[0]!.quantity).toBe(2)
   })
@@ -116,7 +136,13 @@ describe('pricing-engine.priceStay', () => {
       windows: [ALL_DAY],
       prices: { 'flat|wAll': 150, 'hour|wAll': 200 },
     })
-    const r = priceStay(new Date('2026-06-18T10:00:00Z'), new Date('2026-06-18T11:30:00Z'), p, 0, null)
+    const r = priceStay(
+      new Date('2026-06-18T10:00:00Z'),
+      new Date('2026-06-18T11:30:00Z'),
+      p,
+      0,
+      null,
+    )
     expect(r.totalCents).toBe(150 + 200)
     expect(r.lineItems).toHaveLength(2)
     expect(r.lineItems[0]).toMatchObject({ quantity: 1, subtotalCents: 150 })
@@ -160,7 +186,13 @@ describe('pricing-engine.priceStay', () => {
       windows: [ALL_DAY],
       prices: { 't|wAll': 5 },
     })
-    const r = priceStay(new Date('2026-06-18T10:00:00Z'), new Date('2026-06-18T10:07:00Z'), p, 0, null)
+    const r = priceStay(
+      new Date('2026-06-18T10:00:00Z'),
+      new Date('2026-06-18T10:07:00Z'),
+      p,
+      0,
+      null,
+    )
     expect(r.billableMinutes).toBe(15)
     expect(r.totalCents).toBe(75)
   })
@@ -174,7 +206,13 @@ describe('pricing-engine.priceStay', () => {
       prices: { 't|wAll': 200 },
       caps: [{ windowMinutes: 1440, capCents: 1500, scope: CapScope.STAY }],
     })
-    const r = priceStay(new Date('2026-06-18T08:00:00Z'), new Date('2026-06-18T20:00:00Z'), p, 0, null)
+    const r = priceStay(
+      new Date('2026-06-18T08:00:00Z'),
+      new Date('2026-06-18T20:00:00Z'),
+      p,
+      0,
+      null,
+    )
     expect(r.totalCents).toBe(1500)
     const adj = r.lineItems[r.lineItems.length - 1]!
     expect(adj.label).toBe('Cap adjustment')
@@ -196,7 +234,13 @@ describe('pricing-engine.priceStay', () => {
       prices: { 't|day': 300, 't|night': 100 },
     })
     // 20:00 -> 24:00 local (UTC 17:00 -> 21:00): 2h day (20-22) + 2h night (22-24).
-    const r = priceStay(new Date('2026-06-18T17:00:00Z'), new Date('2026-06-18T21:00:00Z'), p, 0, null)
+    const r = priceStay(
+      new Date('2026-06-18T17:00:00Z'),
+      new Date('2026-06-18T21:00:00Z'),
+      p,
+      0,
+      null,
+    )
     expect(r.totalCents).toBe(2 * 300 + 2 * 100)
     expect(r.lineItems).toHaveLength(2)
     expect(r.lineItems[0]).toMatchObject({ label: 'Day', quantity: 2, subtotalCents: 600 })
@@ -218,7 +262,13 @@ describe('pricing-engine.priceStay', () => {
     })
     // UTC 18:00 -> 21:00 = local 21:00 -> 00:00. Block1 starts 21:00 (day, straddles
     // 22:00 but priced day), block2 starts 22:30 (night).
-    const r = priceStay(new Date('2026-06-18T18:00:00Z'), new Date('2026-06-18T21:00:00Z'), p, 0, null)
+    const r = priceStay(
+      new Date('2026-06-18T18:00:00Z'),
+      new Date('2026-06-18T21:00:00Z'),
+      p,
+      0,
+      null,
+    )
     expect(r.totalCents).toBe(300 + 100)
     expect(r.lineItems[0]).toMatchObject({ label: 'Day', subtotalCents: 300 })
     expect(r.lineItems[1]).toMatchObject({ label: 'Night', subtotalCents: 100 })
@@ -566,6 +616,7 @@ describe('TariffService.computeTotalsByFacility', () => {
       {} as unknown as LifecycleService,
       driverEntitlementsWith(null) as unknown as DriverEntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      accessStub() as unknown as OperatorAccessService,
     )
   })
 
@@ -726,6 +777,7 @@ describe('TariffService.computeQuote', () => {
       {} as unknown as LifecycleService,
       driverEntitlementsWith(null) as unknown as DriverEntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      accessStub() as unknown as OperatorAccessService,
     )
 
     const badStartsAt = new Date('2026-06-18T10:00:00Z')
@@ -760,6 +812,7 @@ describe('TariffService.computeQuote', () => {
       {} as unknown as LifecycleService,
       driverEntitlementsWith(null) as unknown as DriverEntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      accessStub() as unknown as OperatorAccessService,
     )
 
     await expect(
@@ -836,6 +889,7 @@ describe('TariffService.computeQuote — rider discount', () => {
       {} as unknown as LifecycleService,
       driver as unknown as DriverEntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      accessStub() as unknown as OperatorAccessService,
     )
     return { service, driver }
   }
@@ -843,7 +897,12 @@ describe('TariffService.computeQuote — rider discount', () => {
   it('does not resolve any rider entitlement for an anonymous quote', async () => {
     const { service, driver } = serviceWith(0, 1_000)
 
-    const quote = await service.computeQuote({ facilityId: 'f1', startsAt, endsAt, vehicleType: CAR })
+    const quote = await service.computeQuote({
+      facilityId: 'f1',
+      startsAt,
+      endsAt,
+      vehicleType: CAR,
+    })
 
     expect(driver.resolveEffective).not.toHaveBeenCalled()
     expect(quote.totalCents).toBe(400)
@@ -935,6 +994,7 @@ describe('TariffService.priceWithPinnedPlan', () => {
       {} as unknown as LifecycleService,
       driverEntitlementsWith(null) as unknown as DriverEntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      accessStub() as unknown as OperatorAccessService,
     )
   })
 
@@ -1001,6 +1061,7 @@ describe('TariffService.priceWithPinnedPlan', () => {
       {} as unknown as LifecycleService,
       driverEntitlementsWith(null) as unknown as DriverEntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      accessStub() as unknown as OperatorAccessService,
     )
     prisma.tariffPlan.findFirst.mockResolvedValue(pinnedPlan(400, 3))
 
@@ -1036,6 +1097,7 @@ describe('TariffService.priceWithPinnedPlan', () => {
       {} as unknown as LifecycleService,
       driver as unknown as DriverEntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      accessStub() as unknown as OperatorAccessService,
     )
     prisma.tariffPlan.findFirst.mockResolvedValue(pinnedPlan(400, 3))
 

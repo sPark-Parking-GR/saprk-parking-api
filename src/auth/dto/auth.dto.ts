@@ -1,11 +1,12 @@
 import { z } from 'zod'
+import { PASSWORD_MAX, PASSWORD_MIN } from '@spark/types'
 
 // No `role` field, by design. Public sign-up is the consumer registration path and must
 // stay open, so anything it accepts is attacker-controlled — a role here was a
 // self-service privilege escalation. Elevated roles come only from the invite flow.
 export const signUpSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(8).max(128),
+  password: z.string().min(PASSWORD_MIN).max(PASSWORD_MAX),
   displayName: z.string().min(1).max(80).optional(),
 })
 
@@ -30,9 +31,29 @@ export const forgotPasswordSchema = z.object({
 
 export type ForgotPasswordDto = z.infer<typeof forgotPasswordSchema>
 
+/**
+ * The only way to change a display name after the account exists.
+ *
+ * Before this, `User.displayName` was written once at creation and never again — the sole
+ * later writes were the anonymisation on delete and purge. An operator admin onboarded
+ * before the accept form collected a personal name therefore carried their company name
+ * as their own, in every list that names a human, permanently.
+ *
+ * Empty means "no name", not "unchanged": clearing it back to the email is a legitimate
+ * thing to want, and there is no other field here to disambiguate against.
+ */
+export const updateProfileSchema = z.object({
+  displayName: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? null : value),
+    z.string().trim().min(1).max(120).nullable(),
+  ),
+})
+
+export type UpdateProfileDto = z.infer<typeof updateProfileSchema>
+
 export const resetPasswordSchema = z.object({
   token: z.string().min(1),
-  password: z.string().min(8).max(128),
+  password: z.string().min(PASSWORD_MIN).max(PASSWORD_MAX),
 })
 
 export type ResetPasswordDto = z.infer<typeof resetPasswordSchema>

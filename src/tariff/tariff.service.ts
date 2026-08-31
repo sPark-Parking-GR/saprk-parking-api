@@ -8,7 +8,7 @@ import type {
   TariffRate,
   VehicleType,
 } from '@prisma/client'
-import type { AuthUser } from '@spark/types'
+import type { AuthUser, OrgPermission } from '@spark/types'
 import {
   OperatorScopeService,
   targetOperatorId,
@@ -25,6 +25,7 @@ import {
   FacilityNotFoundError,
   TariffPlanNotFoundError,
 } from '../common/errors/domain.errors'
+import { OperatorAccessService } from '../operators/operator-access.service'
 import { PrismaService } from '../prisma/prisma.service'
 import { DriverEntitlementService } from '../subscriptions/driver-entitlement.service'
 import { EntitlementService } from '../subscriptions/entitlement.service'
@@ -119,6 +120,7 @@ export class TariffService {
     private readonly lifecycle: LifecycleService,
     private readonly driverEntitlements: DriverEntitlementService,
     private readonly quotaThresholds: QuotaThresholdService,
+    private readonly access: OperatorAccessService,
   ) {}
 
   async computeQuote(request: QuoteRequest): Promise<PriceQuote> {
@@ -392,6 +394,11 @@ export class TariffService {
 
     const operatorId = targetOperatorId(scope, draft.operatorId)
 
+    // The authoritative per-operator check, for the same reason as FacilitiesService.create:
+    // targetOperatorId accepts any id from the caller's membership union, and the guard only
+    // asks whether some membership grants the scope.
+    await this.access.assertScope(user, operatorId, 'org:tariff.write')
+
     const operator = await this.prisma.parkingOperator.findUnique({
       where: { id: operatorId },
       select: { id: true },
@@ -494,7 +501,7 @@ export class TariffService {
     draft: TariffDraftDto,
     newDefaultPlanId?: string,
   ): Promise<TariffPlanDetail> {
-    const scope = await this.assertPlanOwned(user, planId)
+    const scope = await this.assertPlanOwned(user, planId, 'org:tariff.write')
     this.validateDraft(draft)
 
     const draftVehicleTypes = draft.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v])
@@ -520,6 +527,16 @@ export class TariffService {
         },
       })
       if (!existing) throw new TariffPlanNotFoundError(planId)
+
+      // Reactivating a deactivated plan puts it back in the counted set — countTariffPlans
+      // keys on isActive — so it costs a slot exactly as a create does. Without this,
+      // deactivate → create → reactivate walks straight past maxTariffPlans. Only when the
+      // draft actually flips it back on: an edit to an already-active plan changes no count,
+      // and asserting there would refuse every edit made at the limit.
+      if (!existing.isActive && draft.isActive) {
+        await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${existing.operatorId} FOR UPDATE`
+        await this.entitlements.assertCanCreateTariffPlan(existing.operatorId, tx)
+      }
 
       // Only protect when this plan is currently the operator's active default AND the
       // draft removes that status — either by unsetting isDefault (plan stays active) or
@@ -622,7 +639,7 @@ export class TariffService {
    * runs before the archive, never after.
    */
   async deletePlan(user: AuthUser, planId: string, newDefaultPlanId?: string): Promise<void> {
-    const scope = await this.assertPlanOwned(user, planId)
+    const scope = await this.assertPlanOwned(user, planId, 'org:tariff.write')
 
     await this.prisma.$transaction(async (tx) => {
       const existing = await tx.tariffPlan.findFirst({
@@ -895,13 +912,27 @@ export class TariffService {
    * Returns the resolved scope so callers that go on to narrow something else (a default
    * candidate, the facilities using the plan) do not resolve it a second time.
    */
-  private async assertPlanOwned(user: AuthUser, planId: string): Promise<OperatorScope> {
+  /**
+   * Tenancy plus, for a write, the caller's scope IN the owning operator.
+   *
+   * The scope half is the service-layer half of the both-layers rule: the controller's
+   * decorator can only ask whether SOME membership grants tariff.write, and createPlan has
+   * always followed it with the authoritative per-operator check. updatePlan and deletePlan
+   * did not, so for a caller who administers one operator and merely staffs another, the
+   * decorator was the only thing standing between them and editing the second one's prices.
+   */
+  private async assertPlanOwned(
+    user: AuthUser,
+    planId: string,
+    write: OrgPermission | null = null,
+  ): Promise<OperatorScope> {
     const scope = await this.operatorScope.resolve(user)
     const plan = await this.prisma.tariffPlan.findFirst({
       where: { id: planId, ...this.operatorScope.tariffPlanScopeWhere(scope, user) },
-      select: { id: true },
+      select: { id: true, operatorId: true },
     })
     if (!plan) throw new TariffPlanNotFoundError(planId)
+    if (write) await this.access.assertScope(user, plan.operatorId, write)
     return scope
   }
 

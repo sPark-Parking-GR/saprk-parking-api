@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@prisma/client'
+import { invalidateFacilityClusterIndexNow } from '../../src/facilities/facility-cluster-invalidation'
 
 // PostGIS installs `spatial_ref_sys` into the public schema and it is reference data, not
 // application state. `_prisma_migrations` is the record that the chain was applied.
@@ -33,6 +34,12 @@ export async function truncateAll(prisma: PrismaClient): Promise<void> {
 
   const list = tables.map((name) => `"public"."${name}"`).join(', ')
   await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`)
+  // TRUNCATE is raw SQL, so the Prisma extension that normally bumps the map's cluster-index
+  // version never sees it. Without this the next suite reads an index still describing the
+  // facilities this call just destroyed — harmless while clusters were only counts, and not
+  // harmless now that the index also returns ids for sub-cluster groups: they resolve to
+  // nothing and the markers silently disappear.
+  invalidateFacilityClusterIndexNow()
   await restoreDefaultPlan(prisma)
 }
 

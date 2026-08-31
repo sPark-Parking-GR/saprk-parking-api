@@ -26,6 +26,12 @@ const REAL_PROVIDERS = {
   STRIPE_WEBHOOK_SECRET: 'whsec',
   STRIPE_SUBSCRIPTION_WEBHOOK_SECRET: 'whsec_sub',
   STRIPE_OPERATOR_WEBHOOK_SECRET: 'whsec_op',
+  // The console mailer is refused in production for the same reason as the mock engines, so
+  // a fixture that stands for "all real providers" has to name a real one here too.
+  EMAIL_PROVIDER: 'sendgrid',
+  SENDGRID_API_KEY: 'SG.test',
+  EMAIL_FROM_ADDRESS: 'support@spark.com',
+  EMAIL_FROM_NAME: 'sPark',
 }
 
 describe('validateEnv', () => {
@@ -48,7 +54,22 @@ describe('validateEnv', () => {
   it('throws one aggregated error naming every missing var', () => {
     expect(() => validateEnv({})).toThrow(/DATABASE_URL/)
     expect(() => validateEnv({})).toThrow(/WEB_APP_URL/)
-    expect(() => validateEnv({})).toThrow(/FIREBASE_PROJECT_ID/)
+    // Both in ONE message, which is the point — a misconfigured environment should surface
+    // every missing var at once rather than one per restart.
+    const error = (() => {
+      try {
+        validateEnv({})
+        return null
+      } catch (err) {
+        return err as Error
+      }
+    })()
+    expect(error?.message).toMatch(/DATABASE_URL[\s\S]*WEB_APP_URL/)
+
+    // FIREBASE_PROJECT_ID used to appear here because it was unconditionally required.
+    // Provider credentials are now conditional, and zod only reaches those refinements once
+    // the base fields parse — so this list is the base requirements, and nothing else.
+    expect(error?.message).not.toMatch(/FIREBASE_/)
   })
 
   it('requires AUTH_SECRET only when AUTH_PROVIDER=authjs', () => {
@@ -70,10 +91,40 @@ describe('validateEnv', () => {
     expect(result.AUTH_PROVIDER).toBe('clerk')
   })
 
-  it('requires FIREBASE_* even when AUTH_PROVIDER is not firebase', () => {
-    expect(() => validateEnv({ ...REQUIRED_BASE, FIREBASE_PROJECT_ID: undefined })).toThrow(
-      /FIREBASE_PROJECT_ID/,
-    )
+  /**
+   * The inverse of what this used to assert. FIREBASE_* was unconditional because the invite
+   * flow constructed a Firebase provider directly whatever AUTH_PROVIDER said — so an
+   * authjs deployment could not boot without Google credentials it would never use.
+   */
+  it('does not require FIREBASE_* under another provider', () => {
+    expect(() =>
+      validateEnv({
+        ...REQUIRED_BASE,
+        FIREBASE_PROJECT_ID: undefined,
+        FIREBASE_CLIENT_EMAIL: undefined,
+        FIREBASE_PRIVATE_KEY: undefined,
+        FIREBASE_API_KEY: undefined,
+      }),
+    ).not.toThrow()
+  })
+
+  it('requires FIREBASE_* when AUTH_PROVIDER=firebase', () => {
+    expect(() =>
+      validateEnv({
+        ...REQUIRED_BASE,
+        AUTH_PROVIDER: 'firebase',
+        FIREBASE_PROJECT_ID: undefined,
+      }),
+    ).toThrow(/FIREBASE_PROJECT_ID/)
+  })
+
+  /**
+   * Supplying them alongside another provider stays legal: a database holding accounts
+   * created while Firebase was in use needs the leg present to authenticate them, and the
+   * composite routes those per user. It is a migration state, not a misconfiguration.
+   */
+  it('accepts FIREBASE_* alongside authjs, for a database holding both kinds of account', () => {
+    expect(() => validateEnv({ ...REQUIRED_BASE })).not.toThrow()
   })
 
   it('requires STRIPE vars only when PAYMENT_PROVIDER=stripe', () => {
@@ -122,6 +173,7 @@ describe('validateEnv', () => {
         NODE_ENV: 'production',
         CORS_ORIGIN: 'https://app.spark.com',
         PAYMENT_PROVIDER: 'mock',
+        ALLOW_CONSOLE_EMAIL_IN_PRODUCTION: 'true',
       }),
     ).toThrow(/PAYMENT_PROVIDER=mock is refused/)
   })
@@ -133,6 +185,7 @@ describe('validateEnv', () => {
       CORS_ORIGIN: 'https://app.spark.com',
       PAYMENT_PROVIDER: 'mock',
       ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: 'true',
+      ALLOW_CONSOLE_EMAIL_IN_PRODUCTION: 'true',
       SUBSCRIPTION_BILLING_PROVIDER: 'stripe',
       STRIPE_SECRET_KEY: 'sk_live',
       STRIPE_SUBSCRIPTION_WEBHOOK_SECRET: 'whsec_sub',
@@ -270,6 +323,45 @@ describe('validateEnv', () => {
     ).not.toThrow()
   })
 
+  // Postmark was an accepted value whose provider threw on every send. It is gone, so the
+  // schema must now reject it rather than boot into a guaranteed email outage.
+  it('rejects EMAIL_PROVIDER=postmark, which no longer exists', () => {
+    expect(() =>
+      validateEnv({ ...REQUIRED_BASE, EMAIL_PROVIDER: 'postmark', POSTMARK_SERVER_TOKEN: 'tok' }),
+    ).toThrow(/EMAIL_PROVIDER/)
+  })
+
+  it('refuses EMAIL_PROVIDER=console in production without the explicit opt-out', () => {
+    expect(() =>
+      validateEnv({
+        ...REQUIRED_BASE,
+        ...REAL_PROVIDERS,
+        NODE_ENV: 'production',
+        CORS_ORIGIN: 'https://app.spark.com',
+        EMAIL_PROVIDER: 'console',
+      }),
+    ).toThrow(/EMAIL_PROVIDER=console is refused/)
+  })
+
+  it('allows the console mailer in production only with the explicit opt-out', () => {
+    const result = validateEnv({
+      ...REQUIRED_BASE,
+      ...REAL_PROVIDERS,
+      NODE_ENV: 'production',
+      CORS_ORIGIN: 'https://app.spark.com',
+      EMAIL_PROVIDER: 'console',
+      ALLOW_CONSOLE_EMAIL_IN_PRODUCTION: 'true',
+    })
+
+    expect(result.EMAIL_PROVIDER).toBe('console')
+  })
+
+  it('does not restrict the console mailer outside production', () => {
+    const result = validateEnv({ ...REQUIRED_BASE, NODE_ENV: 'development' })
+
+    expect(result.EMAIL_PROVIDER).toBe('console')
+  })
+
   it('refuses SUBSCRIPTION_BILLING_PROVIDER=mock in production without its own opt-out', () => {
     const productionMockBilling = {
       ...REQUIRED_BASE,
@@ -279,6 +371,7 @@ describe('validateEnv', () => {
       STRIPE_SECRET_KEY: 'sk_live',
       STRIPE_WEBHOOK_SECRET: 'whsec',
       SUBSCRIPTION_BILLING_PROVIDER: 'mock',
+      ALLOW_CONSOLE_EMAIL_IN_PRODUCTION: 'true',
     }
 
     expect(() => validateEnv(productionMockBilling)).toThrow(

@@ -3,7 +3,7 @@ import type { UserRole as ContractRole } from '@spark/types'
 import { UserRole } from '@prisma/client'
 import type { PrismaService } from '../prisma/prisma.service'
 
-const TO_PRISMA: Record<ContractRole, UserRole> = {
+export const TO_PRISMA: Record<ContractRole, UserRole> = {
   guest: UserRole.USER,
   user: UserRole.USER,
   operator_staff: UserRole.OPERATOR_STAFF,

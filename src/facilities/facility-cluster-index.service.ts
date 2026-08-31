@@ -10,9 +10,16 @@ import type { FacilityCluster, MapBounds } from './facilities.types'
 type FacilityPointProps = { facilityId: string }
 type ClusterAggProps = Record<string, unknown>
 
-type IndexFeature =
-  | Supercluster.ClusterFeature<ClusterAggProps>
-  | Supercluster.PointFeature<FacilityPointProps>
+/**
+ * `clusters` holds only groups that met CLUSTER_MIN_POINTS; everything below
+ * that comes back as a facility id in `singletonIds` instead, for the caller
+ * to hydrate into a real point marker rather than a same-as-a-cluster bubble
+ * of 1-4.
+ */
+export interface ClusterQueryResult {
+  clusters: FacilityCluster[]
+  singletonIds: string[]
+}
 
 interface CachedIndex {
   index: Supercluster<FacilityPointProps, ClusterAggProps>
@@ -28,7 +35,10 @@ interface FacilityPointRow {
 
 const CLUSTER_RADIUS_PX = 60
 const CLUSTER_MAX_ZOOM = 16
-const CLUSTER_MIN_POINTS = 2
+// Below this many facilities, a group renders as its own individual markers
+// instead of a cluster bubble — a bubble reading "3" is more friction than
+// three real pins a user can immediately tell apart and tap.
+const CLUSTER_MIN_POINTS = 5
 
 /**
  * Hard staleness ceiling, applied on top of — not instead of — the version check. The
@@ -68,24 +78,21 @@ export function zoomFromBounds(bounds: MapBounds): number {
   return Math.min(Math.max(Math.round(Math.log2(360 / width)), 0), CLUSTER_MAX_ZOOM)
 }
 
-function isCluster(feature: IndexFeature): feature is Supercluster.ClusterFeature<ClusterAggProps> {
+function isCluster(
+  feature:
+    | Supercluster.ClusterFeature<ClusterAggProps>
+    | Supercluster.PointFeature<FacilityPointProps>,
+): feature is Supercluster.ClusterFeature<ClusterAggProps> {
   return 'cluster' in feature.properties
 }
 
-function toCluster(feature: IndexFeature): FacilityCluster {
-  const lng = feature.geometry.coordinates[0]!
-  const lat = feature.geometry.coordinates[1]!
-
-  if (isCluster(feature)) {
-    return {
-      id: `c_${feature.properties.cluster_id}`,
-      lat,
-      lng,
-      count: feature.properties.point_count,
-    }
+function toCluster(feature: Supercluster.ClusterFeature<ClusterAggProps>): FacilityCluster {
+  return {
+    id: `c_${feature.properties.cluster_id}`,
+    lat: feature.geometry.coordinates[1]!,
+    lng: feature.geometry.coordinates[0]!,
+    count: feature.properties.point_count,
   }
-
-  return { id: feature.properties.facilityId, lat, lng, count: 1 }
 }
 
 /**
@@ -121,7 +128,7 @@ export class FacilityClusterIndexService {
     cacheKey: string,
     whereSql: Prisma.Sql,
     bounds: MapBounds,
-  ): Promise<FacilityCluster[]> {
+  ): Promise<ClusterQueryResult> {
     const index = await this.indexFor(cacheKey, whereSql)
     const bbox: [number, number, number, number] = [
       bounds.west,
@@ -130,7 +137,17 @@ export class FacilityClusterIndexService {
       bounds.north,
     ]
 
-    return index.getClusters(bbox, zoomFromBounds(bounds)).map(toCluster)
+    const features = index.getClusters(bbox, zoomFromBounds(bounds))
+    const clusters: FacilityCluster[] = []
+    const singletonIds: string[] = []
+    for (const feature of features) {
+      if (isCluster(feature)) {
+        clusters.push(toCluster(feature))
+      } else {
+        singletonIds.push(feature.properties.facilityId)
+      }
+    }
+    return { clusters, singletonIds }
   }
 
   /**

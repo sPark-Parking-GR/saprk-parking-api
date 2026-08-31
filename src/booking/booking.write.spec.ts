@@ -4,6 +4,7 @@ import { createHash } from 'crypto'
 import { BookingService } from './booking.service'
 import { ACCESS_CODE_LENGTH } from './credentials'
 import type { OperatorScopeService, OperatorScope } from '../common/authz/operator-scope.service'
+import type { OperatorAccessService } from '../operators/operator-access.service'
 import {
   AccessCodeGenerationError,
   BookingNotFoundError,
@@ -17,6 +18,7 @@ import type { NotificationsService } from '../notifications/notifications.servic
 import type { PaymentsService } from '../payments/payments.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { TariffService } from '../tariff/tariff.service'
+import { ForbiddenException } from '@nestjs/common'
 import { listBookingsSchema, listMyBookingsSchema } from './dto/booking.dto'
 
 const operatorUser: AuthUser = {
@@ -46,6 +48,7 @@ describe('BookingService ops board', () => {
   }
   let tx: { booking: { findUnique: jest.Mock; update: jest.Mock }; auditLog: { create: jest.Mock } }
   let scope: { resolve: jest.Mock; scopeWhere: jest.Mock }
+  let access: { assertScope: jest.Mock }
   let service: BookingService
 
   function setScope(s: OperatorScope) {
@@ -71,6 +74,7 @@ describe('BookingService ops board', () => {
       $transaction: jest.fn(async (cb: (t: typeof tx) => unknown) => cb(tx)),
     }
     scope = { resolve: jest.fn(), scopeWhere: jest.fn() }
+    access = { assertScope: jest.fn().mockResolvedValue(undefined) }
     service = new BookingService(
       prisma as unknown as PrismaService,
       {} as unknown as TariffService,
@@ -78,6 +82,7 @@ describe('BookingService ops board', () => {
       {} as unknown as PaymentsService,
       {} as unknown as NotificationsService,
       scope as unknown as OperatorScopeService,
+      access as unknown as OperatorAccessService,
     )
   })
 
@@ -278,6 +283,7 @@ describe('BookingService consumer ownership', () => {
   let payments: { capturePayment: jest.Mock; refund: jest.Mock }
   let notifications: { sendBookingConfirmation: jest.Mock; sendBookingCancellation: jest.Mock }
   let scope: { resolve: jest.Mock; scopeWhere: jest.Mock }
+  let access: { assertScope: jest.Mock }
   let service: BookingService
 
   // What assertBookingAccess reads: the owner plus the operator holding the facility.
@@ -318,6 +324,7 @@ describe('BookingService consumer ownership', () => {
       sendBookingCancellation: jest.fn(),
     }
     scope = { resolve: jest.fn(), scopeWhere: jest.fn() }
+    access = { assertScope: jest.fn().mockResolvedValue(undefined) }
     service = new BookingService(
       prisma as unknown as PrismaService,
       {} as unknown as TariffService,
@@ -325,6 +332,7 @@ describe('BookingService consumer ownership', () => {
       payments as unknown as PaymentsService,
       notifications as unknown as NotificationsService,
       scope as unknown as OperatorScopeService,
+      access as unknown as OperatorAccessService,
     )
   })
 
@@ -452,6 +460,55 @@ describe('BookingService consumer ownership', () => {
       expect(select.user).toEqual({ select: { email: true, displayName: true } })
       expect(select.payment).toBeDefined()
       expect(select.refund).toBeDefined()
+    })
+  })
+
+  /**
+   * Tenancy answers WHICH bookings a staff member can touch; it never answered WHETHER they
+   * may cancel one. Cancelling issues a real refund and confirming captures a payment, so
+   * both now demand org:booking.write in the operator that owns the booking — the scope the
+   * team screen has always offered and nothing enforced.
+   */
+  describe('staff write scope', () => {
+    const staff: AuthUser = {
+      id: 'u-staff',
+      email: 'staff@spark.gr',
+      role: 'operator_staff',
+      emailVerified: true,
+    }
+
+    beforeEach(() => {
+      scope.resolve.mockResolvedValue({ kind: 'operator', operatorIds: ['op1'] })
+    })
+
+    it('refuses a staff cancel when the scope is missing, and issues no refund', async () => {
+      prisma.booking.findUnique.mockResolvedValueOnce(accessRow(owner.id))
+      access.assertScope.mockRejectedValueOnce(new ForbiddenException('nope'))
+
+      await expect(service.cancelBooking('b1', staff)).rejects.toBeInstanceOf(ForbiddenException)
+      expect(access.assertScope).toHaveBeenCalledWith(staff, 'op1', 'org:booking.write')
+      expect(payments.refund).not.toHaveBeenCalled()
+      expect(prisma.$transaction).not.toHaveBeenCalled()
+    })
+
+    it('refuses a staff confirm when the scope is missing', async () => {
+      prisma.booking.findUnique.mockResolvedValueOnce(accessRow(owner.id))
+      access.assertScope.mockRejectedValueOnce(new ForbiddenException('nope'))
+
+      await expect(service.confirmBooking('b1', staff)).rejects.toBeInstanceOf(ForbiddenException)
+      expect(access.assertScope).toHaveBeenCalledWith(staff, 'op1', 'org:booking.write')
+      expect(payments.capturePayment).not.toHaveBeenCalled()
+    })
+
+    it('never asks for an org scope when the caller owns the booking', async () => {
+      prisma.booking.findUnique
+        .mockResolvedValueOnce(accessRow(owner.id))
+        .mockResolvedValueOnce(null)
+
+      await service.cancelBooking('b1', owner).catch(() => undefined)
+
+      // A customer holds no org scopes at all; consulting one would refuse every cancel.
+      expect(access.assertScope).not.toHaveBeenCalled()
     })
   })
 
@@ -703,6 +760,7 @@ describe('BookingService check-out repricing', () => {
   let tx: { booking: { findUnique: jest.Mock; update: jest.Mock }; auditLog: { create: jest.Mock } }
   let payments: { capturePayment: jest.Mock; refund: jest.Mock; createPaymentIntent: jest.Mock }
   let scope: { resolve: jest.Mock; scopeWhere: jest.Mock }
+  let access: { assertScope: jest.Mock }
 
   // Stands in for TariffService.priceWithPinnedPlan: prices at a flat hourly rate, but
   // only for the exact plan revision asked for. `livePlanVersion` is what the operator's
@@ -730,6 +788,7 @@ describe('BookingService check-out repricing', () => {
       payments as unknown as PaymentsService,
       {} as unknown as NotificationsService,
       scope as unknown as OperatorScopeService,
+      access as unknown as OperatorAccessService,
     )
     return { service, tariff }
   }
@@ -763,6 +822,7 @@ describe('BookingService check-out repricing', () => {
     }
     payments = { capturePayment: jest.fn(), refund: jest.fn(), createPaymentIntent: jest.fn() }
     scope = { resolve: jest.fn().mockResolvedValue({ kind: 'platform' }), scopeWhere: jest.fn() }
+    access = { assertScope: jest.fn().mockResolvedValue(undefined) }
     tx.booking.findUnique.mockResolvedValue({ status: BookingStatus.CHECKED_IN })
   })
 
@@ -942,6 +1002,7 @@ describe('BookingService createBooking idempotency', () => {
       payments as unknown as PaymentsService,
       {} as unknown as NotificationsService,
       {} as unknown as OperatorScopeService,
+      {} as unknown as OperatorAccessService,
     )
   })
 

@@ -104,6 +104,10 @@ const TRANSACTION_CONFLICT = 'P2034'
 
 // Shared with apps/web's invite-accept actions, which branch on it.
 const EMAIL_TAKEN_CODE = 'EMAIL_TAKEN'
+const ENTITLEMENT_LIMIT_CODE = 'ENTITLEMENT_LIMIT_EXCEEDED'
+const FEATURE_REQUIRED_CODE = 'SUBSCRIPTION_FEATURE_REQUIRED'
+// Fastify rejected the request envelope itself — unparseable or empty JSON body.
+const MALFORMED_REQUEST_CODE = 'MALFORMED_REQUEST'
 
 @Catch()
 export class DomainExceptionFilter implements ExceptionFilter {
@@ -122,7 +126,34 @@ export class DomainExceptionFilter implements ExceptionFilter {
     void reply.status(status).send(body)
   }
 
+  /**
+   * Fastify raises its own errors before any Nest layer sees the request — an empty body or
+   * malformed JSON under `Content-Type: application/json` being the common pair. They are
+   * plain Errors, not HttpExceptions, so they fell through to the generic 500 branch: a
+   * caller who sent a bad request was told the server had broken, and the 500 branch logged
+   * a stack for it. They already carry the right status; this honours it.
+   *
+   * Narrowed to 4xx on purpose. A Fastify error reporting 5xx really is ours, and must keep
+   * its stack in the log rather than being quietly reclassified as the client's fault.
+   */
+  private fastifyClientError(exception: unknown): { status: number; message: string } | null {
+    if (!(exception instanceof Error)) return null
+    const candidate = exception as Error & { code?: unknown; statusCode?: unknown }
+    if (typeof candidate.code !== 'string' || !candidate.code.startsWith('FST_ERR_')) return null
+    if (typeof candidate.statusCode !== 'number') return null
+    if (candidate.statusCode < 400 || candidate.statusCode >= 500) return null
+    return { status: candidate.statusCode, message: candidate.message }
+  }
+
   private resolve(exception: unknown): { status: number; body: Record<string, unknown> } {
+    const fastifyError = this.fastifyClientError(exception)
+    if (fastifyError) {
+      return {
+        status: fastifyError.status,
+        body: { message: fastifyError.message, code: MALFORMED_REQUEST_CODE },
+      }
+    }
+
     if (exception instanceof HttpException) {
       const response = exception.getResponse()
       return {
@@ -165,6 +196,35 @@ export class DomainExceptionFilter implements ExceptionFilter {
       return {
         status: HttpStatus.CONFLICT,
         body: { message: exception.message, code: EMAIL_TAKEN_CODE },
+      }
+    }
+
+    // Plan refusals carry the same kind of code as EMAIL_TAKEN above, and for the same
+    // reason: "you are out of facilities" and "your plan does not include this" are
+    // different remedies sharing a status with every other refusal on the endpoint. Both
+    // errors already hold the parts a client needs to render an upgrade prompt — resource,
+    // limit, current / feature — and dropping them forced the web app to recognise a plan
+    // limit by regex-matching the English sentence, which any copy edit would have broken.
+    if (exception instanceof EntitlementLimitExceededError) {
+      return {
+        status: HttpStatus.CONFLICT,
+        body: {
+          message: exception.message,
+          code: ENTITLEMENT_LIMIT_CODE,
+          resource: exception.resource,
+          limit: exception.limit,
+          current: exception.current,
+        },
+      }
+    }
+    if (exception instanceof SubscriptionFeatureRequiredError) {
+      return {
+        status: HttpStatus.FORBIDDEN,
+        body: {
+          message: exception.message,
+          code: FEATURE_REQUIRED_CODE,
+          feature: exception.feature,
+        },
       }
     }
 

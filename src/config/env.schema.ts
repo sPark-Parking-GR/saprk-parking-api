@@ -4,7 +4,11 @@ const AUTH_PROVIDERS = ['authjs', 'firebase', 'clerk', 'supabase'] as const
 const MAP_PROVIDERS = ['google', 'mapbox'] as const
 const PAYMENT_PROVIDERS = ['mock', 'stripe'] as const
 const SUBSCRIPTION_BILLING_PROVIDERS = ['mock', 'stripe'] as const
-const EMAIL_PROVIDERS = ['console', 'sendgrid', 'postmark'] as const
+// 'postmark' was removed rather than left selectable: its provider threw on every send,
+// the postmark package was never a dependency, and it required only a non-empty token to
+// pass validation — so it passed production checks more easily than 'console' does while
+// guaranteeing a total, partly silent email outage. Re-adding it is a small honest job.
+const EMAIL_PROVIDERS = ['console', 'sendgrid'] as const
 
 function requireWhen(
   ctx: RefinementCtx,
@@ -44,20 +48,20 @@ const envSchema = z
     SUPABASE_URL: z.string().optional(),
     SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
 
-    // Required regardless of AUTH_PROVIDER: the invite flow always provisions Firebase
-    // operator identities via a directly-constructed FirebaseAuthProvider (auth.module.ts).
-    FIREBASE_PROJECT_ID: z
-      .string()
-      .min(1, 'FIREBASE_PROJECT_ID is required (invite flow provisions Firebase identities)'),
-    FIREBASE_CLIENT_EMAIL: z
-      .string()
-      .min(1, 'FIREBASE_CLIENT_EMAIL is required (invite flow provisions Firebase identities)'),
-    FIREBASE_PRIVATE_KEY: z
-      .string()
-      .min(1, 'FIREBASE_PRIVATE_KEY is required (invite flow provisions Firebase identities)'),
-    FIREBASE_API_KEY: z
-      .string()
-      .min(1, 'FIREBASE_API_KEY is required (invite flow provisions Firebase identities)'),
+    // Required only when Firebase is the selected provider, like every other strategy's
+    // credentials. These were unconditional because the invite flow constructed a Firebase
+    // provider directly whatever AUTH_PROVIDER said — so an authjs deployment still could
+    // not boot without Google credentials it would never use. Provisioning now goes through
+    // the configured provider, and Firebase is one strategy among several again.
+    //
+    // Still OPTIONAL rather than absent under other providers: a database holding accounts
+    // created while Firebase was in use needs the leg present to authenticate them, and
+    // CompositeAuthProvider routes those per user on firebaseUid. Supplying them alongside
+    // AUTH_PROVIDER=authjs is therefore a legitimate migration state, not a mistake.
+    FIREBASE_PROJECT_ID: z.string().optional(),
+    FIREBASE_CLIENT_EMAIL: z.string().optional(),
+    FIREBASE_PRIVATE_KEY: z.string().optional(),
+    FIREBASE_API_KEY: z.string().optional(),
 
     MAP_PROVIDER: z.enum(MAP_PROVIDERS).default('google'),
     GOOGLE_MAPS_API_KEY: z.string().optional(),
@@ -80,6 +84,7 @@ const envSchema = z
     // STRIPE_SECRET_KEY is deliberately shared: it is the same Stripe account either way.
     SUBSCRIPTION_BILLING_PROVIDER: z.enum(SUBSCRIPTION_BILLING_PROVIDERS).default('mock'),
     ALLOW_MOCK_SUBSCRIPTION_BILLING_IN_PRODUCTION: z.enum(['true', 'false']).default('false'),
+    ALLOW_CONSOLE_EMAIL_IN_PRODUCTION: z.enum(['true', 'false']).default('false'),
     // One mock secret covers both webhook routes: the mock is driven locally, and there is no
     // second provider account whose deliveries would have to be told apart.
     MOCK_SUBSCRIPTION_WEBHOOK_SECRET: z.string().optional(),
@@ -105,7 +110,6 @@ const envSchema = z
     SENDGRID_API_KEY: z.string().optional(),
     EMAIL_FROM_ADDRESS: z.string().optional(),
     EMAIL_FROM_NAME: z.string().optional(),
-    POSTMARK_SERVER_TOKEN: z.string().optional(),
 
     // Days a tombstoned resource stays recoverable before the purge worker removes it
     // (anonymises it, for users). See src/lifecycle/lifecycle-purge.service.ts.
@@ -119,6 +123,12 @@ const envSchema = z
 
     requireWhen(ctx, env.AUTH_PROVIDER === 'authjs', 'when AUTH_PROVIDER=authjs', {
       AUTH_SECRET: env.AUTH_SECRET,
+    })
+    requireWhen(ctx, env.AUTH_PROVIDER === 'firebase', 'when AUTH_PROVIDER=firebase', {
+      FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID,
+      FIREBASE_CLIENT_EMAIL: env.FIREBASE_CLIENT_EMAIL,
+      FIREBASE_PRIVATE_KEY: env.FIREBASE_PRIVATE_KEY,
+      FIREBASE_API_KEY: env.FIREBASE_API_KEY,
     })
     requireWhen(ctx, env.AUTH_PROVIDER === 'clerk', 'when AUTH_PROVIDER=clerk', {
       CLERK_SECRET_KEY: env.CLERK_SECRET_KEY,
@@ -226,13 +236,29 @@ const envSchema = z
       })
     }
 
+    // The console provider does not send mail — it prints the message, invite accept URLs
+    // and their live tokens included, straight to stdout. In production that is both an
+    // outage nobody is told about (every invite reports delivered while no one receives
+    // one) and credential-bearing links in the log pipeline. Same explicit opt-out shape as
+    // the mock payment and billing guards above, so a deployment that genuinely wants it
+    // has to say so.
+    if (
+      env.NODE_ENV === 'production' &&
+      env.EMAIL_PROVIDER === 'console' &&
+      env.ALLOW_CONSOLE_EMAIL_IN_PRODUCTION !== 'true'
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'EMAIL_PROVIDER=console is refused when NODE_ENV=production: it prints invite links and their tokens to stdout instead of sending them. Configure a real provider, or set ALLOW_CONSOLE_EMAIL_IN_PRODUCTION=true to opt out explicitly.',
+        path: ['EMAIL_PROVIDER'],
+      })
+    }
+
     requireWhen(ctx, env.EMAIL_PROVIDER === 'sendgrid', 'when EMAIL_PROVIDER=sendgrid', {
       SENDGRID_API_KEY: env.SENDGRID_API_KEY,
       EMAIL_FROM_ADDRESS: env.EMAIL_FROM_ADDRESS,
       EMAIL_FROM_NAME: env.EMAIL_FROM_NAME,
-    })
-    requireWhen(ctx, env.EMAIL_PROVIDER === 'postmark', 'when EMAIL_PROVIDER=postmark', {
-      POSTMARK_SERVER_TOKEN: env.POSTMARK_SERVER_TOKEN,
     })
   })
 

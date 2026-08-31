@@ -224,19 +224,33 @@ describe('resource manager assignment (e2e)', () => {
 
     // isActive is system-wide availability, so it belongs to the platform alone — an
     // operator holds no bulk lever over it, not even for facilities it manages.
-    it('refuses an operator bulk enable/disable outright, assigned or not', async () => {
-      const [assigned] = await twoFacilities()
+    /**
+     * isActive is the operator's own to set now: public visibility needs isActive AND
+     * isPublished, so withholding it left them able to publish a facility that stayed
+     * invisible to every customer. The boundary is unchanged and asserted below — it is the
+     * management assignment, not the field, that decides which facilities they may touch.
+     */
+    it('lets an operator bulk enable a facility it manages, and only that one', async () => {
+      const [assigned, unassigned] = await twoFacilities()
       await seedFacilityManager(raw, { facilityId: assigned.id, userId: admin.id })
+      await raw.facility.updateMany({
+        where: { id: { in: [assigned.id, unassigned.id] } },
+        data: { isActive: false },
+      })
 
-      await authed('patch', '/facilities/bulk', adminToken)
-        .send({ ids: [assigned.id], action: 'enable' })
-        .expect(403)
-      await authed('patch', '/facilities/bulk', adminToken)
-        .send({ ids: [assigned.id], action: 'disable' })
-        .expect(403)
+      const response = await authed('patch', '/facilities/bulk', adminToken)
+        .send({ ids: [assigned.id, unassigned.id], action: 'enable' })
+        .expect(200)
+
+      expect(response.body).toEqual({ affected: 1 })
       expect((await raw.facility.findUniqueOrThrow({ where: { id: assigned.id } })).isActive).toBe(
         true,
       )
+      // The unmanaged one is silently excluded by the scope predicate, exactly as every
+      // other bulk action excludes it.
+      expect(
+        (await raw.facility.findUniqueOrThrow({ where: { id: unassigned.id } })).isActive,
+      ).toBe(false)
     })
 
     // The admin map renders its filters three times — a Prisma where for the points, raw

@@ -146,9 +146,18 @@ describe('subscription entitlements (e2e)', () => {
       await createFacility(token).expect(201)
       const refused = await createFacility(token).expect(409)
 
-      expect(refused.body.message).toContain('plan allows 1 facilities')
-      expect(refused.body.message).toContain('1 are already in use')
+      // Singular, because the limit is one. The message agrees with its own numbers now.
+      expect(refused.body.message).toContain('plan allows 1 facility')
+      expect(refused.body.message).toContain('1 is already in use')
       expect(refused.body.message).not.toContain('may own only one')
+      // And the refusal is machine-readable, so the web app no longer has to recognise a
+      // plan limit by pattern-matching this English sentence.
+      expect(refused.body).toMatchObject({
+        code: 'ENTITLEMENT_LIMIT_EXCEEDED',
+        resource: 'facilities',
+        limit: 1,
+        current: 1,
+      })
       expect(await raw.facility.count({ where: { operatorId: operator.id } })).toBe(1)
     })
 
@@ -364,7 +373,7 @@ describe('subscription entitlements (e2e)', () => {
 
       const refused = await post(`${API}/tariff-plans`, token, tariffDraft()).expect(409)
 
-      expect(refused.body.message).toContain('tariff plans')
+      expect(refused.body.message).toContain('1 tariff plan and 1 is already in use')
     })
 
     it('refuses a member invite past the staff seat limit', async () => {
@@ -384,7 +393,7 @@ describe('subscription entitlements (e2e)', () => {
         operatorId: operator.id,
       }).expect(409)
 
-      expect(refused.body.message).toContain('staff seats')
+      expect(refused.body.message).toContain('1 staff seat and 1 is already in use')
     })
   })
 

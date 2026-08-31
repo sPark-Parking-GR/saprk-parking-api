@@ -1,4 +1,9 @@
-import { DEFAULT_STAFF_SCOPES, ORG_PERMISSIONS } from '@spark/types'
+import {
+  DEFAULT_STAFF_SCOPES,
+  ORG_PERMISSIONS,
+  STAFF_FORBIDDEN_SCOPES,
+  isStaffGrantableScope,
+} from '@spark/types'
 import { setMemberScopesSchema } from './operator-members.dto'
 
 describe('setMemberScopesSchema', () => {
@@ -21,9 +26,32 @@ describe('setMemberScopesSchema', () => {
     ).toThrow()
   })
 
-  it('accepts every other org permission', () => {
-    const grantable = ORG_PERMISSIONS.filter((scope) => scope !== 'org:billing.view')
+  /**
+   * The other four exclusions exist for a different reason than billing: every route they
+   * gate is closed to OPERATOR_STAFF by its `@Roles` list, so granting one to a staff member
+   * produced a persisted, displayed checkbox that conferred nothing at all.
+   */
+  it.each(['org:tariff.read', 'org:tariff.write', 'org:facility.write', 'org:member.manage'])(
+    'rejects %s, which no staff-reachable route honours',
+    (scope) => {
+      expect(() => setMemberScopesSchema.parse({ scopes: [scope] })).toThrow()
+    },
+  )
+
+  it('accepts every scope a staff member can actually exercise', () => {
+    const grantable = ORG_PERMISSIONS.filter(isStaffGrantableScope)
     expect(setMemberScopesSchema.parse({ scopes: grantable }).scopes).toEqual(grantable)
+    // Guards the pair against drifting apart: the schema and the predicate must agree on
+    // exactly the same set.
+    expect(grantable).toEqual(
+      ORG_PERMISSIONS.filter((scope) => !STAFF_FORBIDDEN_SCOPES.includes(scope)),
+    )
+  })
+
+  it('leaves the default staff set entirely grantable', () => {
+    // A default that could not be re-submitted through this schema would make the scopes
+    // editor unable to save a member it had just loaded.
+    expect(DEFAULT_STAFF_SCOPES.every(isStaffGrantableScope)).toBe(true)
   })
 
   it('rejects a scope outside the closed set', () => {

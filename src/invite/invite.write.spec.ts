@@ -1,7 +1,7 @@
 import { createHash } from 'crypto'
 import { ForbiddenException } from '@nestjs/common'
 import type { ConfigService } from '@nestjs/config'
-import type { IAuthProvider } from '@spark/auth'
+import type { AuthContext } from '@spark/auth'
 import { DEFAULT_STAFF_SCOPES, type AuthResult, type AuthUser, type UserRole } from '@spark/types'
 import {
   InviteStatus,
@@ -13,6 +13,7 @@ import { OperatorScopeService } from '../common/authz/operator-scope.service'
 import { RequestContext } from '../common/context/request-context'
 import { OperatorSuspendedError, OperatorTargetRequiredError } from '../common/errors/domain.errors'
 import { OperatorAccessService } from '../operators/operator-access.service'
+import { EntitlementLimitExceededError } from '../common/errors/domain.errors'
 import { OperatorNotFoundError } from '../operators/operators.types'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { EntitlementService } from '../subscriptions/entitlement.service'
@@ -96,7 +97,12 @@ describe('InviteService', () => {
     $transaction: jest.Mock
   }
   let tx: {
-    parkingOperator: { create: jest.Mock; update: jest.Mock; deleteMany: jest.Mock }
+    parkingOperator: {
+      create: jest.Mock
+      update: jest.Mock
+      deleteMany: jest.Mock
+      findUnique: jest.Mock
+    }
     operatorInvite: {
       create: jest.Mock
       findMany: jest.Mock
@@ -132,6 +138,9 @@ describe('InviteService', () => {
         create: jest.fn(),
         update: jest.fn(),
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+        // Reviving a lapsed member invite re-reads the operator under the lock, the same way
+        // createMember does, so it cannot resurrect a seat inside a suspended tenant.
+        findUnique: jest.fn().mockResolvedValue({ status: OperatorStatus.VERIFIED }),
       },
       operatorInvite: {
         create: jest.fn(),
@@ -186,7 +195,7 @@ describe('InviteService', () => {
       entitlements as unknown as EntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
       new InviteTokenService(config as unknown as ConfigService),
-      firebase as unknown as IAuthProvider,
+      firebase as unknown as AuthContext,
     )
   })
 
@@ -746,6 +755,59 @@ describe('InviteService', () => {
       expect(summary).toMatchObject({ status: InviteStatus.PENDING, delivered: true })
     })
 
+    // Reviving a lapsed MEMBER invite is an issuance: countStaffSeats ignores expired
+    // invites, so rotating one back to PENDING creates a redeemable seat, and accept()
+    // deliberately performs no seat check of its own.
+    it('charges a seat when reviving a lapsed member invite', async () => {
+      withMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      prisma.operatorInvite.findUnique.mockResolvedValue(
+        pendingMemberInvite({ status: InviteStatus.EXPIRED, expiresAt: pastDate() }),
+      )
+
+      await service.resend(operatorUser, 'inv-m1')
+
+      expect(entitlements.assertCanAddStaffSeat).toHaveBeenCalledWith('op-a', tx)
+      // Under the same operator-row lock every other quota path takes.
+      expect(tx.$executeRaw).toHaveBeenCalled()
+    })
+
+    it('refuses the revival when the operator is out of seats', async () => {
+      withMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      prisma.operatorInvite.findUnique.mockResolvedValue(
+        pendingMemberInvite({ status: InviteStatus.EXPIRED, expiresAt: pastDate() }),
+      )
+      entitlements.assertCanAddStaffSeat.mockRejectedValueOnce(
+        new EntitlementLimitExceededError('staff seats', 2, 2),
+      )
+
+      await expect(service.resend(operatorUser, 'inv-m1')).rejects.toBeInstanceOf(
+        EntitlementLimitExceededError,
+      )
+      expect(tx.operatorInvite.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('does not double-charge a seat the live invite already holds', async () => {
+      withMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      prisma.operatorInvite.findUnique.mockResolvedValue(pendingMemberInvite())
+
+      await service.resend(operatorUser, 'inv-m1')
+
+      expect(entitlements.assertCanAddStaffSeat).not.toHaveBeenCalled()
+    })
+
+    it('will not revive a member invite into an operator that is no longer verified', async () => {
+      withMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      prisma.operatorInvite.findUnique.mockResolvedValue(
+        pendingMemberInvite({ status: InviteStatus.EXPIRED, expiresAt: pastDate() }),
+      )
+      tx.parkingOperator.findUnique.mockResolvedValueOnce({ status: OperatorStatus.SUSPENDED })
+
+      await expect(service.resend(operatorUser, 'inv-m1')).rejects.toBeInstanceOf(
+        OperatorNotFoundError,
+      )
+      expect(tx.operatorInvite.updateMany).not.toHaveBeenCalled()
+    })
+
     it('revives a lapsed invite rather than stranding the business behind it', async () => {
       withMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
       prisma.operatorInvite.findUnique.mockResolvedValue(
@@ -882,10 +944,13 @@ describe('InviteService', () => {
         role: OperatorMemberRole.STAFF,
         kind: OperatorInviteKind.MEMBER,
         expired: false,
+        alreadyAccepted: false,
       })
     })
 
-    it('reports expired for an already-accepted invite', async () => {
+    // Both flags travel: `expired` is what gates the form, `alreadyAccepted` is what lets
+    // the page say "sign in" instead of sending a returning operator back for a new invite.
+    it('reports an already-accepted invite as both unusable and already accepted', async () => {
       prisma.operatorInvite.findUnique.mockResolvedValue({
         businessName: 'Biz',
         email: 'a@b.com',
@@ -894,7 +959,25 @@ describe('InviteService', () => {
         status: InviteStatus.ACCEPTED,
         expiresAt: futureDate(),
       })
-      await expect(service.validate('tok')).resolves.toMatchObject({ expired: true })
+      await expect(service.validate('tok')).resolves.toMatchObject({
+        expired: true,
+        alreadyAccepted: true,
+      })
+    })
+
+    it('reports a lapsed invite as expired but not accepted', async () => {
+      prisma.operatorInvite.findUnique.mockResolvedValue({
+        businessName: 'Biz',
+        email: 'a@b.com',
+        role: OperatorMemberRole.ADMIN,
+        kind: OperatorInviteKind.ONBOARDING,
+        status: InviteStatus.PENDING,
+        expiresAt: pastDate(),
+      })
+      await expect(service.validate('tok')).resolves.toMatchObject({
+        expired: true,
+        alreadyAccepted: false,
+      })
     })
   })
 
@@ -920,17 +1003,34 @@ describe('InviteService', () => {
       role: OperatorMemberRole.STAFF,
     })
 
+    it('sets no display name when the invitee supplies none', async () => {
+      prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
+      firebase.signUp.mockResolvedValue(authResult('user-new'))
+
+      await service.accept('tok', 'password123', 'Biz Parking')
+
+      // Absent rather than falling back to the business name: the fallback is what put a
+      // company in the person column, permanently, for every operator onboarded so far.
+      expect(firebase.signUp.mock.calls[0]![0].displayName).toBeUndefined()
+      // The business name still lands where it belongs.
+      expect(tx.parkingOperator.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ name: 'Biz Parking' }) }),
+      )
+    })
+
     it('provisions the operator identity and completes the attachment transaction', async () => {
       prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
       const expected = authResult('user-new')
       firebase.signUp.mockResolvedValue(expected)
 
-      const result = await service.accept('tok', 'password123', 'Biz Parking')
+      const result = await service.accept('tok', 'password123', 'Biz Parking', 'Real Person')
 
+      // The person's own name, not the business's. It used to be the business name, which
+      // is why an operator admin appeared as their company everywhere people are listed.
       expect(firebase.signUp).toHaveBeenCalledWith({
         email: 'new@spark.gr',
         password: 'password123',
-        displayName: 'Biz Parking',
+        displayName: 'Real Person',
         role: 'operator_admin',
       })
       expect(tx.operatorMembership.create).toHaveBeenCalledWith({
@@ -1023,9 +1123,9 @@ describe('InviteService', () => {
       firebase.signUp.mockResolvedValue(authResult('user-new'))
       tx.operatorInvite.updateMany.mockResolvedValue({ count: 0 })
 
-      await expect(
-        service.accept('tok', 'password123', 'Biz Parking'),
-      ).rejects.toBeInstanceOf(InviteExpiredError)
+      await expect(service.accept('tok', 'password123', 'Biz Parking')).rejects.toBeInstanceOf(
+        InviteExpiredError,
+      )
       expect(firebase.deleteUser).toHaveBeenCalledWith('user-new')
       expect(tx.auditLog.create).not.toHaveBeenCalled()
     })
@@ -1140,9 +1240,9 @@ describe('InviteService', () => {
     it('is refused at issue, before a shell operator or an email exists', async () => {
       prisma.user.findFirst.mockResolvedValue({ id: 'existing' })
 
-      await expect(
-        service.create(platformUser, { email: 'Owner@Biz.com' }),
-      ).rejects.toBeInstanceOf(InviteEmailTakenError)
+      await expect(service.create(platformUser, { email: 'Owner@Biz.com' })).rejects.toBeInstanceOf(
+        InviteEmailTakenError,
+      )
 
       expect(tx.parkingOperator.create).not.toHaveBeenCalled()
       expect(tx.operatorInvite.create).not.toHaveBeenCalled()
@@ -1171,9 +1271,9 @@ describe('InviteService', () => {
       prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
       prisma.user.findFirst.mockResolvedValue({ id: 'existing' })
 
-      await expect(
-        service.accept('tok', 'password123', 'Biz Parking'),
-      ).rejects.toBeInstanceOf(InviteEmailTakenError)
+      await expect(service.accept('tok', 'password123', 'Biz Parking')).rejects.toBeInstanceOf(
+        InviteEmailTakenError,
+      )
       expect(firebase.signUp).not.toHaveBeenCalled()
     })
 
@@ -1298,5 +1398,4 @@ describe('InviteService', () => {
       expect(tx.parkingOperator.deleteMany).not.toHaveBeenCalled()
     })
   })
-
 })

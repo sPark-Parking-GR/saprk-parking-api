@@ -1,8 +1,8 @@
 import { ForbiddenException, Inject, Injectable, Logger } from '@nestjs/common'
 import { InviteStatus, type PlatformAdminInvite, type Prisma } from '@prisma/client'
-import type { IAuthProvider } from '@spark/auth'
+import type { AuthContext } from '@spark/auth'
 import { hasPlatformPermission, type AuthResult, type AuthUser } from '@spark/types'
-import { FIREBASE_AUTH_PROVIDER_TOKEN } from '../auth/auth.constants'
+import { AUTH_CONTEXT_TOKEN } from '../auth/auth.constants'
 import { RequestContext } from '../common/context/request-context'
 import { InviteTokenService } from '../invite/invite-token.service'
 import { NotificationsService } from '../notifications/notifications.service'
@@ -45,7 +45,11 @@ export class AdminInviteService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly tokens: InviteTokenService,
-    @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: IAuthProvider,
+    // The CONFIGURED provider, not a directly-constructed Firebase one. Provisioning used
+    // to bypass AUTH_PROVIDER entirely, so every invited account was Firebase-backed
+    // whatever the deployment had selected — which is both the strategy-pattern violation
+    // CLAUDE.md forbids and the reason no e2e suite could ever redeem an invite.
+    @Inject(AUTH_CONTEXT_TOKEN) private readonly auth: AuthContext,
   ) {}
 
   async create(actor: AuthUser, dto: CreateAdminInviteDto): Promise<AdminInviteIssued> {
@@ -195,7 +199,7 @@ export class AdminInviteService {
     await this.assertEmailFree(invite.email)
 
     // Creates the Firebase identity AND the local User row; session.user.id is the local id.
-    const authResult = await this.firebase.signUp({
+    const authResult = await this.auth.signUp({
       email: invite.email,
       password,
       displayName: invite.displayName ?? undefined,
@@ -228,7 +232,7 @@ export class AdminInviteService {
       // identity exists must be compensated by deleting it — otherwise a redeemable-looking
       // orphan platform admin is left behind, which is worse than a failed invite.
       try {
-        await this.firebase.deleteUser(newUserId)
+        await this.auth.deleteUser(newUserId)
       } catch (cleanupError) {
         this.logger.error(
           `Failed to roll back orphaned identity ${newUserId} after admin-invite-accept failure: ${

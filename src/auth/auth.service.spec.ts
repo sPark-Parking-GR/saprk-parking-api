@@ -23,7 +23,7 @@ function authResult(role: UserRole): AuthResult {
 
 describe('AuthService', () => {
   let auth: { signIn: jest.Mock; refreshToken: jest.Mock; signUp: jest.Mock }
-  let prisma: { operatorMembership: { findFirst: jest.Mock } }
+  let prisma: { operatorMembership: { findFirst: jest.Mock }; user: { update: jest.Mock } }
   let service: AuthService
 
   const suspended = () =>
@@ -37,10 +37,14 @@ describe('AuthService', () => {
 
   beforeEach(() => {
     auth = { signIn: jest.fn(), refreshToken: jest.fn(), signUp: jest.fn() }
-    prisma = { operatorMembership: { findFirst: jest.fn().mockResolvedValue(null) } }
+    prisma = {
+      operatorMembership: { findFirst: jest.fn().mockResolvedValue(null) },
+      user: { update: jest.fn() },
+    }
     service = new AuthService(
       auth as unknown as AuthContext,
       new OperatorStatusService(prisma as unknown as PrismaService),
+      prisma as unknown as PrismaService,
     )
   })
 
@@ -134,5 +138,40 @@ describe('AuthService', () => {
     auth.signIn.mockResolvedValue(expected)
 
     await expect(service.signIn({ email: 'a@b.gr', password: 'x' })).resolves.toBe(expected)
+  })
+  /**
+   * The only path that can change a name after signup. Before it existed, an operator admin
+   * onboarded with the business name in their person field carried it for good.
+   */
+  describe('updateProfile', () => {
+    const row = {
+      id: 'u1',
+      email: 'a@b.com',
+      role: 'OPERATOR_ADMIN',
+      emailVerified: true,
+      displayName: 'Real Person',
+      avatarUrl: null,
+    }
+
+    it('writes the name onto the calling account row', async () => {
+      prisma.user.update.mockResolvedValue(row)
+
+      const result = await service.updateProfile('u1', 'Real Person')
+
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'u1' }, data: { displayName: 'Real Person' } }),
+      )
+      expect(result).toMatchObject({ id: 'u1', displayName: 'Real Person', role: 'operator_admin' })
+    })
+
+    it('clears the name when given null, rather than treating it as no change', async () => {
+      prisma.user.update.mockResolvedValue({ ...row, displayName: null })
+
+      const result = await service.updateProfile('u1', null)
+
+      expect(prisma.user.update.mock.calls[0]![0].data).toEqual({ displayName: null })
+      // Absent rather than empty: every surface renders the email when there is no name.
+      expect(result.displayName).toBeUndefined()
+    })
   })
 })

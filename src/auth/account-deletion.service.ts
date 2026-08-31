@@ -1,7 +1,7 @@
 import { ForbiddenException, Inject, Injectable, Logger } from '@nestjs/common'
 import { BookingStatus, type Prisma } from '@prisma/client'
 import { InvalidTokenError } from '@spark/auth'
-import type { AuthContext, FirebaseAuthProvider } from '@spark/auth'
+import type { AuthContext, IAuthProvider } from '@spark/auth'
 import type { AuthUser } from '@spark/types'
 import { PrismaService } from '../prisma/prisma.service'
 import { AUTH_CONTEXT_TOKEN, FIREBASE_AUTH_PROVIDER_TOKEN } from './auth.constants'
@@ -18,7 +18,9 @@ export class AccountDeletionService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(AUTH_CONTEXT_TOKEN) private readonly auth: AuthContext,
-    @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: FirebaseAuthProvider,
+    // Typed as the port, not the Firebase class: under a provider with no remote
+    // identity these calls are honest no-ops rather than a construction error.
+    @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: IAuthProvider | null,
   ) {}
 
   /**
@@ -105,6 +107,13 @@ export class AccountDeletionService {
     // cleanup item, which is why the uid is logged — it is no longer stored anywhere.
     if (account.firebaseUid) {
       try {
+        // Null when the deployment configures no Firebase credentials. A row that still
+        // carries a uid then has a credential nobody here can release — worth an explicit
+        // message, because the alternative is a null dereference inside this catch and a
+        // log line that blames the wrong thing.
+        if (!this.firebase) {
+          throw new Error('no identity provider is configured to release it')
+        }
         await this.firebase.deleteIdentity(account.firebaseUid)
       } catch (error) {
         this.logger.error(

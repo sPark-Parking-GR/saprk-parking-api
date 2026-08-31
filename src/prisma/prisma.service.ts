@@ -1,5 +1,6 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common'
 import { PrismaClient } from '@prisma/client'
+import { auditIpExtension } from './audit-ip.extension'
 import { facilityClusterInvalidationExtension } from './facility-cluster-invalidation.extension'
 import { lifecycleExtension } from './lifecycle.extension'
 
@@ -23,9 +24,9 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   // only reacts to the write actually sent to the database.
   constructor() {
     super()
-    return this.$extends(lifecycleExtension).$extends(
-      facilityClusterInvalidationExtension,
-    ) as unknown as this
+    return this.$extends(lifecycleExtension)
+      .$extends(facilityClusterInvalidationExtension)
+      .$extends(auditIpExtension) as unknown as this
   }
 
   async onModuleInit() {

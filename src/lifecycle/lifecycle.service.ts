@@ -180,6 +180,16 @@ export class LifecycleService {
         'restored',
       )
 
+      // Restoring an ACTIVE plan returns it to the counted set — countTariffPlans keys on
+      // isActive AND an ACTIVE lifecycle — so it consumes quota exactly as a create does,
+      // and clears the same check under the same operator-row lock. Its facility twin has
+      // always done this; the plan path was the one that did not. An archived-inactive plan
+      // costs nothing and is left alone.
+      if (row.isActive) {
+        await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${row.operatorId} FOR UPDATE`
+        await this.entitlements.assertCanCreateTariffPlan(row.operatorId, tx)
+      }
+
       if (row.isDefault && row.isActive) {
         const conflict = await tx.tariffPlan.findFirst({
           where: {

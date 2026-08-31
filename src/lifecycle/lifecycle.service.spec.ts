@@ -36,12 +36,15 @@ function makeTx(): Tx {
   }
 }
 
-type Entitlements = { assertCanCreateFacility: jest.Mock }
+type Entitlements = { assertCanCreateFacility: jest.Mock; assertCanCreateTariffPlan: jest.Mock }
 
 function makeEntitlements(): Entitlements {
   // Quota is EntitlementService's job and has its own suite; here it always permits, so
   // these cases exercise lifecycle transitions rather than re-testing quotas.
-  return { assertCanCreateFacility: jest.fn().mockResolvedValue(undefined) }
+  return {
+    assertCanCreateFacility: jest.fn().mockResolvedValue(undefined),
+    assertCanCreateTariffPlan: jest.fn().mockResolvedValue(undefined),
+  }
 }
 
 function makeService(tx: Tx, entitlements: Entitlements): LifecycleService {
@@ -201,10 +204,12 @@ describe('LifecycleService — facility', () => {
 describe('LifecycleService — tariff plan', () => {
   let tx: Tx
   let service: LifecycleService
+  let entitlements: Entitlements
 
   beforeEach(() => {
     tx = makeTx()
-    service = makeService(tx, makeEntitlements())
+    entitlements = makeEntitlements()
+    service = makeService(tx, entitlements)
   })
 
   it('archives preserving isActive and isDefault', async () => {
@@ -252,6 +257,58 @@ describe('LifecycleService — tariff plan', () => {
     await service.restoreTariffPlan(ACTOR, 'p1')
 
     expect(tx.tariffPlan.findFirst).toHaveBeenCalledTimes(1)
+    expect(tx.tariffPlan.update).toHaveBeenCalled()
+  })
+
+  // Restoring an active plan returns it to the counted set, so it costs a slot exactly as
+  // a create does — the facility twin has always checked this and the plan path had not.
+  it('charges the plan quota when restoring an active plan, under the operator lock', async () => {
+    tx.tariffPlan.findFirst.mockResolvedValueOnce({
+      id: 'p1',
+      operatorId: 'op1',
+      lifecycleStatus: LifecycleStatus.TOMBSTONED,
+      isActive: true,
+      isDefault: false,
+    })
+
+    await service.restoreTariffPlan(ACTOR, 'p1')
+
+    expect(entitlements.assertCanCreateTariffPlan).toHaveBeenCalledWith('op1', tx)
+    const lockOrder = tx.$executeRaw.mock.invocationCallOrder[0]!
+    const checkOrder = entitlements.assertCanCreateTariffPlan.mock.invocationCallOrder[0]!
+    expect(lockOrder).toBeLessThan(checkOrder)
+  })
+
+  it('refuses the restore when the plan quota is already full', async () => {
+    tx.tariffPlan.findFirst.mockResolvedValueOnce({
+      id: 'p1',
+      operatorId: 'op1',
+      lifecycleStatus: LifecycleStatus.TOMBSTONED,
+      isActive: true,
+      isDefault: false,
+    })
+    entitlements.assertCanCreateTariffPlan.mockRejectedValueOnce(
+      new EntitlementLimitExceededError('tariff plans', 3, 3),
+    )
+
+    await expect(service.restoreTariffPlan(ACTOR, 'p1')).rejects.toBeInstanceOf(
+      EntitlementLimitExceededError,
+    )
+    expect(tx.tariffPlan.update).not.toHaveBeenCalled()
+  })
+
+  it('charges nothing to restore an inactive plan — it rejoins no count', async () => {
+    tx.tariffPlan.findFirst.mockResolvedValueOnce({
+      id: 'p1',
+      operatorId: 'op1',
+      lifecycleStatus: LifecycleStatus.ARCHIVED,
+      isActive: false,
+      isDefault: false,
+    })
+
+    await service.restoreTariffPlan(ACTOR, 'p1')
+
+    expect(entitlements.assertCanCreateTariffPlan).not.toHaveBeenCalled()
     expect(tx.tariffPlan.update).toHaveBeenCalled()
   })
 

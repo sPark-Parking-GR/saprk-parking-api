@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common'
 import { BookingModule } from '../booking/booking.module'
 import { OperatorScopeService } from '../common/authz/operator-scope.service'
+import { OperatorAccessService } from '../operators/operator-access.service'
 import { InventoryModule } from '../inventory/inventory.module'
 import { LifecycleModule } from '../lifecycle/lifecycle.module'
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module'
@@ -27,6 +28,7 @@ import { SavedFacilitiesService } from './saved-facilities.service'
     FacilityClusterIndexService,
     SavedFacilitiesService,
     OperatorScopeService,
+    OperatorAccessService,
   ],
   exports: [FacilitiesService, OperatorScopeService],
 })

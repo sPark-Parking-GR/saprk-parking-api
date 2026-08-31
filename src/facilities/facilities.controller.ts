@@ -54,6 +54,7 @@ export class FacilitiesController {
       startsAt: query.startsAt,
       endsAt: query.endsAt,
       vehicleType: query.vehicleType,
+      preferMode: query.preferMode,
     })
   }
 

@@ -31,6 +31,36 @@ describe('DomainExceptionFilter', () => {
     filter = new DomainExceptionFilter()
   })
 
+  // Fastify rejects an empty or malformed JSON body before any Nest layer runs. These are
+  // plain Errors carrying their own status, and used to fall through to the generic 500.
+  it('honours the status on a Fastify client error instead of reporting a server fault', () => {
+    const err = Object.assign(
+      new Error('Body cannot be empty when content-type is set to application/json'),
+      {
+        code: 'FST_ERR_CTP_EMPTY_JSON_BODY',
+        statusCode: 400,
+      },
+    )
+
+    const { host, reply } = makeHost()
+    filter.catch(err, host)
+
+    expect(reply.status).toHaveBeenCalledWith(HttpStatus.BAD_REQUEST)
+    expect(reply.send.mock.calls[0]![0]).toMatchObject({ code: 'MALFORMED_REQUEST' })
+  })
+
+  it('does not let a Fastify 5xx pass itself off as a client error', () => {
+    const err = Object.assign(new Error('boom'), {
+      code: 'FST_ERR_REP_ALREADY_SENT',
+      statusCode: 500,
+    })
+
+    const { host, reply } = makeHost()
+    filter.catch(err, host)
+
+    expect(reply.status).toHaveBeenCalledWith(HttpStatus.INTERNAL_SERVER_ERROR)
+  })
+
   it('maps FacilityNotBookableError to 409, grouped with other hold-time state conflicts', () => {
     const { host, reply } = makeHost()
 
@@ -129,9 +159,7 @@ describe('DomainExceptionFilter', () => {
     filter.catch(error, host)
 
     expect(reply.status).toHaveBeenCalledWith(HttpStatus.CONFLICT)
-    expect(reply.send).toHaveBeenCalledWith(
-      expect.objectContaining({ code: 'EMAIL_TAKEN' }),
-    )
+    expect(reply.send).toHaveBeenCalledWith(expect.objectContaining({ code: 'EMAIL_TAKEN' }))
   })
 
   it('leaves a genuinely-reused invite untagged, so it reads as the other conflict', () => {
@@ -142,5 +170,4 @@ describe('DomainExceptionFilter', () => {
     expect(reply.status).toHaveBeenCalledWith(HttpStatus.CONFLICT)
     expect(reply.send).toHaveBeenCalledWith(expect.not.objectContaining({ code: 'EMAIL_TAKEN' }))
   })
-
 })

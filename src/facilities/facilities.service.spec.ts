@@ -10,6 +10,14 @@ import type { TariffService } from '../tariff/tariff.service'
 import type { OperatorScopeService } from '../common/authz/operator-scope.service'
 
 import type { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
+import type { OperatorAccessService } from '../operators/operator-access.service'
+
+// Every create path now asks OperatorAccessService whether the caller holds the scope in
+// THAT operator, not merely somewhere. The permissive stub keeps unrelated cases focused;
+// the tests that care about the check pass their own.
+function accessStub() {
+  return { assertScope: jest.fn().mockResolvedValue(undefined) }
+}
 
 const quotaThresholdStub = (): { checkOperatorQuotaThresholds: jest.Mock } => ({
   checkOperatorQuotaThresholds: jest.fn().mockResolvedValue(undefined),
@@ -51,7 +59,7 @@ describe('FacilitiesService.search', () => {
     prisma = { facility: { findMany: jest.fn() }, $queryRaw: jest.fn().mockResolvedValue([]) }
     inventory = { countOverlappingByFacility: jest.fn().mockResolvedValue(new Map()) }
     tariff = { computeTotalsByFacility: jest.fn().mockResolvedValue(new Map()) }
-    clusterIndex = { getClusters: jest.fn().mockResolvedValue([]) }
+    clusterIndex = { getClusters: jest.fn().mockResolvedValue({ clusters: [], singletonIds: [] }) }
     service = new FacilitiesService(
       prisma as unknown as PrismaService,
       inventory as unknown as InventoryService,
@@ -62,6 +70,7 @@ describe('FacilitiesService.search', () => {
       {} as unknown as LifecycleService,
       clusterIndex as unknown as FacilityClusterIndexService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      accessStub() as unknown as OperatorAccessService,
     )
   })
 
@@ -201,9 +210,10 @@ describe('FacilitiesService.search', () => {
 
   it('returns index clusters (not points) when bounds match more than SEARCH_RENDER_BUDGET facilities', async () => {
     prisma.$queryRaw.mockResolvedValueOnce([{ count: 1000 }])
-    clusterIndex.getClusters.mockResolvedValueOnce([
-      { id: 'c_0', lat: 37.98, lng: 23.73, count: 600 },
-    ])
+    clusterIndex.getClusters.mockResolvedValueOnce({
+      clusters: [{ id: 'c_0', lat: 37.98, lng: 23.73, count: 600 }],
+      singletonIds: [],
+    })
     const bounds = { north: 38, south: 37, east: 24, west: 23 }
 
     const res = await service.search({
@@ -225,6 +235,51 @@ describe('FacilitiesService.search', () => {
     expect(cacheKey).toBe('all')
     expect(whereSql.text).toContain('isActive')
     expect(calledBounds).toEqual(bounds)
+  })
+
+  it('hydrates cluster-index singleton ids (fewer than CLUSTER_MIN_POINTS) into real points', async () => {
+    prisma.$queryRaw.mockResolvedValueOnce([{ count: 1000 }])
+    clusterIndex.getClusters.mockResolvedValueOnce({
+      clusters: [{ id: 'c_0', lat: 37.98, lng: 23.73, count: 600 }],
+      singletonIds: ['f9'],
+    })
+    prisma.facility.findMany.mockResolvedValue([makeFacility({ id: 'f9' })])
+    const bounds = { north: 38, south: 37, east: 24, west: 23 }
+
+    const res = await service.search({
+      lat: 37.98,
+      lng: 23.73,
+      radiusMeters: 5000,
+      bounds,
+      startsAt,
+      endsAt,
+    })
+
+    expect(res.mode).toBe('clusters')
+    expect(res.clusters).toEqual([{ id: 'c_0', lat: 37.98, lng: 23.73, count: 600 }])
+    expect(res.points).toHaveLength(1)
+    expect(res.points[0]!.id).toBe('f9')
+    expect(prisma.facility.findMany.mock.calls[0]![0].where).toEqual({ id: { in: ['f9'] } })
+  })
+
+  it('skips the hydration query entirely when the cluster index returns no singletons', async () => {
+    prisma.$queryRaw.mockResolvedValueOnce([{ count: 1000 }])
+    clusterIndex.getClusters.mockResolvedValueOnce({
+      clusters: [{ id: 'c_0', lat: 37.98, lng: 23.73, count: 600 }],
+      singletonIds: [],
+    })
+    const bounds = { north: 38, south: 37, east: 24, west: 23 }
+
+    await service.search({
+      lat: 37.98,
+      lng: 23.73,
+      radiusMeters: 5000,
+      bounds,
+      startsAt,
+      endsAt,
+    })
+
+    expect(prisma.facility.findMany).not.toHaveBeenCalled()
   })
 
   describe('vehicleType filtering', () => {
@@ -282,7 +337,7 @@ describe('FacilitiesService.search', () => {
     })
 
     it('stays in points mode when the vehicleType-filtered count fits SEARCH_RENDER_BUDGET', async () => {
-      prisma.$queryRaw.mockResolvedValueOnce([{ count: 60 }]).mockResolvedValueOnce([{ id: 'f1' }])
+      prisma.$queryRaw.mockResolvedValueOnce([{ count: 50 }]).mockResolvedValueOnce([{ id: 'f1' }])
       prisma.facility.findMany.mockResolvedValue([makeFacility()])
 
       const res = await service.search({
@@ -296,16 +351,17 @@ describe('FacilitiesService.search', () => {
       })
 
       expect(res.mode).toBe('points')
-      expect(res.total).toBe(60)
+      expect(res.total).toBe(50)
       expect(res.points).toHaveLength(1)
       expect(clusterIndex.getClusters).not.toHaveBeenCalled()
     })
 
-    it('flips to clusters on the filtered count and clusters the same filtered set', async () => {
-      prisma.$queryRaw.mockResolvedValueOnce([{ count: 61 }])
-      clusterIndex.getClusters.mockResolvedValueOnce([
-        { id: 'c_1', lat: 37.5, lng: 23.5, count: 61 },
-      ])
+    it('flips to clusters once the filtered count decisively clears the no-hint band and clusters the same filtered set', async () => {
+      prisma.$queryRaw.mockResolvedValueOnce([{ count: 70 }])
+      clusterIndex.getClusters.mockResolvedValueOnce({
+        clusters: [{ id: 'c_1', lat: 37.5, lng: 23.5, count: 70 }],
+        singletonIds: [],
+      })
 
       const res = await service.search({
         lat: 37.98,
@@ -318,13 +374,79 @@ describe('FacilitiesService.search', () => {
       })
 
       expect(res.mode).toBe('clusters')
-      expect(res.clusters).toEqual([{ id: 'c_1', lat: 37.5, lng: 23.5, count: 61 }])
+      expect(res.clusters).toEqual([{ id: 'c_1', lat: 37.5, lng: 23.5, count: 70 }])
 
       const [cacheKey, whereSql] = clusterIndex.getClusters.mock.calls[0]!
       expect(cacheKey).toBe('CAR')
       expect(whereSql.text).toContain('::"VehicleType" = ANY("vehicleTypes")')
       expect(whereSql.values).toContain('CAR')
       expect(prisma.facility.findMany).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('mode hysteresis (preferMode)', () => {
+    const bounds = { north: 38, south: 37, east: 24, west: 23 }
+
+    it('stays in points mode just above the bare budget when no preferMode hint is given', async () => {
+      // Above SEARCH_RENDER_BUDGET (50) but inside the hysteresis band — without
+      // a hint this must NOT flip to clusters, or an ordinary pan/zoom around
+      // this count would flush the whole map between representations.
+      prisma.$queryRaw.mockResolvedValueOnce([{ count: 60 }]).mockResolvedValueOnce([{ id: 'f1' }])
+      prisma.facility.findMany.mockResolvedValue([makeFacility()])
+
+      const res = await service.search({
+        lat: 37.98,
+        lng: 23.73,
+        radiusMeters: 5000,
+        bounds,
+        startsAt,
+        endsAt,
+      })
+
+      expect(res.mode).toBe('points')
+      expect(clusterIndex.getClusters).not.toHaveBeenCalled()
+    })
+
+    it('stays in clusters mode just below the bare budget when the client reports it is already showing clusters', async () => {
+      // Below SEARCH_RENDER_BUDGET (50) but inside the hysteresis band — a
+      // client already in clusters mode must stay there rather than flip back
+      // to points on the same kind of small count fluctuation.
+      prisma.$queryRaw.mockResolvedValueOnce([{ count: 40 }])
+      clusterIndex.getClusters.mockResolvedValueOnce({
+        clusters: [{ id: 'c_2', lat: 37.5, lng: 23.5, count: 40 }],
+        singletonIds: [],
+      })
+
+      const res = await service.search({
+        lat: 37.98,
+        lng: 23.73,
+        radiusMeters: 5000,
+        bounds,
+        startsAt,
+        endsAt,
+        preferMode: 'clusters',
+      })
+
+      expect(res.mode).toBe('clusters')
+      expect(res.clusters).toEqual([{ id: 'c_2', lat: 37.5, lng: 23.5, count: 40 }])
+    })
+
+    it('drops out of clusters mode once the count decisively clears the lower band', async () => {
+      prisma.$queryRaw.mockResolvedValueOnce([{ count: 30 }]).mockResolvedValueOnce([{ id: 'f1' }])
+      prisma.facility.findMany.mockResolvedValue([makeFacility()])
+
+      const res = await service.search({
+        lat: 37.98,
+        lng: 23.73,
+        radiusMeters: 5000,
+        bounds,
+        startsAt,
+        endsAt,
+        preferMode: 'clusters',
+      })
+
+      expect(res.mode).toBe('points')
+      expect(clusterIndex.getClusters).not.toHaveBeenCalled()
     })
   })
 })
@@ -375,6 +497,7 @@ describe('FacilitiesService.getDetail', () => {
       {} as unknown as LifecycleService,
       {} as unknown as FacilityClusterIndexService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      accessStub() as unknown as OperatorAccessService,
     )
   })
 

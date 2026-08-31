@@ -18,6 +18,15 @@ import type { EntitlementService } from '../subscriptions/entitlement.service'
 import { tariffDraftSchema, type TariffDraftDto } from './dto/tariff.dto'
 
 import type { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
+import { ForbiddenException } from '@nestjs/common'
+import type { OperatorAccessService } from '../operators/operator-access.service'
+
+// Every create path now asks OperatorAccessService whether the caller holds the scope in
+// THAT operator, not merely somewhere. The permissive stub keeps unrelated cases focused;
+// the tests that care about the check pass their own.
+function accessStub() {
+  return { assertScope: jest.fn().mockResolvedValue(undefined) }
+}
 
 const quotaThresholdStub = (): { checkOperatorQuotaThresholds: jest.Mock } => ({
   checkOperatorQuotaThresholds: jest.fn().mockResolvedValue(undefined),
@@ -152,6 +161,7 @@ describe('TariffService admin writes', () => {
   // security-critical, so a mock of them could drift from what production runs.
   let scope: OperatorScopeService
   let entitlements: { assertCanCreateTariffPlan: jest.Mock }
+  let access: { assertScope: jest.Mock }
   let lifecycle: { archiveTariffPlan: jest.Mock }
   let service: TariffService
   let tx: {
@@ -330,6 +340,7 @@ describe('TariffService admin writes', () => {
     }
     scope = new OperatorScopeService(prisma as unknown as PrismaService)
     entitlements = { assertCanCreateTariffPlan: jest.fn().mockResolvedValue(undefined) }
+    access = accessStub()
     lifecycle = { archiveTariffPlan: jest.fn().mockResolvedValue(undefined) }
     service = new TariffService(
       prisma as unknown as PrismaService,
@@ -338,6 +349,7 @@ describe('TariffService admin writes', () => {
       lifecycle as unknown as LifecycleService,
       freeTierDriver() as unknown as DriverEntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      access as unknown as OperatorAccessService,
     )
   })
 
@@ -400,6 +412,29 @@ describe('TariffService admin writes', () => {
       managed(['op1'], operatorUser.id),
     )
     expect(result.items).toEqual([expect.objectContaining({ id: 'plan1', operatorId: 'op1' })])
+  })
+
+  // Same reason as FacilitiesService.create: targetOperatorId accepts any id from the
+  // caller's membership union, and the guard only asks whether SOME membership grants the
+  // scope, so the per-operator answer has to come from here.
+  it('asserts the write scope in the operator the plan is created for', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
+    prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan())
+
+    await service.createPlan(operatorUser, dayNightDraft())
+
+    expect(access.assertScope).toHaveBeenCalledWith(operatorUser, 'op1', 'org:tariff.write')
+  })
+
+  it('creates no plan when that scope is refused', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
+    access.assertScope.mockRejectedValueOnce(new ForbiddenException('nope'))
+
+    await expect(service.createPlan(operatorUser, dayNightDraft())).rejects.toBeInstanceOf(
+      ForbiddenException,
+    )
+    expect(tx.tariffPlan.create).not.toHaveBeenCalled()
+    expect(entitlements.assertCanCreateTariffPlan).not.toHaveBeenCalled()
   })
 
   it('auto-assigns the creator as manager in the create transaction', async () => {
@@ -558,6 +593,46 @@ describe('TariffService admin writes', () => {
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ action: 'tariff_plan.updated' }) }),
     )
+  })
+
+  // countTariffPlans keys on isActive, so a deactivated plan costs nothing while it sits
+  // there. Without a check here, deactivate -> create -> reactivate walks past the cap.
+  it('charges the plan quota when an update reactivates a deactivated plan', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
+    prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan())
+    tx.tariffPlan.findFirst.mockResolvedValue({
+      id: 'plan1',
+      version: 3,
+      operatorId: 'op1',
+      isActive: false,
+      isDefault: false,
+      vehicleTypes: [],
+    })
+
+    await service.updatePlan(operatorUser, 'plan1', dayNightDraft())
+
+    expect(entitlements.assertCanCreateTariffPlan).toHaveBeenCalledWith('op1', tx)
+    const lockOrder = tx.$executeRaw.mock.invocationCallOrder[0]!
+    const checkOrder = entitlements.assertCanCreateTariffPlan.mock.invocationCallOrder[0]!
+    expect(lockOrder).toBeLessThan(checkOrder)
+  })
+
+  it('charges nothing to edit a plan that is already active', async () => {
+    setScope({ kind: 'operator', operatorIds: ['op1'] })
+    prisma.tariffPlan.findFirstOrThrow.mockResolvedValue(persistedPlan())
+    tx.tariffPlan.findFirst.mockResolvedValue({
+      id: 'plan1',
+      version: 3,
+      operatorId: 'op1',
+      isActive: true,
+      isDefault: false,
+      vehicleTypes: [],
+    })
+
+    await service.updatePlan(operatorUser, 'plan1', dayNightDraft())
+
+    // Asserting here would refuse every edit an operator makes while sitting at the limit.
+    expect(entitlements.assertCanCreateTariffPlan).not.toHaveBeenCalled()
   })
 
   it('update on a cross-operator plan returns 404', async () => {
@@ -1037,6 +1112,7 @@ describe('TariffService.simulate', () => {
       {} as unknown as LifecycleService,
       freeTierDriver() as unknown as DriverEntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
+      accessStub() as unknown as OperatorAccessService,
     )
   })
 

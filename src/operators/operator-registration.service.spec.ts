@@ -1,6 +1,6 @@
 import type { ConfigService } from '@nestjs/config'
 import { OperatorMemberRole, OperatorStatus } from '@prisma/client'
-import type { IAuthProvider } from '@spark/auth'
+import type { AuthContext } from '@spark/auth'
 import type { PrismaService } from '../prisma/prisma.service'
 import { OperatorRegistrationService } from './operator-registration.service'
 import { OperatorEmailTakenError, SelfSignupDisabledError } from './operators.types'
@@ -33,7 +33,7 @@ function makeHarness(enabled = true) {
   const service = new OperatorRegistrationService(
     prisma as unknown as PrismaService,
     config as unknown as ConfigService,
-    firebase as unknown as IAuthProvider,
+    firebase as unknown as AuthContext,
   )
   return { service, prisma, tx, firebase, config }
 }
@@ -98,12 +98,23 @@ describe('OperatorRegistrationService — registering', () => {
     })
   })
 
-  it('falls back to the business name when no display name is given', async () => {
+  // The fallback was removed: displayName is the PERSON, and defaulting it to the company
+  // put a business name in every list that names a human, with no way to correct it before
+  // the profile page existed. Absent is honest — the UI renders the email instead.
+  it('leaves the display name unset when none is given, rather than using the business name', async () => {
     const { service, firebase } = makeHarness()
 
     await service.register(BODY)
 
-    expect(firebase.signUp.mock.calls[0][0].displayName).toBe('New Parking Ltd')
+    expect(firebase.signUp.mock.calls[0][0].displayName).toBeUndefined()
+  })
+
+  it('uses the supplied personal name when one is given', async () => {
+    const { service, firebase } = makeHarness()
+
+    await service.register({ ...BODY, displayName: 'Real Person' })
+
+    expect(firebase.signUp.mock.calls[0][0].displayName).toBe('Real Person')
   })
 
   it('refuses an address that already has an account, before provisioning', async () => {

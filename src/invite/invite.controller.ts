@@ -80,6 +80,6 @@ export class InviteController {
     @Param('token') token: string,
     @Body(new ZodValidationPipe(acceptInviteSchema)) body: AcceptInviteDto,
   ) {
-    return this.invites.accept(token, body.password, body.businessName)
+    return this.invites.accept(token, body.password, body.businessName, body.displayName)
   }
 }

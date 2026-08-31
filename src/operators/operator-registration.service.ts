@@ -1,9 +1,9 @@
 import { Inject, Injectable, Logger } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import { OperatorMemberRole, OperatorStatus } from '@prisma/client'
-import type { IAuthProvider } from '@spark/auth'
+import type { AuthContext } from '@spark/auth'
 import type { AuthResult } from '@spark/types'
-import { FIREBASE_AUTH_PROVIDER_TOKEN } from '../auth/auth.constants'
+import { AUTH_CONTEXT_TOKEN } from '../auth/auth.constants'
 import { RequestContext } from '../common/context/request-context'
 import { PrismaService } from '../prisma/prisma.service'
 import type { RegisterOperatorDto } from './dto/operator-registration.dto'
@@ -28,7 +28,11 @@ export class OperatorRegistrationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-    @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: IAuthProvider,
+    // The CONFIGURED provider, not a directly-constructed Firebase one. Provisioning used
+    // to bypass AUTH_PROVIDER entirely, so every invited account was Firebase-backed
+    // whatever the deployment had selected — which is both the strategy-pattern violation
+    // CLAUDE.md forbids and the reason no e2e suite could ever redeem an invite.
+    @Inject(AUTH_CONTEXT_TOKEN) private readonly auth: AuthContext,
   ) {}
 
   isEnabled(): boolean {
@@ -44,10 +48,14 @@ export class OperatorRegistrationService {
     // Creates the Firebase identity AND the local User row, exactly as invite acceptance
     // does. operator_admin from the outset: they own the business they just registered —
     // what is withheld is the operator's VERIFIED status, not their role.
-    const authResult = await this.firebase.signUp({
+    const authResult = await this.auth.signUp({
       email,
       password: dto.password,
-      displayName: dto.displayName ?? dto.businessName,
+      // No fallback to the business name: displayName is the PERSON, and defaulting it to
+      // the company put a business in every list that names a human, permanently — there is
+      // no edit path today beyond the profile page. Absent is honest; the UI renders the
+      // email instead.
+      ...(dto.displayName ? { displayName: dto.displayName } : {}),
       role: 'operator_admin',
     })
     const newUserId = authResult.session.user.id
@@ -84,7 +92,7 @@ export class OperatorRegistrationService {
       // failed attachment has to be compensated — otherwise the address is taken by an
       // account that owns nothing and the person cannot retry.
       try {
-        await this.firebase.deleteUser(newUserId)
+        await this.auth.deleteUser(newUserId)
       } catch (cleanupError) {
         this.logger.error(
           `Failed to roll back orphaned identity ${newUserId} after operator registration failure: ${

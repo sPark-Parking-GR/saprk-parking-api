@@ -1,6 +1,6 @@
 import { FacilityKind, Prisma, VehicleType } from '@prisma/client'
 import type { NestFastifyApplication } from '@nestjs/platform-fastify'
-import { FacilitiesService } from '../../src/facilities/facilities.service'
+import { FacilitiesService, modeThreshold } from '../../src/facilities/facilities.service'
 import type { MapBounds } from '../../src/facilities/facilities.types'
 import type { PrismaService } from '../../src/prisma/prisma.service'
 import { truncateAll } from '../utils/db'
@@ -11,10 +11,17 @@ const CENTRE = { lat: 37.9838, lng: 23.7275 }
 const STARTS_AT = new Date('2026-09-01T10:00:00.000Z')
 const ENDS_AT = new Date('2026-09-01T12:00:00.000Z')
 
-// Public search switches to the supercluster index above SEARCH_RENDER_BUDGET (60) matches
-// in bounds (see FacilitiesService.search / SEARCH_RENDER_BUDGET). adminMap is unaffected
-// and still gates on the separate MAX_POINTS (250) grid, but this file never exercises it.
-const SEARCH_RENDER_BUDGET = 60
+/**
+ * Imported rather than copied. This was a hardcoded 60 that silently rotted when the
+ * service moved to a 50 budget with a hysteresis band around it — the fixture went on
+ * describing a switch point that no longer existed. Asking the service where the line is
+ * keeps the two from drifting again.
+ *
+ * `undefined` is the first-load case: no preferMode hint, so the client is treated as
+ * showing points and it takes a decisive rise to enter clusters. adminMap is unaffected and
+ * still gates on the separate MAX_POINTS (250) grid, which this file never exercises.
+ */
+const CLUSTER_SWITCH_AT = modeThreshold(undefined)
 
 const TIGHT_BOUNDS: MapBounds = {
   north: CENTRE.lat + 0.01,
@@ -184,19 +191,29 @@ describe('facility search PostGIS (e2e)', () => {
   })
 
   describe('cluster mode (supercluster index)', () => {
-    const CLUSTERED = SEARCH_RENDER_BUDGET + 11
+    const CLUSTERED = CLUSTER_SWITCH_AT + 11
+
+    /**
+     * A 4x4 grid rather than 12x12, and the reason is the clustering rule itself: a group
+     * has to reach CLUSTER_MIN_POINTS before the index calls it a cluster at all. Spread
+     * one facility per cell — which 12x12 did once the fixture stopped filling it — every
+     * point stands alone, nothing ever merges, and the suite would assert clustering
+     * against a layout that cannot produce any.
+     *
+     * Sixteen cells over CLUSTERED facilities leaves every cell several deep, so real
+     * clusters form. The index still re-merges on its own terms, so nothing below depends
+     * on the exact spacing or on a particular cluster count.
+     */
+    const GRID = 4
 
     beforeEach(async () => {
-      const cellLat = (TIGHT_BOUNDS.north - TIGHT_BOUNDS.south) / 12
-      const cellLng = (TIGHT_BOUNDS.east - TIGHT_BOUNDS.west) / 12
+      const cellLat = (TIGHT_BOUNDS.north - TIGHT_BOUNDS.south) / GRID
+      const cellLng = (TIGHT_BOUNDS.east - TIGHT_BOUNDS.west) / GRID
 
       await prisma.facility.createMany({
         data: Array.from({ length: CLUSTERED }, (_, index) => {
-          // Walk a 12x12 grid so the fixture spans many cells instead of one repeated
-          // point; the supercluster index this feeds re-merges them on its own terms, not
-          // by this layout, so no assertion below depends on the exact spacing.
-          const column = index % 12
-          const row = Math.floor(index / 12) % 12
+          const column = index % GRID
+          const row = Math.floor(index / GRID) % GRID
           return {
             operatorId: UNCLAIMED_OPERATOR_ID,
             name: `Clustered ${index}`,
@@ -216,15 +233,41 @@ describe('facility search PostGIS (e2e)', () => {
       })
     })
 
-    it('switches to clusters above the render budget and preserves the total', async () => {
+    /**
+     * Cluster mode returns BOTH halves, and the invariant is that together they account for
+     * everything in view. A group below CLUSTER_MIN_POINTS is not rendered as a bubble
+     * reading "3" — it comes back as real facility markers, hydrated exactly as the points
+     * path hydrates them. Asserting `points` is empty here was the old contract, when every
+     * lone facility was reported as a cluster of one.
+     */
+    it('switches to clusters above the render budget and accounts for every facility', async () => {
       const result = await facilities.search(searchParams({ bounds: TIGHT_BOUNDS }))
 
       expect(result.mode).toBe('clusters')
-      expect(result.points).toEqual([])
       expect(result.total).toBe(CLUSTERED)
 
       const clustered = result.clusters.reduce((sum, cluster) => sum + cluster.count, 0)
-      expect(clustered).toBe(CLUSTERED)
+      expect(clustered + result.points.length).toBe(CLUSTERED)
+      // Both halves are genuinely exercised: the fixture is dense enough to merge and still
+      // leaves stragglers, which is the case the split exists for.
+      expect(result.clusters.length).toBeGreaterThan(0)
+      expect(result.points.length).toBeGreaterThan(0)
+    })
+
+    it('hydrates the sub-cluster stragglers into real markers, not bubbles of one', async () => {
+      const { points } = await facilities.search(searchParams({ bounds: TIGHT_BOUNDS }))
+
+      // A marker the map can actually render and a user can tap: the same shape the points
+      // path returns, not an id or a count.
+      for (const point of points) {
+        expect(point).toMatchObject({
+          id: expect.any(String),
+          name: expect.any(String),
+          lat: expect.any(Number),
+          lng: expect.any(Number),
+        })
+      }
+      expect(new Set(points.map((p) => p.id)).size).toBe(points.length)
     })
 
     it('merges nearby facilities into fewer clusters, each centred inside the requested rectangle', async () => {
@@ -252,12 +295,16 @@ describe('facility search PostGIS (e2e)', () => {
         seedFacility(prisma, { operatorId: UNCLAIMED_OPERATOR_ID, ...CENTRE, isActive: false }),
       ])
 
-      const { clusters, total } = await facilities.search(searchParams({ bounds: TIGHT_BOUNDS }))
+      const { clusters, points, total } = await facilities.search(
+        searchParams({ bounds: TIGHT_BOUNDS }),
+      )
       const clustered = clusters.reduce((sum, cluster) => sum + cluster.count, 0)
 
       expect(hidden).toHaveLength(2)
       expect(total).toBe(CLUSTERED)
-      expect(clustered).toBe(CLUSTERED)
+      // Neither half may include the restricted or the inactive facility, and between them
+      // they must still add up to everything that IS listable.
+      expect(clustered + points.length).toBe(CLUSTERED)
     })
   })
 })

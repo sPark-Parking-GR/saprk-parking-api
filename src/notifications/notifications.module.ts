@@ -21,11 +21,6 @@ function resolveEmailConfig(config: ConfigService): EmailProviderConfig {
           fromName: config.getOrThrow('EMAIL_FROM_NAME'),
         },
       }
-    case 'postmark':
-      return {
-        provider: 'postmark',
-        config: { serverToken: config.getOrThrow('POSTMARK_SERVER_TOKEN') },
-      }
     default:
       throw new Error(`Unknown EMAIL_PROVIDER: ${provider}`)
   }

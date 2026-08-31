@@ -35,26 +35,31 @@ describe('FacilityClusterIndexService', () => {
     jest.useRealTimers()
   })
 
-  it('builds from the DB on first call and returns both a cluster and an unclustered leaf', async () => {
+  it('groups a tight cluster of 5+ but returns fewer-than-5 groupings as plain singleton ids', async () => {
     prisma.$queryRaw.mockResolvedValueOnce([
       row('f1', 0, 0),
       row('f2', 0.0001, 0.0001),
-      row('lone', 0, 50),
+      row('f3', 0.0002, 0),
+      row('f4', 0, 0.0002),
+      row('f5', 0.0001, 0),
+      // Below CLUSTER_MIN_POINTS on their own, and far enough from the tight
+      // group and each other (well past the cluster radius at this zoom) to
+      // stay ungrouped rather than merge into it.
+      row('lone1', 0, 25),
+      row('lone2', 0, 50),
     ])
     const bounds: MapBounds = { north: 5, south: -5, east: 60, west: -5 }
 
-    const clusters = await service.getClusters('all', WHERE, bounds)
+    const { clusters, singletonIds } = await service.getClusters('all', WHERE, bounds)
 
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(1)
-    expect(clusters).toHaveLength(2)
+    expect(clusters).toHaveLength(1)
+    expect(clusters[0]!.count).toBe(5)
+    expect(clusters[0]!.id).toMatch(/^c_\d+$/)
+    expect(clusters[0]!.lat).toBeCloseTo(0, 3)
+    expect(clusters[0]!.lng).toBeCloseTo(0, 3)
 
-    const merged = clusters.find((c) => c.count === 2)!
-    expect(merged.id).toMatch(/^c_\d+$/)
-    expect(merged.lat).toBeCloseTo(0, 3)
-    expect(merged.lng).toBeCloseTo(0, 3)
-
-    const leaf = clusters.find((c) => c.count === 1)!
-    expect(leaf).toEqual({ id: 'lone', lat: 0, lng: 50, count: 1 })
+    expect(singletonIds.slice().sort()).toEqual(['lone1', 'lone2'])
   })
 
   it('serves a second call for the same cacheKey from cache, without re-querying', async () => {

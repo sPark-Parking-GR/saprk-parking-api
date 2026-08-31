@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common'
 import { BookingStatus, LifecycleStatus, Prisma } from '@prisma/client'
-import type { FirebaseAuthProvider } from '@spark/auth'
+import type { IAuthProvider } from '@spark/auth'
 import { FIREBASE_AUTH_PROVIDER_TOKEN } from '../auth/auth.constants'
 import { RequestContext } from '../common/context/request-context'
 import {
@@ -92,7 +92,8 @@ export class LifecyclePurgeService {
 
   constructor(
     private readonly prisma: PrismaService,
-    @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: FirebaseAuthProvider,
+    // The port rather than the Firebase class — see AccountDeletionService.
+    @Inject(FIREBASE_AUTH_PROVIDER_TOKEN) private readonly firebase: IAuthProvider | null,
   ) {}
 
   async purgeDue(now: Date = new Date()): Promise<PurgeSummary> {
@@ -381,6 +382,9 @@ export class LifecyclePurgeService {
   private async releaseRemoteIdentity(userId: string, firebaseUid: string | null): Promise<void> {
     if (!firebaseUid) return
     try {
+      if (!this.firebase) {
+        throw new Error('no identity provider is configured to release it')
+      }
       await this.firebase.deleteIdentity(firebaseUid)
     } catch (error) {
       this.logger.error(

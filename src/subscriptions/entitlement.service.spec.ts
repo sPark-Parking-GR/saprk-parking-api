@@ -208,12 +208,22 @@ describe('EntitlementService', () => {
   })
 
   describe('refusals', () => {
-    it('names the limit and the number in use', async () => {
+    it('names the limit and the number in use, in the right number', async () => {
       onPlan(starter)
       prisma.facility.count.mockResolvedValue(1)
 
+      // Starter allows exactly one of most things, so the singular is the common case.
       await expect(service.assertCanCreateFacility('op1')).rejects.toThrow(
-        /allows 1 facilities and 1 are already in use/,
+        /allows 1 facility and 1 is already in use/,
+      )
+    })
+
+    it('uses plural forms when the numbers call for them', async () => {
+      onPlan({ ...starter, maxFacilities: 5 })
+      prisma.facility.count.mockResolvedValue(5)
+
+      await expect(service.assertCanCreateFacility('op1')).rejects.toThrow(
+        /allows 5 facilities and 5 are already in use/,
       )
     })
 

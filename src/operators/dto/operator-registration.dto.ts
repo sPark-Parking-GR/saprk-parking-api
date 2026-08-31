@@ -1,11 +1,12 @@
 import { z } from 'zod'
+import { PASSWORD_MAX, PASSWORD_MIN } from '@spark/types'
 
 export const registerOperatorSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(320),
-  // Bounds match signInSchema rather than something stricter: this is the credential the
-  // account will authenticate with, and a rule enforced here but not at sign-in would lock
-  // someone out of an account they just created.
-  password: z.string().min(8).max(200),
+  // The shared policy. Previously 200 on the reasoning that it matched signInSchema, which
+  // is min(1) with no maximum — so it matched nothing, and put the ceiling above what reset
+  // would later accept.
+  password: z.string().min(PASSWORD_MIN).max(PASSWORD_MAX),
   businessName: z.string().trim().min(2).max(200),
   displayName: z.preprocess(
     (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),

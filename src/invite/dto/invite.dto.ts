@@ -1,5 +1,6 @@
 import { OperatorMemberRole } from '@prisma/client'
 import { z } from 'zod'
+import { PASSWORD_MAX, PASSWORD_MIN } from '@spark/types'
 
 export const createInviteSchema = z.object({
   email: z.string().email(),
@@ -19,11 +20,18 @@ export const createMemberInviteSchema = z.object({
 export type CreateMemberInviteDto = z.infer<typeof createMemberInviteSchema>
 
 export const acceptInviteSchema = z.object({
-  password: z.string().min(8).max(128),
+  password: z.string().min(PASSWORD_MIN).max(PASSWORD_MAX),
   // Only the ONBOARDING flow needs this — a MEMBER invite attaches to an operator that
   // already has a name. Enforced as required for that kind in the service layer, where
   // the invite's kind is actually known.
   businessName: z.string().trim().min(1).max(200).optional(),
+  // The PERSON's name, as distinct from the business's. Onboarding accept used to write
+  // the business name into User.displayName, so an operator admin appeared as their own
+  // company everywhere a person is listed — the topbar, the managers panel, the audit
+  // actor column — and member invites wrote nothing at all, leaving staff as bare email
+  // addresses. Optional here and collected by the accept form; when it is absent the
+  // account simply has no display name, which every surface already renders as the email.
+  displayName: z.string().trim().min(1).max(120).optional(),
 })
 
 export type AcceptInviteDto = z.infer<typeof acceptInviteSchema>

@@ -1,4 +1,12 @@
-import { Body, Controller, Headers, HttpCode, Post, UnauthorizedException } from '@nestjs/common'
+import {
+  Body,
+  Controller,
+  Headers,
+  HttpCode,
+  Patch,
+  Post,
+  UnauthorizedException,
+} from '@nestjs/common'
 import { Throttle } from '@nestjs/throttler'
 import type { AuthUser } from '@spark/types'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
@@ -15,11 +23,13 @@ import {
   resetPasswordSchema,
   signInSchema,
   signUpSchema,
+  updateProfileSchema,
   type DeleteAccountDto,
   type ForgotPasswordDto,
   type RefreshDto,
   type ResetPasswordDto,
   type SignInDto,
+  type UpdateProfileDto,
   type SignUpDto,
 } from './dto/auth.dto'
 
@@ -30,6 +40,20 @@ export class AuthController {
     private readonly passwordReset: PasswordResetService,
     private readonly accountDeletion: AccountDeletionService,
   ) {}
+
+  /**
+   * Authenticated, and scoped to the caller's OWN row — the id comes from the verified
+   * token, never from the body, so this cannot be pointed at another account.
+   */
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @HttpCode(200)
+  @Patch('me')
+  updateProfile(
+    @Body(new ZodValidationPipe(updateProfileSchema)) body: UpdateProfileDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.auth.updateProfile(user.id, body.displayName)
+  }
 
   @Public()
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
