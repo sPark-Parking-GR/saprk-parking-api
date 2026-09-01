@@ -22,7 +22,6 @@ import { TO_PRISMA } from '../auth/authjs-user.store'
 import { RequestContext } from '../common/context/request-context'
 import { OperatorSuspendedError } from '../common/errors/domain.errors'
 import { NotificationsService } from '../notifications/notifications.service'
-import { anyLifecycleStatus } from '../prisma/lifecycle.extension'
 import { OperatorAccessService } from '../operators/operator-access.service'
 import { OperatorNotFoundError } from '../operators/operators.types'
 import { PrismaService } from '../prisma/prisma.service'
@@ -412,7 +411,7 @@ export class InviteService {
     password: string,
     businessName?: string,
     displayName?: string,
-  ): Promise<AuthResult> {
+  ): Promise<AuthResult | { linked: true }> {
     const invite = await this.prisma.operatorInvite.findUnique({
       where: { tokenHash: this.hashToken(token) },
     })
@@ -455,32 +454,74 @@ export class InviteService {
       if (operator?.status !== OperatorStatus.VERIFIED) throw new InviteExpiredError()
     }
 
-    // Re-checked at redemption, not only at issuance: the address may have signed up during
-    // the seven days the link was live. Without it the collision surfaces from the identity
-    // provider as EmailInUseError, which the accept page can only report as a generic
-    // conflict — indistinguishable from a link that really was already used.
-    await this.assertEmailFree(invite.email)
+    // Re-checked at redemption, not only at issuance: the address may have changed state
+    // during the seven days the link was live. `free` proceeds to signUp as before;
+    // `linkable` attaches to the existing mobile-only account instead of colliding with it;
+    // `taken` is genuinely gone.
+    const resolution = await this.accountLinking.resolve(invite.email)
+    if (resolution.kind === 'taken') throw new InviteEmailTakenError(invite.email)
+    const isLinking = resolution.kind === 'linkable'
 
     // The privileges come off the invite, decided and authorized when it was issued. The
     // person redeeming the link never gets a say in them.
     const grantedRole = userRoleFor(invite.role)
 
-    // Creates the Firebase identity AND the local User row; session.user.id is the
-    // local Postgres id.
-    const authResult = await this.auth.signUp({
-      email: invite.email,
-      password,
-      // The person's own name. This used to be the BUSINESS name on the onboarding flow,
-      // which made an operator admin show up as their company in every list that names a
-      // human — and left member invites with no name at all. The business name belongs to
-      // the operator record, which is where it is now written and nowhere else.
-      ...(displayName ? { displayName } : {}),
-      role: grantedRole,
-    })
-    const newUserId = authResult.session.user.id
+    let newUserId: string
+    let authResult: AuthResult | undefined
+    if (isLinking) {
+      // Proves the redeemer actually owns this account before any privilege is granted on
+      // its behalf. A wrong password collapses into the SAME error as a genuinely-taken
+      // address, deliberately: letting a failed guess read differently from "taken" would
+      // turn accept() into an oracle telling an attacker holding the invite token which
+      // emails are low-privilege driver accounts ripe for escalation, distinct from ones
+      // already spoken for. A correct guess is the only thing anyone is allowed to learn
+      // anything from.
+      try {
+        await this.accountLinking.verifyOwnership(invite.email, password)
+      } catch {
+        throw new InviteEmailTakenError(invite.email)
+      }
+      newUserId = resolution.userId
+    } else {
+      // Creates the Firebase identity AND the local User row; session.user.id is the
+      // local Postgres id.
+      authResult = await this.auth.signUp({
+        email: invite.email,
+        password,
+        // The person's own name. This used to be the BUSINESS name on the onboarding flow,
+        // which made an operator admin show up as their company in every list that names a
+        // human — and left member invites with no name at all. The business name belongs to
+        // the operator record, which is where it is now written and nowhere else.
+        ...(displayName ? { displayName } : {}),
+        role: grantedRole,
+      })
+      newUserId = authResult.session.user.id
+    }
 
     try {
       await this.prisma.$transaction(async (tx) => {
+        if (isLinking) {
+          // Locked first, before any membership or operator write: nothing else serializes
+          // two concurrent redemptions (e.g. two distinct invites) landing on the same
+          // linkable address the way the `User.email` unique index serializes two `signUp`s.
+          await tx.$executeRaw`SELECT id FROM "User" WHERE id = ${newUserId} FOR UPDATE`
+          const locked = await tx.user.findUnique({
+            where: { id: newUserId },
+            select: {
+              role: true,
+              lifecycleStatus: true,
+              operatorMemberships: { select: { id: true }, take: 1 },
+            },
+          })
+          if (
+            locked?.role !== 'USER' ||
+            locked.lifecycleStatus !== 'ACTIVE' ||
+            locked.operatorMemberships.length !== 0
+          ) {
+            throw new InviteEmailTakenError(invite.email)
+          }
+        }
+
         await tx.operatorMembership.create({
           data: {
             operatorId,
@@ -503,7 +544,19 @@ export class InviteService {
             },
           })
         }
-        await tx.user.update({ where: { id: newUserId }, data: { emailVerified: true } })
+        await tx.user.update({
+          where: { id: newUserId },
+          data: {
+            emailVerified: true,
+            // A role grant is a privilege change like any other in this codebase (see
+            // identity.service.ts, operator-members.service.ts) and must bump the
+            // revocation watermark: without it, a still-live mobile session token for this
+            // account becomes a valid operator_admin/staff token the instant this commits.
+            ...(isLinking
+              ? { role: TO_PRISMA[grantedRole], sessionsValidFrom: new Date() }
+              : {}),
+          },
+        })
 
         // Conditional on the very token that was redeemed: a revoke or a resend that
         // landed while the identity was being provisioned must beat this accept, and the
@@ -527,38 +580,35 @@ export class InviteService {
         )
       })
     } catch (error) {
-      // Firebase and Postgres cannot share one atomic transaction, so a failure after
-      // the identity is created must be compensated by deleting that identity — otherwise
-      // an orphaned Firebase+local user with no operator attachment is left behind.
-      try {
-        await this.auth.deleteUser(newUserId)
-      } catch (cleanupError) {
-        this.logger.error(
-          `Failed to roll back orphaned identity ${newUserId} after invite-accept failure: ${
-            cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-          }`,
-        )
+      // Firebase and Postgres cannot share one atomic transaction, so a failure after a
+      // FRESH identity is created must be compensated by deleting that identity — otherwise
+      // an orphaned Firebase+local user with no operator attachment is left behind. A
+      // linked account predates this request and is not this request's to destroy, even on
+      // failure — the compensating delete only ever applies to the `!isLinking` branch.
+      if (!isLinking) {
+        try {
+          await this.auth.deleteUser(newUserId)
+        } catch (cleanupError) {
+          this.logger.error(
+            `Failed to roll back orphaned identity ${newUserId} after invite-accept failure: ${
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+            }`,
+          )
+        }
       }
       throw error
     }
 
-    return authResult
+    // Not re-minted here on purpose: the transaction above just bumped
+    // sessionsValidFrom, and a token issued in that same instant risks landing in the
+    // same whole second as the watermark — dead on arrival under the fail-closed
+    // tie-break in packages/auth/src/revocation.ts. The caller already knows this
+    // password; they sign in themselves, afterward.
+    if (isLinking) return { linked: true }
+
+    return authResult!
   }
 
-  /**
-   * Names lifecycleStatus so the Prisma lifecycle extension does not narrow this to ACTIVE:
-   * an archived or tombstoned account still owns its address. A PURGED one does not — purge
-   * anonymises the email away and releases the identity-provider credential with it — so a
-   * purged person can be invited again, which is the whole point of anonymising rather than
-   * reserving the address forever.
-   */
-  private async assertEmailFree(email: string): Promise<void> {
-    const existing = await this.prisma.user.findFirst({
-      where: { email, lifecycleStatus: anyLifecycleStatus() },
-      select: { id: true },
-    })
-    if (existing) throw new InviteEmailTakenError(email)
-  }
 
   /**
    * Retires every live invite the new one replaces, so one address never holds more than a

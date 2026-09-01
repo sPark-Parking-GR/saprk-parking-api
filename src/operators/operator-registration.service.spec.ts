@@ -1,6 +1,7 @@
 import type { ConfigService } from '@nestjs/config'
 import { OperatorMemberRole, OperatorStatus } from '@prisma/client'
 import type { AuthContext } from '@spark/auth'
+import { AccountLinkingService } from '../auth/account-linking.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import { OperatorRegistrationService } from './operator-registration.service'
 import { OperatorEmailTakenError, SelfSignupDisabledError } from './operators.types'
@@ -17,6 +18,13 @@ function makeHarness(enabled = true) {
     parkingOperator: { create: jest.fn().mockResolvedValue({ id: 'op-new' }) },
     operatorMembership: { create: jest.fn().mockResolvedValue({}) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
+    user: {
+      findUnique: jest
+        .fn()
+        .mockResolvedValue({ role: 'USER', lifecycleStatus: 'ACTIVE', operatorMemberships: [] }),
+      update: jest.fn().mockResolvedValue({}),
+    },
+    $executeRaw: jest.fn().mockResolvedValue(undefined),
   }
   const prisma = {
     $transaction: jest.fn(async (fn: (c: typeof tx) => unknown) => fn(tx)),
@@ -27,15 +35,30 @@ function makeHarness(enabled = true) {
   }
   const firebase = {
     signUp: jest.fn().mockResolvedValue({ session: { user: { id: 'user-new' } } }),
+    signIn: jest.fn().mockResolvedValue({ session: { user: { id: 'user-existing' } } }),
     deleteUser: jest.fn().mockResolvedValue(undefined),
   }
+  const accountLinking = new AccountLinkingService(
+    prisma as unknown as PrismaService,
+    firebase as unknown as AuthContext,
+  )
 
   const service = new OperatorRegistrationService(
     prisma as unknown as PrismaService,
     config as unknown as ConfigService,
     firebase as unknown as AuthContext,
+    accountLinking,
   )
   return { service, prisma, tx, firebase, config }
+}
+
+function mockLinkable(prisma: ReturnType<typeof makeHarness>['prisma']) {
+  prisma.user.findFirst.mockResolvedValue({
+    id: 'user-existing',
+    role: 'USER',
+    lifecycleStatus: 'ACTIVE',
+    operatorMemberships: [],
+  })
 }
 
 describe('OperatorRegistrationService — the flag', () => {
@@ -117,9 +140,14 @@ describe('OperatorRegistrationService — registering', () => {
     expect(firebase.signUp.mock.calls[0][0].displayName).toBe('Real Person')
   })
 
-  it('refuses an address that already has an account, before provisioning', async () => {
+  it('refuses an address that already holds a privileged role, before provisioning', async () => {
     const { service, prisma, firebase } = makeHarness()
-    prisma.user.findFirst.mockResolvedValue({ id: 'existing' })
+    prisma.user.findFirst.mockResolvedValue({
+      id: 'existing',
+      role: 'OPERATOR_ADMIN',
+      lifecycleStatus: 'ACTIVE',
+      operatorMemberships: [],
+    })
 
     await expect(service.register(BODY)).rejects.toBeInstanceOf(OperatorEmailTakenError)
     expect(firebase.signUp).not.toHaveBeenCalled()
@@ -153,5 +181,87 @@ describe('OperatorRegistrationService — registering', () => {
     firebase.deleteUser.mockRejectedValue(new Error('firebase down'))
 
     await expect(service.register(BODY)).rejects.toThrow('db down')
+  })
+})
+
+describe('OperatorRegistrationService — linking an existing mobile account', () => {
+  it('attaches the existing account instead of creating a new identity', async () => {
+    const { service, prisma, firebase, tx } = makeHarness()
+    mockLinkable(prisma)
+
+    const result = await service.register(BODY)
+
+    expect(result).toEqual({ linked: true })
+    expect(firebase.signUp).not.toHaveBeenCalled()
+    expect(firebase.signIn).toHaveBeenCalledWith({ email: BODY.email, password: BODY.password })
+    expect(tx.operatorMembership.create.mock.calls[0][0].data).toMatchObject({
+      userId: 'user-existing',
+      role: OperatorMemberRole.ADMIN,
+    })
+  })
+
+  it('bumps the role and the revocation watermark on the existing account', async () => {
+    const { service, prisma, tx } = makeHarness()
+    mockLinkable(prisma)
+
+    await service.register(BODY)
+
+    const data = tx.user.update.mock.calls[0][0].data
+    expect(data.role).toBe('OPERATOR_ADMIN')
+    expect(data.sessionsValidFrom).toBeInstanceOf(Date)
+  })
+
+  // The identity predates this request; an attach that fails must not destroy an account
+  // that had nothing to do with the failure.
+  it('does not delete the existing account if the attachment transaction fails', async () => {
+    const { service, prisma, tx, firebase } = makeHarness()
+    mockLinkable(prisma)
+    tx.parkingOperator.create.mockRejectedValue(new Error('db down'))
+
+    await expect(service.register(BODY)).rejects.toThrow('db down')
+    expect(firebase.deleteUser).not.toHaveBeenCalled()
+  })
+
+  // Collapsed into the SAME error a genuinely-taken address gets: this is a public,
+  // unauthenticated endpoint, and a distinguishable wrong-password response would tell a
+  // credential-stuffing attacker which emails are low-privilege driver accounts ripe for
+  // escalation, distinct from ones already spoken for.
+  it('collapses a wrong password into the same error as an already-taken address, writing nothing', async () => {
+    const { service, prisma, firebase, tx } = makeHarness()
+    mockLinkable(prisma)
+    firebase.signIn.mockRejectedValue(new Error('invalid credentials'))
+
+    await expect(service.register(BODY)).rejects.toBeInstanceOf(OperatorEmailTakenError)
+    expect(tx.operatorMembership.create).not.toHaveBeenCalled()
+  })
+
+  // Closes the TOCTOU window between resolve() and the transaction's own write: a second
+  // concurrent request that already promoted this same row must not be allowed to attach
+  // a second time.
+  it('re-checks the row under lock and refuses if it changed since resolve()', async () => {
+    const { service, prisma, tx } = makeHarness()
+    mockLinkable(prisma)
+    tx.user.findUnique.mockResolvedValue({
+      role: 'OPERATOR_ADMIN',
+      lifecycleStatus: 'ACTIVE',
+      operatorMemberships: [],
+    })
+
+    await expect(service.register(BODY)).rejects.toBeInstanceOf(OperatorEmailTakenError)
+  })
+
+  // Defense-in-depth alongside the role check: today nothing creates an OperatorMembership
+  // without also flipping role off USER in the same transaction, but the locked recheck
+  // verifies the membership absence directly rather than relying on that as an invariant.
+  it('re-checks under lock and refuses if a membership appeared even with role still USER', async () => {
+    const { service, prisma, tx } = makeHarness()
+    mockLinkable(prisma)
+    tx.user.findUnique.mockResolvedValue({
+      role: 'USER',
+      lifecycleStatus: 'ACTIVE',
+      operatorMemberships: [{ id: 'mem-1' }],
+    })
+
+    await expect(service.register(BODY)).rejects.toBeInstanceOf(OperatorEmailTakenError)
   })
 })

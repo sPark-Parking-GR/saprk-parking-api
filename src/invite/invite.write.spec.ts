@@ -9,6 +9,7 @@ import {
   OperatorMemberRole,
   OperatorStatus,
 } from '@prisma/client'
+import { AccountLinkingService } from '../auth/account-linking.service'
 import { OperatorScopeService } from '../common/authz/operator-scope.service'
 import { RequestContext } from '../common/context/request-context'
 import { OperatorSuspendedError, OperatorTargetRequiredError } from '../common/errors/domain.errors'
@@ -110,14 +111,14 @@ describe('InviteService', () => {
       updateMany: jest.Mock
     }
     operatorMembership: { create: jest.Mock }
-    user: { update: jest.Mock }
+    user: { update: jest.Mock; findUnique: jest.Mock }
     auditLog: { create: jest.Mock }
     $executeRaw: jest.Mock
   }
   let entitlements: { assertCanAddStaffSeat: jest.Mock }
   let notifications: { sendOperatorInvite: jest.Mock; sendOperatorMemberInvite: jest.Mock }
   let config: { getOrThrow: jest.Mock }
-  let firebase: { signUp: jest.Mock; deleteUser: jest.Mock }
+  let firebase: { signUp: jest.Mock; signIn: jest.Mock; deleteUser: jest.Mock }
   let service: InviteService
 
   /** Wires the caller's memberships into the real scope/access services under test. */
@@ -150,7 +151,12 @@ describe('InviteService', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       operatorMembership: { create: jest.fn() },
-      user: { update: jest.fn() },
+      user: {
+        update: jest.fn(),
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ role: 'USER', lifecycleStatus: 'ACTIVE', operatorMemberships: [] }),
+      },
       auditLog: { create: jest.fn() },
       $executeRaw: jest.fn().mockResolvedValue(0),
     }
@@ -184,9 +190,14 @@ describe('InviteService', () => {
       sendOperatorMemberInvite: jest.fn().mockResolvedValue(true),
     }
     config = { getOrThrow: jest.fn().mockReturnValue('http://localhost:3000') }
-    firebase = { signUp: jest.fn(), deleteUser: jest.fn().mockResolvedValue(undefined) }
+    firebase = {
+      signUp: jest.fn(),
+      signIn: jest.fn().mockResolvedValue(authResult('user-existing')),
+      deleteUser: jest.fn().mockResolvedValue(undefined),
+    }
 
     const prismaService = prisma as unknown as PrismaService
+    const authContext = firebase as unknown as AuthContext
     service = new InviteService(
       prismaService,
       notifications as unknown as NotificationsService,
@@ -195,7 +206,8 @@ describe('InviteService', () => {
       entitlements as unknown as EntitlementService,
       quotaThresholdStub() as unknown as QuotaThresholdService,
       new InviteTokenService(config as unknown as ConfigService),
-      firebase as unknown as AuthContext,
+      authContext,
+      new AccountLinkingService(prismaService, authContext),
     )
   })
 
@@ -945,6 +957,28 @@ describe('InviteService', () => {
         kind: OperatorInviteKind.MEMBER,
         expired: false,
         alreadyAccepted: false,
+        requiresExistingPassword: false,
+      })
+    })
+
+    it('flags a linkable address so the accept page asks for the EXISTING password', async () => {
+      prisma.operatorInvite.findUnique.mockResolvedValue({
+        businessName: 'Biz',
+        email: 'a@b.com',
+        role: OperatorMemberRole.STAFF,
+        kind: OperatorInviteKind.MEMBER,
+        status: InviteStatus.PENDING,
+        expiresAt: futureDate(),
+      })
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'user-existing',
+        role: 'USER',
+        lifecycleStatus: 'ACTIVE',
+        operatorMemberships: [],
+      })
+
+      await expect(service.validate('tok')).resolves.toMatchObject({
+        requiresExistingPassword: true,
       })
     })
 
@@ -1207,6 +1241,107 @@ describe('InviteService', () => {
       await expect(service.accept('tok', 'password123', 'Biz Parking')).rejects.toBe(boom)
       expect(firebase.deleteUser).toHaveBeenCalledWith('user-new')
     })
+
+    describe('redeeming into an existing mobile-only account', () => {
+      function mockLinkable(): void {
+        prisma.user.findFirst.mockResolvedValue({
+          id: 'user-existing',
+          role: 'USER',
+          lifecycleStatus: 'ACTIVE',
+          operatorMemberships: [],
+        })
+      }
+
+      it('attaches the account instead of provisioning a new identity', async () => {
+        mockLinkable()
+        prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
+
+        const result = await service.accept('tok', 'password123', 'Biz Parking')
+
+        expect(result).toEqual({ linked: true })
+        expect(firebase.signUp).not.toHaveBeenCalled()
+        expect(firebase.signIn).toHaveBeenCalledWith({
+          email: 'new@spark.gr',
+          password: 'password123',
+        })
+        expect(tx.operatorMembership.create).toHaveBeenCalledWith({
+          data: { operatorId: 'op-new', userId: 'user-existing', role: 'ADMIN', scopes: [] },
+        })
+      })
+
+      it('bumps the role and the revocation watermark on the existing account', async () => {
+        mockLinkable()
+        prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
+
+        await service.accept('tok', 'password123', 'Biz Parking')
+
+        expect(tx.user.update).toHaveBeenCalledWith({
+          where: { id: 'user-existing' },
+          data: {
+            emailVerified: true,
+            role: 'OPERATOR_ADMIN',
+            sessionsValidFrom: expect.any(Date),
+          },
+        })
+      })
+
+      it('does not delete the existing account when the attachment transaction fails', async () => {
+        mockLinkable()
+        prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
+        const boom = new Error('db down')
+        prisma.$transaction.mockRejectedValue(boom)
+
+        await expect(service.accept('tok', 'password123', 'Biz Parking')).rejects.toBe(boom)
+        expect(firebase.deleteUser).not.toHaveBeenCalled()
+      })
+
+      // Collapsed into the SAME error a genuinely-taken address gets: a distinguishable
+      // wrong-password response would tell an attacker holding the invite token which
+      // emails are low-privilege driver accounts ripe for escalation.
+      it('collapses a wrong password into the same error as an already-taken address, writing nothing', async () => {
+        mockLinkable()
+        prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
+        firebase.signIn.mockRejectedValue(new Error('invalid credentials'))
+
+        await expect(
+          service.accept('tok', 'password123', 'Biz Parking'),
+        ).rejects.toBeInstanceOf(InviteEmailTakenError)
+        expect(tx.operatorMembership.create).not.toHaveBeenCalled()
+      })
+
+      // Closes the TOCTOU window between resolve() and the transaction's own write.
+      it('re-checks the row under lock and refuses if it changed since resolve()', async () => {
+        mockLinkable()
+        prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
+        tx.user.findUnique.mockResolvedValue({
+          role: 'OPERATOR_ADMIN',
+          lifecycleStatus: 'ACTIVE',
+          operatorMemberships: [],
+        })
+
+        await expect(service.accept('tok', 'password123', 'Biz Parking')).rejects.toBeInstanceOf(
+          InviteEmailTakenError,
+        )
+      })
+
+      // Defense-in-depth alongside the role check: nothing today creates an
+      // OperatorMembership without also flipping role off USER in the same transaction,
+      // but the locked recheck verifies membership absence directly rather than relying
+      // on that as an invariant.
+      it('re-checks under lock and refuses if a membership appeared even with role still USER', async () => {
+        mockLinkable()
+        prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
+        tx.user.findUnique.mockResolvedValue({
+          role: 'USER',
+          lifecycleStatus: 'ACTIVE',
+          operatorMemberships: [{ id: 'mem-1' }],
+        })
+
+        await expect(service.accept('tok', 'password123', 'Biz Parking')).rejects.toBeInstanceOf(
+          InviteEmailTakenError,
+        )
+      })
+    })
   })
 
   const verifiedOperator = (name = 'Biz A') => ({ name, status: OperatorStatus.VERIFIED })
@@ -1291,6 +1426,43 @@ describe('InviteService', () => {
       const where = prisma.user.findFirst.mock.calls[0]![0].where as Record<string, unknown>
       expect(where).toMatchObject({ email: 'owner@biz.com' })
       expect(where).toHaveProperty('lifecycleStatus')
+      expect(tx.operatorInvite.create).toHaveBeenCalled()
+    })
+
+    // Issuance never needs ownership proof, only redemption does — the account that will
+    // eventually attach is whoever proves they own it by signing in with its password.
+    it('does not refuse issuance to a mobile-only account — only genuinely-taken ones', async () => {
+      tx.parkingOperator.create.mockResolvedValue({ id: 'op-new' })
+      tx.operatorInvite.create.mockResolvedValue(inviteRow())
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'user-existing',
+        role: 'USER',
+        lifecycleStatus: 'ACTIVE',
+        operatorMemberships: [],
+      })
+
+      await expect(service.create(platformUser, { email: 'owner@biz.com' })).resolves.toBeDefined()
+      expect(tx.operatorInvite.create).toHaveBeenCalled()
+    })
+
+    it('does not refuse a member-invite issuance to a mobile-only account either', async () => {
+      prisma.parkingOperator.findUnique.mockResolvedValue(verifiedOperator())
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'user-existing',
+        role: 'USER',
+        lifecycleStatus: 'ACTIVE',
+        operatorMemberships: [],
+      })
+      withMemberships([{ operatorId: 'op-a', role: OperatorMemberRole.ADMIN }])
+      tx.operatorInvite.create.mockResolvedValue(inviteRow())
+
+      await expect(
+        service.createMember(operatorUser, {
+          email: 'staff@biz.com',
+          role: OperatorMemberRole.STAFF,
+          operatorId: 'op-a',
+        }),
+      ).resolves.toBeDefined()
       expect(tx.operatorInvite.create).toHaveBeenCalled()
     })
   })

@@ -229,6 +229,7 @@ model User {
   managedTariffPlans  TariffPlanManager[]
   driverSubscriptions DriverSubscription[]
   billingCustomer     DriverBillingCustomer?
+  mobileProfile       MobileProfile?
 
   @@index([email])
   @@index([lifecycleStatus, purgeAfter])
@@ -249,6 +250,23 @@ model PasswordResetToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+// Mobile-client-specific state, split off `User` rather than grown there: the identity
+// row stays lean regardless of how large the mobile install base gets, and this table's
+// access pattern (written by the mobile app on every launch/token refresh) never touches
+// the auth-critical columns on `User`. Mirrors the `Wallet` 1:1-child pattern below.
+model MobileProfile {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  pushToken    String?
+  locale       String?
+  appVersion   String?
+  lastActiveAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Vehicle {

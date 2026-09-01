@@ -148,8 +148,15 @@ describe('operator invites over HTTP (e2e)', () => {
       expect(stored.tokenHash).toMatch(/^[a-f0-9]{64}$/)
     })
 
-    it('refuses an address that already has an account, at issue rather than at redeem', async () => {
-      await post('', platformToken, { email: consumer.email }).expect(409)
+    it('refuses an address that already holds a privileged role, at issue rather than at redeem', async () => {
+      await post('', platformToken, { email: operatorAdmin.email }).expect(409)
+    })
+
+    // Issuance never needs ownership proof, only redemption does — a mobile-only address is
+    // who will end up redeeming it, by proving they own it with its own password. Refusing
+    // it here would make it impossible to ever invite a driver into operating a business.
+    it('does not refuse a mobile-only account — that email will attach at redeem instead', async () => {
+      await post('', platformToken, { email: consumer.email }).expect(201)
     })
   })
 
@@ -340,6 +347,104 @@ describe('operator invites over HTTP (e2e)', () => {
         businessName: 'E2E Parking SA',
         displayName: 'Eleni Nikolaou',
       }).expect(410)
+    })
+  })
+
+  describe('redeeming into an existing mobile-only account', () => {
+    function redeem(token: string, body: object = {}) {
+      return post(`/${token}/accept`, undefined, {
+        password: 'e2e-operator-password',
+        businessName: 'E2E Parking SA',
+        displayName: 'Eleni Nikolaou',
+        ...body,
+      })
+    }
+
+    async function signUpConsumer(
+      email: string,
+      password: string,
+    ): Promise<{ accessToken: string }> {
+      const response = await request(app.getHttpServer())
+        .post(`${API}/auth/sign-up`)
+        .send({ email, password, displayName: 'Driver Person' })
+        .expect(201)
+      return (response.body as { session: { accessToken: string } }).session
+    }
+
+    it('attaches the invite to the existing account instead of creating a second one', async () => {
+      const email = 'driver.turned.operator@spark.invalid'
+      const password = 'e2e-driver-password'
+      await signUpConsumer(email, password)
+
+      const invite = await issue(email)
+      const token = await implantToken(invite.id)
+
+      const response = await redeem(token, { password }).expect(200)
+      expect(response.body).toEqual({ linked: true })
+
+      // No second identity: still exactly one User row for this address.
+      const accounts = await raw.user.findMany({ where: { email } })
+      expect(accounts).toHaveLength(1)
+      expect(accounts[0]?.role).toBe(UserRole.OPERATOR_ADMIN)
+
+      const membership = await raw.operatorMembership.findFirstOrThrow({
+        where: { userId: accounts[0]?.id },
+      })
+      expect(membership.role).toBe(OperatorMemberRole.ADMIN)
+    })
+
+    it('revokes the account’s prior mobile session the instant it is attached', async () => {
+      const email = 'driver.session.revoked@spark.invalid'
+      const password = 'e2e-driver-password'
+      const priorSession = await signUpConsumer(email, password)
+
+      const invite = await issue(email)
+      const token = await implantToken(invite.id)
+      await redeem(token, { password }).expect(200)
+
+      // The token minted before the attach must not still work: the role grant bumps the
+      // revocation watermark past its issue time, the same as any other role change.
+      await request(app.getHttpServer())
+        .get(`${API}/facilities`)
+        .set('authorization', `Bearer ${priorSession.accessToken}`)
+        .expect(401)
+    })
+
+    it('lets the linked account sign in fresh afterwards with its unchanged password', async () => {
+      const email = 'driver.signs.in.after@spark.invalid'
+      const password = 'e2e-driver-password'
+      await signUpConsumer(email, password)
+
+      const invite = await issue(email)
+      const token = await implantToken(invite.id)
+      await redeem(token, { password }).expect(200)
+
+      const signIn = await request(app.getHttpServer())
+        .post(`${API}/auth/sign-in`)
+        .send({ email, password })
+        .expect(200)
+      expect((signIn.body as { session: { user: { role: string } } }).session.user.role).toBe(
+        'operator_admin',
+      )
+    })
+
+    // Collapsed into the same 409 a genuinely-taken address gets — a public 401 here would
+    // tell an attacker holding the invite token that this specific email belongs to a
+    // low-privilege driver account, ripe for credential-stuffing escalation.
+    it('refuses the wrong password with the same conflict a taken address gets, attaching nothing', async () => {
+      const email = 'driver.wrong.password@spark.invalid'
+      await signUpConsumer(email, 'e2e-driver-password')
+
+      const invite = await issue(email)
+      const token = await implantToken(invite.id)
+
+      await redeem(token, { password: 'not-the-right-password' }).expect(409)
+
+      const account = await raw.user.findUniqueOrThrow({ where: { email } })
+      expect(account.role).toBe(UserRole.USER)
+      expect(
+        await raw.operatorMembership.findFirst({ where: { userId: account.id } }),
+      ).toBeNull()
     })
   })
 })
