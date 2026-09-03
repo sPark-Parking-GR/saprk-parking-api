@@ -2,7 +2,9 @@ import { ForbiddenException, Inject, Injectable, Logger } from '@nestjs/common'
 import { InviteStatus, type PlatformAdminInvite, type Prisma } from '@prisma/client'
 import type { AuthContext } from '@spark/auth'
 import { hasPlatformPermission, type AuthResult, type AuthUser } from '@spark/types'
+import { AccountLinkingService } from '../auth/account-linking.service'
 import { AUTH_CONTEXT_TOKEN } from '../auth/auth.constants'
+import { TO_PRISMA } from '../auth/authjs-user.store'
 import { RequestContext } from '../common/context/request-context'
 import { InviteTokenService } from '../invite/invite-token.service'
 import { NotificationsService } from '../notifications/notifications.service'
@@ -50,17 +52,24 @@ export class AdminInviteService {
     // whatever the deployment had selected — which is both the strategy-pattern violation
     // CLAUDE.md forbids and the reason no e2e suite could ever redeem an invite.
     @Inject(AUTH_CONTEXT_TOKEN) private readonly auth: AuthContext,
+    private readonly accountLinking: AccountLinkingService,
   ) {}
 
   async create(actor: AuthUser, dto: CreateAdminInviteDto): Promise<AdminInviteIssued> {
     this.assertMayInvite(actor)
 
     const email = dto.email.toLowerCase()
-    await this.assertEmailFree(email)
+    // Issuance never needs ownership proof — only redemption (accept()) does. An address
+    // that already has a mobile-only account may still be invited; that account is who
+    // will end up redeeming it, by proving they own it with its own password.
+    if ((await this.accountLinking.resolve(email)).kind === 'taken') {
+      throw new AdminInviteEmailTakenError(email)
+    }
 
     const { rawToken, tokenHash, expiresAt } = this.tokens.mint(INVITE_TTL_MS)
 
     const invite = await this.prisma.$transaction(async (tx) => {
+      await this.supersede(tx, actor, email)
       const created = await tx.platformAdminInvite.create({
         data: {
           email,
@@ -165,9 +174,12 @@ export class AdminInviteService {
     })
     if (!invite) throw new AdminInviteNotFoundError()
 
+    const resolution = await this.accountLinking.resolve(invite.email)
+
     return {
       email: invite.email,
       expired: invite.status !== InviteStatus.PENDING || invite.expiresAt < new Date(),
+      requiresExistingPassword: resolution.kind === 'linkable',
     }
   }
 
@@ -175,7 +187,7 @@ export class AdminInviteService {
    * Public. The privileges come off the invite, decided and authorized when it was issued —
    * the person redeeming the link never gets a say in them.
    */
-  async accept(token: string, password: string): Promise<AuthResult> {
+  async accept(token: string, password: string): Promise<AuthResult | { linked: true }> {
     const invite = await this.prisma.platformAdminInvite.findUnique({
       where: { tokenHash: this.tokens.hash(token) },
     })
@@ -193,23 +205,76 @@ export class AdminInviteService {
       throw new AdminInviteExpiredError()
     }
 
-    // Re-checked at redemption, not only at issuance: the address may have signed up during
-    // the seven days the link was live, and silently promoting that account is exactly the
-    // escalation this refuses.
-    await this.assertEmailFree(invite.email)
+    // Re-checked at redemption, not only at issuance: the address may have changed state
+    // during the seven days the link was live. `free` proceeds to signUp as before;
+    // `linkable` attaches to the existing mobile-only account instead of colliding with
+    // it — the person redeeming it proves it is theirs by signing in with its password,
+    // which is the deliberate act promoting an existing account requires, not a side
+    // effect of the link existing; `taken` is genuinely gone.
+    const resolution = await this.accountLinking.resolve(invite.email)
+    if (resolution.kind === 'taken') throw new AdminInviteEmailTakenError(invite.email)
+    const isLinking = resolution.kind === 'linkable'
 
-    // Creates the Firebase identity AND the local User row; session.user.id is the local id.
-    const authResult = await this.auth.signUp({
-      email: invite.email,
-      password,
-      displayName: invite.displayName ?? undefined,
-      role: 'platform_admin',
-    })
-    const newUserId = authResult.session.user.id
+    let newUserId: string
+    let authResult: AuthResult | undefined
+    if (isLinking) {
+      // Proves the redeemer actually owns this account before any privilege is granted on
+      // its behalf. A wrong password collapses into the SAME error as a genuinely-taken
+      // address, deliberately — this is the platform's most-privileged tier, and letting a
+      // failed guess read differently from "taken" would turn accept() into an oracle
+      // telling an attacker holding the invite token which emails are low-privilege driver
+      // accounts ripe for escalation to platform_admin.
+      try {
+        await this.accountLinking.verifyOwnership(invite.email, password)
+      } catch {
+        throw new AdminInviteEmailTakenError(invite.email)
+      }
+      newUserId = resolution.userId
+    } else {
+      // Creates the Firebase identity AND the local User row; session.user.id is the local id.
+      authResult = await this.auth.signUp({
+        email: invite.email,
+        password,
+        displayName: invite.displayName ?? undefined,
+        role: 'platform_admin',
+      })
+      newUserId = authResult.session.user.id
+    }
 
     try {
       await this.prisma.$transaction(async (tx) => {
-        await tx.user.update({ where: { id: newUserId }, data: { emailVerified: true } })
+        if (isLinking) {
+          // Locked first, before any write: nothing else serializes two concurrent
+          // redemptions landing on the same linkable address the way the `User.email`
+          // unique index serializes two `signUp`s.
+          await tx.$executeRaw`SELECT id FROM "User" WHERE id = ${newUserId} FOR UPDATE`
+          const locked = await tx.user.findUnique({
+            where: { id: newUserId },
+            select: {
+              role: true,
+              lifecycleStatus: true,
+              operatorMemberships: { select: { id: true }, take: 1 },
+            },
+          })
+          if (
+            locked?.role !== 'USER' ||
+            locked.lifecycleStatus !== 'ACTIVE' ||
+            locked.operatorMemberships.length !== 0
+          ) {
+            throw new AdminInviteEmailTakenError(invite.email)
+          }
+        }
+
+        await tx.user.update({
+          where: { id: newUserId },
+          data: {
+            emailVerified: true,
+            // A role grant is a privilege change like any other in this codebase and must
+            // bump the revocation watermark: without it, a still-live mobile session token
+            // for this account becomes a valid platform_admin token the instant this commits.
+            ...(isLinking ? { role: TO_PRISMA.platform_admin, sessionsValidFrom: new Date() } : {}),
+          },
+        })
 
         // Conditional on the very token redeemed: a revoke or resend that landed while the
         // identity was being provisioned must beat this accept, and a failed count rolls
@@ -225,36 +290,36 @@ export class AdminInviteService {
           { id: newUserId, role: 'platform_admin' },
           'admin_invite.accepted',
           invite.id,
+          isLinking,
         )
       })
     } catch (error) {
-      // Firebase and Postgres cannot share one atomic transaction, so a failure after the
-      // identity exists must be compensated by deleting it — otherwise a redeemable-looking
-      // orphan platform admin is left behind, which is worse than a failed invite.
-      try {
-        await this.auth.deleteUser(newUserId)
-      } catch (cleanupError) {
-        this.logger.error(
-          `Failed to roll back orphaned identity ${newUserId} after admin-invite-accept failure: ${
-            cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-          }`,
-        )
+      // Firebase and Postgres cannot share one atomic transaction, so a failure after a
+      // FRESH identity exists must be compensated by deleting it — otherwise a
+      // redeemable-looking orphan platform admin is left behind. A linked account predates
+      // this request and is not this request's to destroy, even on failure.
+      if (!isLinking) {
+        try {
+          await this.auth.deleteUser(newUserId)
+        } catch (cleanupError) {
+          this.logger.error(
+            `Failed to roll back orphaned identity ${newUserId} after admin-invite-accept failure: ${
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+            }`,
+          )
+        }
       }
       throw error
     }
 
-    return authResult
-  }
+    // Not re-minted here on purpose: the transaction above just bumped
+    // sessionsValidFrom, and a token issued in that same instant risks landing in the same
+    // whole second as the watermark — dead on arrival under the fail-closed tie-break in
+    // packages/auth/src/revocation.ts. The caller already knows this password; they sign
+    // in themselves, afterward.
+    if (isLinking) return { linked: true }
 
-  private async assertEmailFree(email: string): Promise<void> {
-    // Names lifecycleStatus so the Prisma lifecycle extension does not narrow this to
-    // ACTIVE: an archived or anonymised account still owns its address, and inviting over
-    // one would collide on User.email at signUp with a far less clear failure.
-    const existing = await this.prisma.user.findFirst({
-      where: { email, lifecycleStatus: { in: ['ACTIVE', 'ARCHIVED', 'TOMBSTONED', 'PURGED'] } },
-      select: { id: true },
-    })
-    if (existing) throw new AdminInviteEmailTakenError(email)
+    return authResult!
   }
 
   private async findOwn(actor: AuthUser, id: string): Promise<PlatformAdminInvite> {
@@ -280,12 +345,49 @@ export class AdminInviteService {
     }
   }
 
-  // payload carries ids only — never the raw token, the password, or the invitee's email.
+  /**
+   * Retires every live invite to this address, so it never holds more than one redeemable
+   * platform_admin grant at a time.
+   *
+   * Without this, issuing a second invite to an address left the first one working: an
+   * admin who revokes the invite they can see in the UI (their own — `list()` scopes a
+   * platform admin to invites they issued) has not actually withdrawn platform_admin from
+   * that address if a DIFFERENT admin also invited it. Mirrors
+   * `invite.service.ts#supersede()`, minus the shell-operator cleanup that flow needs and
+   * this one has no equivalent of.
+   */
+  private async supersede(
+    tx: Prisma.TransactionClient,
+    actor: AuthUser,
+    email: string,
+  ): Promise<void> {
+    const stale = await tx.platformAdminInvite.findMany({
+      where: { email, status: InviteStatus.PENDING },
+      select: { id: true },
+    })
+    if (stale.length === 0) return
+
+    const ids = stale.map((invite) => invite.id)
+    await tx.platformAdminInvite.updateMany({
+      where: { id: { in: ids }, status: InviteStatus.PENDING },
+      data: { status: InviteStatus.REVOKED },
+    })
+
+    for (const id of ids) {
+      await this.recordAudit(tx, actor, 'admin_invite.superseded', id)
+    }
+  }
+
+  // `linked` distinguishes a role grant on a pre-existing mobile account from a brand-new
+  // identity — not otherwise reconstructable from the audit trail without cross-
+  // referencing the account's own createdAt. Never the raw token, the password, or the
+  // invitee's email.
   private async recordAudit(
     tx: Prisma.TransactionClient,
     actor: { id: string; role: string },
     action: string,
     inviteId: string,
+    linked?: boolean,
   ): Promise<void> {
     await tx.auditLog.create({
       data: {
@@ -294,6 +396,7 @@ export class AdminInviteService {
         action,
         entityType: 'PlatformAdminInvite',
         entityId: inviteId,
+        ...(linked !== undefined ? { payload: { linked } } : {}),
         ipAddress: RequestContext.getIp(),
       },
     })

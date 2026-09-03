@@ -159,12 +159,6 @@ describe('platform admin invites over HTTP (e2e)', () => {
     })
   })
 
-  /**
-   * Refusals only. A SUCCESSFUL accept provisions an identity through the auth provider,
-   * which talks to Firebase and has no usable credentials here — the same reason no other
-   * e2e suite redeems an invite. That path is covered in admin-invite.service.spec.ts with
-   * a mocked provider, matching how the operator invite flow is tested.
-   */
   describe('redeeming one', () => {
     it('reports the invitee address without a token, for the accept page to render', async () => {
       const invite = await issue(platformToken)
@@ -218,11 +212,21 @@ describe('platform admin invites over HTTP (e2e)', () => {
    * invitation must never do it as a side effect — the same rule the bootstrap CLI follows.
    */
   describe('an address that already has an account', () => {
-    it('is refused at issuance', async () => {
-      await post('', platformToken, { email: consumer.email }).expect(409)
+    it('is refused at issuance when the address already holds a privileged role', async () => {
+      await post('', platformToken, { email: operatorAdmin.email }).expect(409)
       expect(await raw.platformAdminInvite.count()).toBe(0)
     })
 
+    // Issuance never needs ownership proof, only redemption does — a mobile-only address
+    // is who will end up redeeming it, by proving they own it with its own password.
+    it('does not refuse issuance to a mobile-only account — that email attaches at redeem', async () => {
+      await post('', platformToken, { email: consumer.email }).expect(201)
+    })
+
+    // The seeded racer has no real credential (seedUser writes no passwordHash), so this
+    // exercises the wrong-password collapse below rather than a blanket existence refusal
+    // — any password attempt against an account whose real password is unknown fails the
+    // same way a genuinely-taken address does.
     it('is refused at redemption too, if they signed up while the link was live', async () => {
       const invite = await issue(platformToken, 'racer@spark.invalid')
       const token = await implantToken(invite.id)
@@ -235,6 +239,103 @@ describe('platform admin invites over HTTP (e2e)', () => {
         where: { email: 'racer@spark.invalid' },
       })
       expect(unchanged.role).toBe(UserRole.USER)
+    })
+  })
+
+  describe('redeeming into an existing mobile-only account', () => {
+    function redeem(token: string, body: object = {}) {
+      return post(`/token/${token}/accept`, undefined, { password: 'e2e-driver-password', ...body })
+    }
+
+    async function signUpConsumer(email: string, password: string): Promise<{ accessToken: string }> {
+      const response = await request(app.getHttpServer())
+        .post(`${API}/auth/sign-up`)
+        .send({ email, password, displayName: 'Driver Person' })
+        .expect(201)
+      return (response.body as { session: { accessToken: string } }).session
+    }
+
+    it('attaches the invite to the existing account instead of creating a second one', async () => {
+      const email = 'driver.turned.admin@spark.invalid'
+      const password = 'e2e-driver-password'
+      await signUpConsumer(email, password)
+
+      const invite = await issue(platformToken, email)
+      const token = await implantToken(invite.id)
+
+      const response = await redeem(token, { password }).expect(200)
+      expect(response.body).toEqual({ linked: true })
+
+      const accounts = await raw.user.findMany({ where: { email } })
+      expect(accounts).toHaveLength(1)
+      expect(accounts[0]?.role).toBe(UserRole.PLATFORM_ADMIN)
+    })
+
+    it('revokes the account’s prior mobile session the instant it is attached', async () => {
+      const email = 'driver.session.revoked.admin@spark.invalid'
+      const password = 'e2e-driver-password'
+      const priorSession = await signUpConsumer(email, password)
+
+      const invite = await issue(platformToken, email)
+      const token = await implantToken(invite.id)
+      await redeem(token, { password }).expect(200)
+
+      await request(app.getHttpServer())
+        .get(`${API}/facilities`)
+        .set('authorization', `Bearer ${priorSession.accessToken}`)
+        .expect(401)
+    })
+
+    it('lets the linked account sign in fresh afterwards with its unchanged password', async () => {
+      const email = 'driver.signs.in.after.admin@spark.invalid'
+      const password = 'e2e-driver-password'
+      await signUpConsumer(email, password)
+
+      const invite = await issue(platformToken, email)
+      const token = await implantToken(invite.id)
+      await redeem(token, { password }).expect(200)
+
+      const signIn = await request(app.getHttpServer())
+        .post(`${API}/auth/sign-in`)
+        .send({ email, password })
+        .expect(200)
+      expect((signIn.body as { session: { user: { role: string } } }).session.user.role).toBe(
+        'platform_admin',
+      )
+    })
+
+    it('refuses the wrong password with the same conflict a taken address gets, attaching nothing', async () => {
+      const email = 'driver.wrong.password.admin@spark.invalid'
+      await signUpConsumer(email, 'e2e-driver-password')
+
+      const invite = await issue(platformToken, email)
+      const token = await implantToken(invite.id)
+
+      await redeem(token, { password: 'not-the-right-password' }).expect(409)
+
+      const account = await raw.user.findUniqueOrThrow({ where: { email } })
+      expect(account.role).toBe(UserRole.USER)
+    })
+  })
+
+  describe('re-inviting the same address', () => {
+    // Without this, revoking the invite an admin can see in the UI does not actually
+    // withdraw platform_admin from that address if a different admin also invited it —
+    // the invite `list()` scopes each platform admin to only what they themselves issued.
+    it('supersedes the previous invite so only one link is ever redeemable', async () => {
+      const first = await issue(platformToken, 'contested@spark.invalid')
+      const firstToken = await implantToken(first.id)
+      const second = await issue(platformToken, 'contested@spark.invalid')
+
+      expect(second.id).not.toBe(first.id)
+      const superseded = await raw.platformAdminInvite.findUniqueOrThrow({
+        where: { id: first.id },
+      })
+      expect(superseded.status).toBe(InviteStatus.REVOKED)
+
+      await post(`/token/${firstToken}/accept`, undefined, {
+        password: 'a-strong-password',
+      }).expect(410)
     })
   })
 

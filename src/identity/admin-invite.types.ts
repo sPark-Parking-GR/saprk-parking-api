@@ -20,6 +20,10 @@ export interface AdminInviteIssued extends AdminInviteSummary {
 export interface AdminInviteValidation {
   email: string
   expired: boolean
+  // True when the invited address already has a mobile-only account: accepting attaches
+  // this invite's role to that account instead of creating a new one, so the accept form
+  // must collect the EXISTING password rather than let the person choose a new one.
+  requiresExistingPassword: boolean
 }
 
 export class AdminInviteNotFoundError extends DomainError {
