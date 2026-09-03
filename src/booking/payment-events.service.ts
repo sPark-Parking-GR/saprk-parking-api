@@ -120,6 +120,7 @@ export class PaymentEventsService {
       try {
         if (result.notification.kind === 'confirmation') {
           await this.notifications.sendBookingConfirmation(result.notification.data)
+          await this.notifications.sendBookingConfirmationPush(result.notification.data)
         } else {
           await this.notifications.sendBookingCancellation(result.notification.data)
         }
@@ -407,6 +408,7 @@ export class PaymentEventsService {
       amountCents: booking.quotedPriceCents,
       currency: booking.currency,
       recipientEmail: booking.user.email,
+      recipientUserId: booking.userId,
     }
   }
 }

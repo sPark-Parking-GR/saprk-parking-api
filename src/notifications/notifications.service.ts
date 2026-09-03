@@ -1,12 +1,19 @@
 import { Inject, Injectable, Logger } from '@nestjs/common'
-import type { EmailContext } from '@spark/notifications'
-import { NOTIFICATIONS_EMAIL_CONTEXT_TOKEN } from './notifications.constants'
+import type { EmailContext, PushContext } from '@spark/notifications'
+import { NOTIFICATIONS_EMAIL_CONTEXT_TOKEN, NOTIFICATIONS_PUSH_CONTEXT_TOKEN } from './notifications.constants'
 import type { BookingNotificationData } from './notification.types'
+import { PrismaService } from '../prisma/prisma.service'
 
 // en-GB to match the date formatting the templates already use, so one email does not
 // present its money and its dates in two different conventions.
 function formatMoney(cents: number, currency: string): string {
   return new Intl.NumberFormat('en-GB', { style: 'currency', currency }).format(cents / 100)
+}
+
+function formatStart(startsAt: Date): string {
+  return new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(
+    startsAt,
+  )
 }
 
 // ESP failures (SendGrid/Postmark) routinely echo the recipient address back in
@@ -20,6 +27,8 @@ export class NotificationsService {
 
   constructor(
     @Inject(NOTIFICATIONS_EMAIL_CONTEXT_TOKEN) private readonly emailContext: EmailContext,
+    @Inject(NOTIFICATIONS_PUSH_CONTEXT_TOKEN) private readonly pushContext: PushContext,
+    private readonly prisma: PrismaService,
   ) {}
 
   async sendBookingConfirmation(data: BookingNotificationData): Promise<void> {
@@ -32,6 +41,29 @@ export class NotificationsService {
           data: { ...data },
         }),
       'confirmation',
+      { bookingId: data.bookingId },
+    )
+  }
+
+  // The mobile-app sibling of sendBookingConfirmation. A driver who never installed the
+  // app, or installed it but never opted into notifications, simply has no MobileProfile
+  // row or no pushToken on it — that is not a failure, just nothing to send.
+  async sendBookingConfirmationPush(data: BookingNotificationData): Promise<boolean> {
+    const profile = await this.prisma.mobileProfile.findUnique({
+      where: { userId: data.recipientUserId },
+      select: { pushToken: true },
+    })
+    if (!profile?.pushToken) return true
+
+    return this.safeSend(
+      () =>
+        this.pushContext.send({
+          to: profile.pushToken!,
+          title: 'Booking confirmed',
+          body: `${data.facilityName} — ${formatStart(data.startsAt)}`,
+          data: { type: 'booking', bookingId: data.bookingId },
+        }),
+      'confirmation push',
       { bookingId: data.bookingId },
     )
   }

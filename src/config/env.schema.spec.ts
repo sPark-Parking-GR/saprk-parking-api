@@ -32,6 +32,9 @@ const REAL_PROVIDERS = {
   SENDGRID_API_KEY: 'SG.test',
   EMAIL_FROM_ADDRESS: 'support@spark.com',
   EMAIL_FROM_NAME: 'sPark',
+  // The console push provider is refused in production for the same reason as the console
+  // mailer, so a fixture that stands for "all real providers" has to name a real one here too.
+  PUSH_PROVIDER: 'expo',
 }
 
 describe('validateEnv', () => {
@@ -43,6 +46,7 @@ describe('validateEnv', () => {
     expect(result.MAP_PROVIDER).toBe('google')
     expect(result.PAYMENT_PROVIDER).toBe('mock')
     expect(result.EMAIL_PROVIDER).toBe('console')
+    expect(result.PUSH_PROVIDER).toBe('console')
   })
 
   it('passes through env vars it does not model, unchanged', () => {
@@ -186,6 +190,7 @@ describe('validateEnv', () => {
       PAYMENT_PROVIDER: 'mock',
       ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: 'true',
       ALLOW_CONSOLE_EMAIL_IN_PRODUCTION: 'true',
+      ALLOW_CONSOLE_PUSH_IN_PRODUCTION: 'true',
       SUBSCRIPTION_BILLING_PROVIDER: 'stripe',
       STRIPE_SECRET_KEY: 'sk_live',
       STRIPE_SUBSCRIPTION_WEBHOOK_SECRET: 'whsec_sub',
@@ -356,6 +361,45 @@ describe('validateEnv', () => {
     expect(result.EMAIL_PROVIDER).toBe('console')
   })
 
+  it('refuses PUSH_PROVIDER=console in production without the explicit opt-out', () => {
+    expect(() =>
+      validateEnv({
+        ...REQUIRED_BASE,
+        ...REAL_PROVIDERS,
+        NODE_ENV: 'production',
+        CORS_ORIGIN: 'https://app.spark.com',
+        PUSH_PROVIDER: 'console',
+      }),
+    ).toThrow(/PUSH_PROVIDER=console is refused/)
+  })
+
+  it('allows the console push provider in production only with the explicit opt-out', () => {
+    const result = validateEnv({
+      ...REQUIRED_BASE,
+      ...REAL_PROVIDERS,
+      NODE_ENV: 'production',
+      CORS_ORIGIN: 'https://app.spark.com',
+      PUSH_PROVIDER: 'console',
+      ALLOW_CONSOLE_PUSH_IN_PRODUCTION: 'true',
+    })
+
+    expect(result.PUSH_PROVIDER).toBe('console')
+  })
+
+  it('does not restrict the console push provider outside production', () => {
+    const result = validateEnv({ ...REQUIRED_BASE, NODE_ENV: 'development' })
+
+    expect(result.PUSH_PROVIDER).toBe('console')
+  })
+
+  // Unlike EMAIL_PROVIDER=expo (no such value) or =sendgrid, PUSH_PROVIDER=expo needs no
+  // required field of its own — EXPO_ACCESS_TOKEN stays optional even under this strategy.
+  it('does not require EXPO_ACCESS_TOKEN for PUSH_PROVIDER=expo', () => {
+    expect(() =>
+      validateEnv({ ...REQUIRED_BASE, PUSH_PROVIDER: 'expo', EXPO_ACCESS_TOKEN: undefined }),
+    ).not.toThrow()
+  })
+
   it('does not restrict the console mailer outside production', () => {
     const result = validateEnv({ ...REQUIRED_BASE, NODE_ENV: 'development' })
 
@@ -372,6 +416,7 @@ describe('validateEnv', () => {
       STRIPE_WEBHOOK_SECRET: 'whsec',
       SUBSCRIPTION_BILLING_PROVIDER: 'mock',
       ALLOW_CONSOLE_EMAIL_IN_PRODUCTION: 'true',
+      ALLOW_CONSOLE_PUSH_IN_PRODUCTION: 'true',
     }
 
     expect(() => validateEnv(productionMockBilling)).toThrow(

@@ -433,7 +433,7 @@ export class BookingService {
       })
     })
 
-    await this.notifications.sendBookingConfirmation({
+    const confirmationData = {
       bookingId: booking.id,
       accessCode: booking.accessCode,
       facilityName: booking.facility.name,
@@ -442,7 +442,10 @@ export class BookingService {
       amountCents: booking.quotedPriceCents,
       currency: booking.currency,
       recipientEmail: booking.user.email,
-    })
+      recipientUserId: booking.userId,
+    }
+    await this.notifications.sendBookingConfirmation(confirmationData)
+    await this.notifications.sendBookingConfirmationPush(confirmationData)
 
     return {
       bookingId: booking.id,
@@ -475,6 +478,7 @@ export class BookingService {
         startsAt: true,
         endsAt: true,
         quotedPriceCents: true,
+        userId: true,
         facility: { select: { name: true } },
         user: { select: { email: true } },
         payment: { select: { id: true, providerPaymentId: true, amountCents: true, status: true } },
@@ -543,6 +547,7 @@ export class BookingService {
       amountCents: booking.quotedPriceCents,
       currency: booking.currency,
       recipientEmail: booking.user.email,
+      recipientUserId: booking.userId,
     })
   }
 

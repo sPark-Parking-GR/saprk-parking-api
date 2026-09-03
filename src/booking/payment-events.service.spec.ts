@@ -73,7 +73,11 @@ describe('PaymentEventsService', () => {
     auditLog: { create: jest.Mock }
   }
   let prisma: { $transaction: jest.Mock }
-  let notifications: { sendBookingConfirmation: jest.Mock; sendBookingCancellation: jest.Mock }
+  let notifications: {
+    sendBookingConfirmation: jest.Mock
+    sendBookingConfirmationPush: jest.Mock
+    sendBookingCancellation: jest.Mock
+  }
   let service: PaymentEventsService
 
   beforeEach(() => {
@@ -85,7 +89,11 @@ describe('PaymentEventsService', () => {
       auditLog: { create: jest.fn() },
     }
     prisma = { $transaction: jest.fn(async (cb: (t: typeof tx) => unknown) => cb(tx)) }
-    notifications = { sendBookingConfirmation: jest.fn(), sendBookingCancellation: jest.fn() }
+    notifications = {
+      sendBookingConfirmation: jest.fn(),
+      sendBookingConfirmationPush: jest.fn(),
+      sendBookingCancellation: jest.fn(),
+    }
     service = new PaymentEventsService(
       prisma as unknown as PrismaService,
       { providerName: 'mock' } as unknown as PaymentsService,

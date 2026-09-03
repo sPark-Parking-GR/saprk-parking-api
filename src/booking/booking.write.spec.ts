@@ -281,7 +281,11 @@ describe('BookingService consumer ownership', () => {
     auditLog: { create: jest.Mock }
   }
   let payments: { capturePayment: jest.Mock; refund: jest.Mock }
-  let notifications: { sendBookingConfirmation: jest.Mock; sendBookingCancellation: jest.Mock }
+  let notifications: {
+    sendBookingConfirmation: jest.Mock
+    sendBookingConfirmationPush: jest.Mock
+    sendBookingCancellation: jest.Mock
+  }
   let scope: { resolve: jest.Mock; scopeWhere: jest.Mock }
   let access: { assertScope: jest.Mock }
   let service: BookingService
@@ -321,6 +325,7 @@ describe('BookingService consumer ownership', () => {
     }
     notifications = {
       sendBookingConfirmation: jest.fn(),
+      sendBookingConfirmationPush: jest.fn(),
       sendBookingCancellation: jest.fn(),
     }
     scope = { resolve: jest.fn(), scopeWhere: jest.fn() }
@@ -701,6 +706,11 @@ describe('BookingService consumer ownership', () => {
       expect(result.status).toBe('CONFIRMED')
       expect(notifications.sendBookingConfirmation.mock.calls[0]![0].recipientEmail).toBe(
         'owner@spark.gr',
+      )
+      // Both channels fire off the same confirmation — the push is the mobile-app sibling
+      // of the email, not a replacement for it.
+      expect(notifications.sendBookingConfirmationPush.mock.calls[0]![0].recipientUserId).toBe(
+        owner.id,
       )
     })
 

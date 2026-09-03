@@ -9,6 +9,7 @@ const SUBSCRIPTION_BILLING_PROVIDERS = ['mock', 'stripe'] as const
 // pass validation — so it passed production checks more easily than 'console' does while
 // guaranteeing a total, partly silent email outage. Re-adding it is a small honest job.
 const EMAIL_PROVIDERS = ['console', 'sendgrid'] as const
+const PUSH_PROVIDERS = ['console', 'expo'] as const
 
 function requireWhen(
   ctx: RefinementCtx,
@@ -110,6 +111,15 @@ const envSchema = z
     SENDGRID_API_KEY: z.string().optional(),
     EMAIL_FROM_ADDRESS: z.string().optional(),
     EMAIL_FROM_NAME: z.string().optional(),
+
+    // Push carries far less sensitive data than email (a booking title, no tokens or
+    // credential-bearing links), but the console provider still prints to stdout, so the
+    // same explicit-opt-out shape applies for consistency with every other provider guard.
+    PUSH_PROVIDER: z.enum(PUSH_PROVIDERS).default('console'),
+    ALLOW_CONSOLE_PUSH_IN_PRODUCTION: z.enum(['true', 'false']).default('false'),
+    // Optional even under PUSH_PROVIDER=expo: Expo's push API accepts unauthenticated
+    // requests by default, unlike every EMAIL_PROVIDER leg.
+    EXPO_ACCESS_TOKEN: z.string().optional(),
 
     // Days a tombstoned resource stays recoverable before the purge worker removes it
     // (anonymises it, for users). See src/lifecycle/lifecycle-purge.service.ts.
@@ -260,6 +270,19 @@ const envSchema = z
       EMAIL_FROM_ADDRESS: env.EMAIL_FROM_ADDRESS,
       EMAIL_FROM_NAME: env.EMAIL_FROM_NAME,
     })
+
+    if (
+      env.NODE_ENV === 'production' &&
+      env.PUSH_PROVIDER === 'console' &&
+      env.ALLOW_CONSOLE_PUSH_IN_PRODUCTION !== 'true'
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'PUSH_PROVIDER=console is refused when NODE_ENV=production: every push notification prints to stdout instead of being sent, a silent outage nobody is told about. Configure a real provider, or set ALLOW_CONSOLE_PUSH_IN_PRODUCTION=true to opt out explicitly.',
+        path: ['PUSH_PROVIDER'],
+      })
+    }
   })
 
 export type EnvConfig = z.infer<typeof envSchema>
