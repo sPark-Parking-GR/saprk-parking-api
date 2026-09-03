@@ -140,7 +140,9 @@ export class OperatorRegistrationService {
             action: 'operator.self_registered',
             entityType: 'ParkingOperator',
             entityId: operator.id,
-            payload: { businessName: dto.businessName },
+            // `linked` distinguishes a role grant on a pre-existing mobile account from a
+            // brand-new identity — not otherwise reconstructable from the audit trail alone.
+            payload: { businessName: dto.businessName, linked: isLinking },
             ipAddress: RequestContext.getIp(),
           },
         })

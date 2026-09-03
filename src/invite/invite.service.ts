@@ -576,7 +576,10 @@ export class InviteService {
           { id: newUserId, role: grantedRole },
           'invite.accepted',
           invite.id,
-          { operatorId, kind: invite.kind, role: invite.role },
+          // `linked` distinguishes a role grant on a pre-existing mobile account from a
+          // brand-new identity — the same signal is not otherwise reconstructable from the
+          // audit trail without cross-referencing the account's own createdAt.
+          { operatorId, kind: invite.kind, role: invite.role, linked: isLinking },
         )
       })
     } catch (error) {
