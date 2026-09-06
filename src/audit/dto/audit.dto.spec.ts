@@ -49,4 +49,16 @@ describe('listAuditLogSchema', () => {
 
     expect(result.success).toBe(false)
   })
+
+  it('accepts an actorQuery filter', () => {
+    const result = listAuditLogSchema.parse({ actorQuery: 'jane' })
+
+    expect(result).toMatchObject({ actorQuery: 'jane' })
+  })
+
+  it('rejects an empty actorQuery rather than treating it as absent', () => {
+    const result = listAuditLogSchema.safeParse({ actorQuery: '' })
+
+    expect(result.success).toBe(false)
+  })
 })

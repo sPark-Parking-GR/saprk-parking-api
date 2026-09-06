@@ -10,5 +10,13 @@ import type { INestApplication } from '@nestjs/common'
  * that wants to prove the limit still can within its own bucket.
  */
 export function resetThrottle(app: INestApplication): void {
-  app.get<ThrottlerStorageService>(ThrottlerStorage).storage.clear()
+  const storage = app.get<ThrottlerStorageService>(ThrottlerStorage)
+  // Every hit schedules a timer that decrements its bucket when the TTL expires, and that
+  // callback dereferences the bucket unguarded. Dropping the buckets without dropping the
+  // timers leaves each one to fire against a key that no longer exists and throw from
+  // inside a timer, where Jest can only attribute it to whichever test happens to be
+  // running. onApplicationShutdown is the only public surface that clears them, and it
+  // leaves the storage map alone, so the two compose.
+  storage.onApplicationShutdown()
+  storage.storage.clear()
 }

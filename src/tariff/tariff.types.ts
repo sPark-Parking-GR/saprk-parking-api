@@ -1,4 +1,4 @@
-import type { CapScope, RateUnit, VehicleType } from '@prisma/client'
+import type { CapScope, LifecycleStatus, RateUnit, VehicleType } from '@prisma/client'
 
 export interface QuoteRequest {
   facilityId: string
@@ -129,6 +129,7 @@ export interface TariffPlanListItem {
   name: string
   isActive: boolean
   isDefault: boolean
+  lifecycleStatus: LifecycleStatus
   validFrom: Date | null
   validTo: Date | null
   vehicleTypes: string[]

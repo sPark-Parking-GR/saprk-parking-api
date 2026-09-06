@@ -18,12 +18,22 @@ const operatorUser: AuthUser = {
   emailVerified: true,
 }
 
+const superAdminUser: AuthUser = {
+  id: 'super-1',
+  email: 'root@spark.gr',
+  role: 'super_admin',
+  emailVerified: true,
+}
+
 const baseQuery: ListAuditLogDto = { skip: 0, take: 20 }
 
 describe('AuditService', () => {
   let prisma: {
     auditLog: { findMany: jest.Mock; count: jest.Mock }
     user: { findMany: jest.Mock }
+    parkingOperator: { findMany: jest.Mock }
+    facility: { findMany: jest.Mock }
+    tariffPlan: { findMany: jest.Mock }
   }
   let service: AuditService
 
@@ -34,6 +44,9 @@ describe('AuditService', () => {
         count: jest.fn().mockResolvedValue(0),
       },
       user: { findMany: jest.fn().mockResolvedValue([]) },
+      parkingOperator: { findMany: jest.fn().mockResolvedValue([]) },
+      facility: { findMany: jest.fn().mockResolvedValue([]) },
+      tariffPlan: { findMany: jest.fn().mockResolvedValue([]) },
     }
     service = new AuditService(prisma as unknown as PrismaService)
   })
@@ -130,5 +143,165 @@ describe('AuditService', () => {
         },
       }),
     )
+  })
+
+  it('resolves actorQuery to matching user ids and filters by them', async () => {
+    prisma.user.findMany.mockResolvedValue([{ id: 'u-1' }, { id: 'u-2' }])
+
+    await service.list(platformUser, { ...baseQuery, actorQuery: 'jane' })
+
+    expect(prisma.user.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { email: { contains: 'jane', mode: 'insensitive' } },
+            { displayName: { contains: 'jane', mode: 'insensitive' } },
+          ],
+        }),
+      }),
+    )
+    expect(prisma.auditLog.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ actorId: { in: ['u-1', 'u-2'] } }) }),
+    )
+  })
+
+  it('excludes every row when actorQuery matches nobody, rather than ignoring the filter', async () => {
+    prisma.user.findMany.mockResolvedValue([])
+
+    await service.list(platformUser, { ...baseQuery, actorQuery: 'nobody' })
+
+    expect(prisma.auditLog.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ actorId: { in: [] } }) }),
+    )
+  })
+
+  it('resolves entityLabel for ParkingOperator, Facility and TariffPlan rows', async () => {
+    prisma.auditLog.findMany.mockResolvedValue([
+      {
+        id: 'a1',
+        actorId: null,
+        actorRole: null,
+        action: 'operator.archived',
+        entityType: 'ParkingOperator',
+        entityId: 'op-1',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+      {
+        id: 'a2',
+        actorId: null,
+        actorRole: null,
+        action: 'facility.archived',
+        entityType: 'Facility',
+        entityId: 'fac-1',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+      {
+        id: 'a3',
+        actorId: null,
+        actorRole: null,
+        action: 'tariff_plan.archived',
+        entityType: 'TariffPlan',
+        entityId: 'tp-1',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    ])
+    prisma.parkingOperator.findMany.mockResolvedValue([{ id: 'op-1', name: 'Athens Parking Co' }])
+    prisma.facility.findMany.mockResolvedValue([{ id: 'fac-1', name: 'Syntagma Garage' }])
+    prisma.tariffPlan.findMany.mockResolvedValue([{ id: 'tp-1', name: 'Standard' }])
+
+    const result = await service.list(platformUser, baseQuery)
+
+    expect(result.items[0]!.entityLabel).toBe('Athens Parking Co')
+    expect(result.items[1]!.entityLabel).toBe('Syntagma Garage')
+    expect(result.items[2]!.entityLabel).toBe('Standard')
+  })
+
+  it('opts out of the lifecycle extension default filter so an archived resource still resolves a name', async () => {
+    // Regression coverage: the lifecycle extension silently narrows every unqualified
+    // query on these models to lifecycleStatus ACTIVE, which would make an archived or
+    // tombstoned subject resolve to null even though its row still exists.
+    prisma.auditLog.findMany.mockResolvedValue([
+      {
+        id: 'a1',
+        actorId: null,
+        actorRole: null,
+        action: 'tariff_plan.archived',
+        entityType: 'TariffPlan',
+        entityId: 'tp-1',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    ])
+    prisma.tariffPlan.findMany.mockResolvedValue([{ id: 'tp-1', name: 'Standard' }])
+
+    await service.list(platformUser, baseQuery)
+
+    expect(prisma.tariffPlan.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          lifecycleStatus: { in: ['ACTIVE', 'ARCHIVED', 'TOMBSTONED', 'PURGED'] },
+        }),
+      }),
+    )
+  })
+
+  it('falls back to a null entityLabel when the resource no longer exists, and still returns the row', async () => {
+    prisma.auditLog.findMany.mockResolvedValue([
+      {
+        id: 'a1',
+        actorId: null,
+        actorRole: null,
+        action: 'operator.purged',
+        entityType: 'ParkingOperator',
+        entityId: 'gone',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    ])
+    prisma.parkingOperator.findMany.mockResolvedValue([])
+
+    const result = await service.list(platformUser, baseQuery)
+
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0]!.entityLabel).toBeNull()
+    expect(result.items[0]!.entityId).toBe('gone')
+  })
+
+  it('resolves a User entityLabel for an actor holding identity:user.read', async () => {
+    prisma.auditLog.findMany.mockResolvedValue([
+      {
+        id: 'a1',
+        actorId: null,
+        actorRole: null,
+        action: 'user.archived',
+        entityType: 'User',
+        entityId: 'u-1',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    ])
+    prisma.user.findMany.mockResolvedValue([
+      { id: 'u-1', displayName: 'Jane Doe', email: 'jane@spark.gr' },
+    ])
+
+    const result = await service.list(superAdminUser, baseQuery)
+
+    expect(result.items[0]!.entityLabel).toBe('Jane Doe')
+  })
+
+  it('withholds the User entityLabel from a platform admin lacking identity:user.read', async () => {
+    prisma.auditLog.findMany.mockResolvedValue([
+      {
+        id: 'a1',
+        actorId: null,
+        actorRole: null,
+        action: 'user.archived',
+        entityType: 'User',
+        entityId: 'u-1',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    ])
+
+    const result = await service.list(platformUser, baseQuery)
+
+    expect(result.items[0]!.entityLabel).toBeNull()
+    expect(prisma.user.findMany).not.toHaveBeenCalled()
   })
 })

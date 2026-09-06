@@ -1,5 +1,5 @@
 import type { AuthUser } from '@spark/types'
-import { Prisma } from '@prisma/client'
+import { LifecycleStatus, Prisma } from '@prisma/client'
 import { TariffService, assignmentMismatchReason, canBeDefault } from './tariff.service'
 import type { VehicleType } from '@prisma/client'
 import { OperatorScopeService, type OperatorScope } from '../common/authz/operator-scope.service'
@@ -215,6 +215,7 @@ describe('TariffService admin writes', () => {
       name: 'Standard',
       isActive: true,
       isDefault: false,
+      lifecycleStatus: LifecycleStatus.ACTIVE,
       validFrom: null,
       validTo: null,
       vehicleTypes: ['CAR'],
@@ -399,6 +400,19 @@ describe('TariffService admin writes', () => {
     expect(where.AND).toEqual([{ operatorId: 'op2' }])
     expect(result.items).toEqual([
       expect.objectContaining({ id: 'plan1', operatorId: 'op2', operatorName: 'Beta Parking' }),
+    ])
+  })
+
+  it('carries each plan lifecycleStatus through to the list item', async () => {
+    setScope({ kind: 'platform' })
+    prisma.tariffPlan.findMany.mockResolvedValue([
+      listRow({ lifecycleStatus: LifecycleStatus.ARCHIVED }),
+    ])
+
+    const result = await service.listPlans(platformUser, {})
+
+    expect(result.items).toEqual([
+      expect.objectContaining({ id: 'plan1', lifecycleStatus: LifecycleStatus.ARCHIVED }),
     ])
   })
 
