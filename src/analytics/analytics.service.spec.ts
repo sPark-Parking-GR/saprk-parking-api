@@ -323,6 +323,21 @@ describe('AnalyticsService occupancy', () => {
 
     expect(result.occupancy.ratio).toBe(0)
   })
+
+  it('restricts offered capacity to facilities the booking path would actually accept', async () => {
+    const { prisma, service } = setup({ kind: 'platform' })
+    prisma.$queryRaw
+      .mockResolvedValueOnce([revenueRow()])
+      .mockResolvedValueOnce([occupancyRow(0, 0)])
+
+    await service.summary(platformUser, { from, to })
+
+    const occupancy = sqlOf(prisma.$queryRaw.mock.calls[1]!)
+    expect(occupancy.text).toContain('f."isActive"')
+    expect(occupancy.text).toContain('f."isPublished"')
+    expect(occupancy.text).toContain('f."kind"')
+    expect(occupancy.values).toContain('BUSINESS')
+  })
 })
 
 describe('AnalyticsService revenue series', () => {

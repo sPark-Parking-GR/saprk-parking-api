@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common'
-import { BookingStatus, PaymentStatus, Prisma, RefundStatus } from '@prisma/client'
+import { BookingStatus, FacilityKind, PaymentStatus, Prisma, RefundStatus } from '@prisma/client'
 import type { AuthUser } from '@spark/types'
 import { OperatorScopeService } from '../common/authz/operator-scope.service'
 import {
@@ -319,6 +319,12 @@ export class AnalyticsService {
    *
    * Both sides are clipped to the ownership window, so an operator is neither credited for
    * a facility's capacity before they owned it nor charged with its idle time.
+   *
+   * Capacity is further restricted to facilities the booking path itself would accept —
+   * `isActive AND isPublished AND kind = BUSINESS`, mirrored from InventoryService's own
+   * facility lookup (the actual gate at hold time) — because a catalog-only or unpublished
+   * facility's `onlineQuota` can never be booked, no matter how large it is. `booked` joins
+   * `owned_window` rather than `Facility` directly, so it inherits the same restriction.
    */
   private occupancyQuery(
     from: Date,
@@ -336,6 +342,7 @@ export class AnalyticsService {
         JOIN "Facility" f ON f."id" = o."facilityId"
         WHERE o."from" < ${to}::timestamp
           AND (o."to" IS NULL OR o."to" > ${from}::timestamp)
+          AND f."isActive" AND f."isPublished" AND f."kind" = ${FacilityKind.BUSINESS}::"FacilityKind"
           ${this.operatorFilter(Prisma.sql`o."operatorId"`, operatorIds)}
       ),
       owned_window AS (

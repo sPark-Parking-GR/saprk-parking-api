@@ -1,5 +1,6 @@
 import {
   BookingStatus,
+  FacilityKind,
   IngestSource,
   PaymentStatus,
   Prisma,
@@ -543,6 +544,47 @@ describe('analytics (e2e)', () => {
         capacitySlotMinutes: 0,
         ratio: 0,
       })
+    })
+
+    it('excludes a catalog-only facility from capacity even with a large onlineQuota', async () => {
+      const { operator, caller } = await ownedFacility({ onlineQuota: 10 })
+      const catalogOnly = await seedFacility(prisma, {
+        operatorId: operator.id,
+        lat: 37.98,
+        lng: 23.72,
+        onlineQuota: 100_000,
+        kind: FacilityKind.FREE_PUBLIC,
+      })
+      await seedOwnership(prisma, {
+        facilityId: catalogOnly.id,
+        operatorId: operator.id,
+        from: OWNED_SINCE,
+      })
+
+      const { occupancy } = await analytics.summary(caller, { from: FROM, to: TO })
+
+      // 7 days x 1440 minutes x quota 10 from the bookable facility only.
+      expect(occupancy.capacitySlotMinutes).toBe(100_800)
+    })
+
+    it('excludes an unpublished BUSINESS facility from capacity', async () => {
+      const { operator, caller } = await ownedFacility({ onlineQuota: 10 })
+      const unpublished = await seedFacility(prisma, {
+        operatorId: operator.id,
+        lat: 37.98,
+        lng: 23.72,
+        onlineQuota: 50,
+        isPublished: false,
+      })
+      await seedOwnership(prisma, {
+        facilityId: unpublished.id,
+        operatorId: operator.id,
+        from: OWNED_SINCE,
+      })
+
+      const { occupancy } = await analytics.summary(caller, { from: FROM, to: TO })
+
+      expect(occupancy.capacitySlotMinutes).toBe(100_800)
     })
   })
 
