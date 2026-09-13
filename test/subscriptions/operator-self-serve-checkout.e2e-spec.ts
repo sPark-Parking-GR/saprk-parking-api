@@ -61,7 +61,7 @@ describe('operator self-serve checkout (e2e)', () => {
   beforeEach(async () => {
     // truncateAll restores the migration-seeded Starter plan, so the catalog is never empty.
     await truncateAll(prisma)
-    resetThrottle(app)
+    await resetThrottle(app)
     operator = await seedOperator(prisma)
     admin = await seedUser(prisma, { role: UserRole.OPERATOR_ADMIN, operatorId: operator.id })
     token = bearerToken(admin)

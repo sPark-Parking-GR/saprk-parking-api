@@ -44,7 +44,7 @@ describe('operator self-registration over HTTP (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(raw)
-    resetThrottle(app)
+    await resetThrottle(app)
 
     platformAdmin = await seedUser(raw, { role: UserRole.PLATFORM_ADMIN })
     platformToken = bearerToken(platformAdmin)

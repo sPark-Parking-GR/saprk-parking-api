@@ -98,7 +98,7 @@ describe('subscription entitlements (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(prisma)
-    resetThrottle(app)
+    await resetThrottle(app)
     platformAdmin = await seedUser(prisma, { role: UserRole.PLATFORM_ADMIN })
     platformToken = bearerToken(platformAdmin)
   })

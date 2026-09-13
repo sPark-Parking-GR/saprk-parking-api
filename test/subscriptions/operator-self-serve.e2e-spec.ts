@@ -57,7 +57,7 @@ describe('operator self-serve subscriptions (e2e)', () => {
   beforeEach(async () => {
     // truncateAll restores the migration-seeded Starter plan, so the catalog is never empty.
     await truncateAll(prisma)
-    resetThrottle(app)
+    await resetThrottle(app)
   })
 
   function get(path: string, token?: string) {

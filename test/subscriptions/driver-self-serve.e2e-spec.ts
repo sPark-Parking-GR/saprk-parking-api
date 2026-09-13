@@ -83,7 +83,7 @@ describe('driver self-serve subscriptions (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(prisma)
-    resetThrottle(app)
+    await resetThrottle(app)
     const rider = await seedUser(prisma)
     riderId = rider.id
     riderToken = bearerToken(rider)

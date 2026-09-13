@@ -44,7 +44,7 @@ describe('admin identity over HTTP (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(raw)
-    resetThrottle(app)
+    await resetThrottle(app)
 
     superOne = await seedUser(raw, { role: UserRole.SUPER_ADMIN })
     superTwo = await seedUser(raw, { role: UserRole.SUPER_ADMIN })

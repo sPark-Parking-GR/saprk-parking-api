@@ -35,6 +35,8 @@ import { DriverSubscriptionsModule } from './subscriptions/driver-subscriptions.
 import { OperatorSubscriptionsModule } from './subscriptions/operator-subscriptions.module'
 import { SubscriptionsModule } from './subscriptions/subscriptions.module'
 import { TariffModule } from './tariff/tariff.module'
+import { RedisThrottlerStorage } from './throttler/redis-throttler-storage'
+import { RedisThrottlerStorageModule } from './throttler/redis-throttler-storage.module'
 
 @Module({
   imports: [
@@ -45,7 +47,14 @@ import { TariffModule } from './tariff/tariff.module'
         pinoHttp: createPinoHttpOptions(config.get<string>('NODE_ENV') ?? 'development'),
       }),
     }),
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
+    ThrottlerModule.forRootAsync({
+      imports: [RedisThrottlerStorageModule],
+      inject: [RedisThrottlerStorage],
+      useFactory: (storage: RedisThrottlerStorage) => ({
+        throttlers: [{ ttl: 60_000, limit: 120 }],
+        storage,
+      }),
+    }),
     PrismaModule,
     AuthModule,
     SubscriptionsModule,

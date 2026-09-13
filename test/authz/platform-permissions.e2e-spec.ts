@@ -76,7 +76,7 @@ describe('platform permission gates (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(prisma)
-    resetThrottle(app)
+    await resetThrottle(app)
 
     const [verified, suspended] = await Promise.all([
       seedOperator(prisma, { name: 'Verified', status: OperatorStatus.VERIFIED }),

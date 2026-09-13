@@ -55,7 +55,7 @@ describe('facility kind (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(raw)
-    resetThrottle(app)
+    await resetThrottle(app)
 
     operator = await seedOperator(raw)
     facility = await seedFacility(raw, { operatorId: operator.id, ...CENTRE })

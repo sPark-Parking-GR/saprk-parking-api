@@ -60,7 +60,7 @@ describe('operator invites over HTTP (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(raw)
-    resetThrottle(app)
+    await resetThrottle(app)
 
     const operator = await seedOperator(raw)
     platformAdmin = await seedUser(raw, { role: UserRole.PLATFORM_ADMIN })

@@ -77,7 +77,7 @@ describe('admin lifecycle over HTTP (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(raw)
-    resetThrottle(app)
+    await resetThrottle(app)
   })
 
   /**

@@ -120,7 +120,7 @@ describe('resource manager assignment (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(raw)
-    resetThrottle(app)
+    await resetThrottle(app)
     ;[operator, other] = await Promise.all([
       seedOperator(raw, { name: 'Alpha' }),
       seedOperator(raw, { name: 'Beta' }),

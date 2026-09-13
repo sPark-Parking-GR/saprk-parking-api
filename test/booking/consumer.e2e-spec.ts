@@ -40,7 +40,7 @@ describe('consumer app endpoints (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(prisma)
-    resetThrottle(app)
+    await resetThrottle(app)
 
     // The unclaimed-import operator is the only one exempt from the one-facility-per-operator
     // partial unique index, so it is how a fixture gets two facilities to bookmark.

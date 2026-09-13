@@ -81,7 +81,7 @@ describe('QR ticket verification (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(prisma)
-    resetThrottle(app)
+    await resetThrottle(app)
     ;[alpha, beta] = await Promise.all([seedTenant('Alpha', 23.7275), seedTenant('Beta', 23.7375)])
     const outsider = await seedUser(prisma, { role: UserRole.USER })
     outsiderToken = bearerToken(outsider)

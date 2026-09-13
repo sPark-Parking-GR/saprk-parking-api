@@ -69,7 +69,7 @@ describe('operator delete archives into the admin trash (e2e)', () => {
 
   beforeEach(async () => {
     await truncateAll(raw)
-    resetThrottle(app)
+    await resetThrottle(app)
 
     operator = await seedOperator(raw)
     operatorAdmin = await seedUser(raw, {
