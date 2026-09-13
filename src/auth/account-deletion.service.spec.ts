@@ -1,4 +1,3 @@
-import { ForbiddenException } from '@nestjs/common'
 import { BookingStatus } from '@prisma/client'
 import { InvalidCredentialsError, InvalidTokenError } from '@spark/auth'
 import type { AuthContext, FirebaseAuthProvider } from '@spark/auth'
@@ -15,12 +14,22 @@ const CONSUMER: AuthUser = {
   displayName: 'Driver',
 }
 
+const OPERATOR: AuthUser = {
+  id: 'u1',
+  email: 'ops@spark.gr',
+  role: 'operator_admin',
+  emailVerified: true,
+  displayName: 'Ops',
+}
+
 const TOKEN = 'access-token'
 
 describe('AccountDeletionService', () => {
   let tx: {
     user: { update: jest.Mock }
     vehicle: { deleteMany: jest.Mock }
+    savedFacility: { deleteMany: jest.Mock }
+    mobileProfile: { deleteMany: jest.Mock }
     passwordResetToken: { deleteMany: jest.Mock }
     auditLog: { create: jest.Mock }
   }
@@ -52,6 +61,8 @@ describe('AccountDeletionService', () => {
     tx = {
       user: { update: jest.fn() },
       vehicle: { deleteMany: jest.fn() },
+      savedFacility: { deleteMany: jest.fn() },
+      mobileProfile: { deleteMany: jest.fn() },
       passwordResetToken: { deleteMany: jest.fn() },
       auditLog: { create: jest.fn() },
     }
@@ -91,15 +102,6 @@ describe('AccountDeletionService', () => {
     expect(prisma.$transaction).not.toHaveBeenCalled()
   })
 
-  // Both layers gate the role: an operator identity owns memberships and facilities that a
-  // self-service tombstone would strand.
-  it('refuses a non-consumer account even past the controller guard', async () => {
-    await expect(
-      service.deleteOwnAccount({ ...CONSUMER, role: 'operator_admin' }, 'pw', TOKEN),
-    ).rejects.toBeInstanceOf(ForbiddenException)
-    expect(auth.signIn).not.toHaveBeenCalled()
-  })
-
   it('refuses an account that is already a tombstone', async () => {
     account({ deletedAt: new Date() })
 
@@ -136,74 +138,133 @@ describe('AccountDeletionService', () => {
     ])
   })
 
-  it('anonymises the row instead of deleting it, and frees the address', async () => {
-    await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
+  describe('a consumer account', () => {
+    it('anonymises the row instead of deleting it, and frees the address', async () => {
+      await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
 
-    expect(userUpdate()).toEqual({
-      where: { id: 'u1' },
-      data: {
-        email: 'deleted+u1@deleted.invalid',
-        displayName: null,
-        avatarUrl: null,
-        passwordHash: null,
-        firebaseUid: null,
-        emailVerified: false,
-        deletedAt: expect.any(Date),
-        sessionsValidFrom: expect.any(Date),
-      },
+      expect(userUpdate()).toEqual({
+        where: { id: 'u1' },
+        data: {
+          email: 'deleted+u1@deleted.invalid',
+          displayName: null,
+          avatarUrl: null,
+          passwordHash: null,
+          firebaseUid: null,
+          emailVerified: false,
+          deletedAt: expect.any(Date),
+          sessionsValidFrom: expect.any(Date),
+        },
+      })
+    })
+
+    it('revokes every existing session as part of the same write', async () => {
+      await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
+
+      const { data } = userUpdate()
+      expect(data.sessionsValidFrom).toEqual(data.deletedAt)
+      expect(auth.signOut).toHaveBeenCalledWith(TOKEN)
+    })
+
+    it('clears the plates, the favourites, the mobile profile and the outstanding reset grants', async () => {
+      await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
+
+      expect(tx.vehicle.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
+      expect(tx.savedFacility.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
+      expect(tx.mobileProfile.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
+      expect(tx.passwordResetToken.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
+    })
+
+    it('audits the deletion', async () => {
+      await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
+
+      expect(tx.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actorId: 'u1',
+          actorRole: 'user',
+          action: 'account.deleted',
+          entityType: 'User',
+          entityId: 'u1',
+          payload: { selfService: true },
+        },
+      })
+    })
+
+    it('removes the Firebase identity for a Firebase-backed account', async () => {
+      account({ firebaseUid: 'fb-1' })
+
+      await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
+
+      expect(firebase.deleteIdentity).toHaveBeenCalledWith('fb-1')
+    })
+
+    it('leaves Firebase alone for an authjs account', async () => {
+      await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
+
+      expect(firebase.deleteIdentity).not.toHaveBeenCalled()
+    })
+
+    // The local account is already gone at this point; reporting a failure would describe
+    // a deletion that did happen as one that did not.
+    it('still succeeds when the Firebase identity cannot be removed', async () => {
+      account({ firebaseUid: 'fb-1' })
+      firebase.deleteIdentity.mockRejectedValue(new Error('firebase down'))
+
+      await expect(service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)).resolves.toBeUndefined()
     })
   })
 
-  it('revokes every existing session as part of the same write', async () => {
-    await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
-
-    const { data } = userUpdate()
-    expect(data.sessionsValidFrom).toEqual(data.deletedAt)
-    expect(auth.signOut).toHaveBeenCalledWith(TOKEN)
-  })
-
-  it('clears the plates and the outstanding reset grants', async () => {
-    await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
-
-    expect(tx.vehicle.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
-    expect(tx.passwordResetToken.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
-  })
-
-  it('audits the deletion', async () => {
-    await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
-
-    expect(tx.auditLog.create).toHaveBeenCalledWith({
-      data: {
-        actorId: 'u1',
-        actorRole: 'user',
-        action: 'account.deleted',
-        entityType: 'User',
-        entityId: 'u1',
-        payload: { selfService: true },
-      },
+  // An operator/admin identity owns memberships, invites and facilities that a tombstone
+  // would strand, and is still live on the web dashboard — deleting from the app they
+  // called this from must not reach across and take that away.
+  describe('an operator or admin account that also uses the app', () => {
+    beforeEach(() => {
+      account({ email: 'ops@spark.gr' })
     })
-  })
 
-  it('removes the Firebase identity for a Firebase-backed account', async () => {
-    account({ firebaseUid: 'fb-1' })
+    it('still re-checks the password and the booking ledger first', async () => {
+      await service.deleteOwnAccount(OPERATOR, 'pw', TOKEN)
 
-    await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
+      expect(auth.signIn).toHaveBeenCalledWith({ email: 'ops@spark.gr', password: 'pw' })
+    })
 
-    expect(firebase.deleteIdentity).toHaveBeenCalledWith('fb-1')
-  })
+    it('leaves the User row untouched — no tombstone, no watermark bump', async () => {
+      await service.deleteOwnAccount(OPERATOR, 'pw', TOKEN)
 
-  it('leaves Firebase alone for an authjs account', async () => {
-    await service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)
+      expect(tx.user.update).not.toHaveBeenCalled()
+    })
 
-    expect(firebase.deleteIdentity).not.toHaveBeenCalled()
-  })
+    it('clears the vehicles, favourites and mobile profile this app created', async () => {
+      await service.deleteOwnAccount(OPERATOR, 'pw', TOKEN)
 
-  // The local account is already gone at this point; reporting a failure would describe a
-  // deletion that did happen as one that did not.
-  it('still succeeds when the Firebase identity cannot be removed', async () => {
-    account({ firebaseUid: 'fb-1' })
-    firebase.deleteIdentity.mockRejectedValue(new Error('firebase down'))
+      expect(tx.vehicle.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
+      expect(tx.savedFacility.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
+      expect(tx.mobileProfile.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } })
+    })
 
-    await expect(service.deleteOwnAccount(CONSUMER, 'pw', TOKEN)).resolves.toBeUndefined()
+    // No per-session table exists to revoke just this device by — an account-wide
+    // sign-out would also drop the caller's active web dashboard session.
+    it('never signs out or touches the Firebase identity', async () => {
+      account({ email: 'ops@spark.gr', firebaseUid: 'fb-1' })
+
+      await service.deleteOwnAccount(OPERATOR, 'pw', TOKEN)
+
+      expect(auth.signOut).not.toHaveBeenCalled()
+      expect(firebase.deleteIdentity).not.toHaveBeenCalled()
+    })
+
+    it('audits the clear as scoped to mobile, distinct from a full deletion', async () => {
+      await service.deleteOwnAccount(OPERATOR, 'pw', TOKEN)
+
+      expect(tx.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actorId: 'u1',
+          actorRole: 'operator_admin',
+          action: 'account.mobile_data_cleared',
+          entityType: 'User',
+          entityId: 'u1',
+          payload: { selfService: true, scope: 'mobile' },
+        },
+      })
+    })
   })
 })

@@ -15,7 +15,6 @@ import { AuthService } from './auth.service'
 import { PasswordResetService } from './password-reset.service'
 import { CurrentUser } from './decorators/current-user.decorator'
 import { Public } from './decorators/public.decorator'
-import { Roles } from './decorators/roles.decorator'
 import {
   deleteAccountSchema,
   forgotPasswordSchema,
@@ -110,12 +109,15 @@ export class AuthController {
   }
 
   // Self-service account deletion, required in-app by App Store Review Guideline 5.1.1(v).
-  // Not @Public: the guard must resolve the caller, because the account deleted is always
+  // Not @Public: the guard must resolve the caller, because the account acted on is always
   // the caller's own — there is no id in the request for anyone to tamper with. POST
   // rather than DELETE so the password travels in a body; a URL or query string is the one
   // place a credential must never be. Throttled to the same 3/min as forgot-password: a
-  // wrong password here is an authentication attempt like any other.
-  @Roles('user')
+  // wrong password here is an authentication attempt like any other. No @Roles gate: every
+  // role may call this, because the service branches on role — a consumer's whole account
+  // is tombstoned, while an operator/admin who also uses the app as a driver instead gets
+  // just their mobile-side data cleared, leaving the web identity that role depends on
+  // untouched. See AccountDeletionService.deleteOwnAccount.
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
   @HttpCode(204)
   @Post('delete-account')

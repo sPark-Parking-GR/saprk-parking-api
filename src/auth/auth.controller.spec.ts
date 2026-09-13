@@ -128,8 +128,11 @@ describe('AuthController delete-account endpoint', () => {
     expect(Reflect.getMetadata(IS_PUBLIC_KEY, handler)).toBeUndefined()
   })
 
-  it('is restricted to consumer accounts', () => {
-    expect(Reflect.getMetadata(ROLES_KEY, handler)).toEqual(['user'])
+  // Every role may call this: the service branches on role, tombstoning a consumer's
+  // whole account but only clearing mobile-side data for an operator or admin who also
+  // uses the app as a driver.
+  it('carries no role restriction', () => {
+    expect(Reflect.getMetadata(ROLES_KEY, handler)).toBeUndefined()
   })
 
   it('answers 204 with no body', () => {
