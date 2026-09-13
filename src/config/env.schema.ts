@@ -10,6 +10,8 @@ const SUBSCRIPTION_BILLING_PROVIDERS = ['mock', 'stripe'] as const
 // guaranteeing a total, partly silent email outage. Re-adding it is a small honest job.
 const EMAIL_PROVIDERS = ['console', 'sendgrid'] as const
 const PUSH_PROVIDERS = ['console', 'expo'] as const
+// Matches the output length of the .env.example-recommended `openssl rand -hex 32`.
+const MIN_AUTH_SECRET_LENGTH = 32
 
 function requireWhen(
   ctx: RefinementCtx,
@@ -134,6 +136,17 @@ const envSchema = z
     requireWhen(ctx, env.AUTH_PROVIDER === 'authjs', 'when AUTH_PROVIDER=authjs', {
       AUTH_SECRET: env.AUTH_SECRET,
     })
+    if (
+      env.AUTH_PROVIDER === 'authjs' &&
+      env.AUTH_SECRET &&
+      env.AUTH_SECRET.length < MIN_AUTH_SECRET_LENGTH
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `AUTH_SECRET must be at least ${MIN_AUTH_SECRET_LENGTH} characters when AUTH_PROVIDER=authjs. Generate one with: openssl rand -hex 32`,
+        path: ['AUTH_SECRET'],
+      })
+    }
     requireWhen(ctx, env.AUTH_PROVIDER === 'firebase', 'when AUTH_PROVIDER=firebase', {
       FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID,
       FIREBASE_CLIENT_EMAIL: env.FIREBASE_CLIENT_EMAIL,

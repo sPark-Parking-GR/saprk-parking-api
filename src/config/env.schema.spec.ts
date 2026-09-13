@@ -80,6 +80,29 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ ...REQUIRED_BASE, AUTH_SECRET: undefined })).toThrow(/AUTH_SECRET/)
   })
 
+  it('requires AUTH_SECRET to be at least 32 characters when AUTH_PROVIDER=authjs', () => {
+    expect(() =>
+      validateEnv({ ...REQUIRED_BASE, AUTH_SECRET: 'a'.repeat(31) }),
+    ).toThrow(/AUTH_SECRET must be at least 32 characters/)
+
+    const result = validateEnv({ ...REQUIRED_BASE, AUTH_SECRET: 'a'.repeat(32) })
+    expect(result.AUTH_SECRET).toBe('a'.repeat(32))
+  })
+
+  // The length floor is specific to authjs, mirroring requireWhen's own conditional scope:
+  // a short value left over from a prior authjs configuration must not block another provider.
+  it('does not apply the AUTH_SECRET length floor under another provider', () => {
+    expect(() =>
+      validateEnv({
+        ...REQUIRED_BASE,
+        AUTH_PROVIDER: 'clerk',
+        AUTH_SECRET: 'short',
+        CLERK_SECRET_KEY: 'sk_test',
+        CLERK_PUBLISHABLE_KEY: 'pk_test',
+      }),
+    ).not.toThrow()
+  })
+
   it('requires CLERK vars when AUTH_PROVIDER=clerk, and not AUTH_SECRET', () => {
     expect(() =>
       validateEnv({ ...REQUIRED_BASE, AUTH_PROVIDER: 'clerk', AUTH_SECRET: undefined }),
