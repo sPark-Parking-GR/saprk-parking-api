@@ -301,6 +301,19 @@ export class FacilityKindChangeBlockedError extends DomainError {
   }
 }
 
+// Publishing a BUSINESS facility that resolves to no currently-applicable plan would list
+// something every real booking then refuses with NoApplicableTariffError. Deliberately NOT
+// FacilityNotBookableError, which means "wrong kind" — this facility is exactly the right
+// kind and simply has nothing priced yet — nor NoApplicableTariffError, whose consumers
+// treat it as a checkout failure on a live facility rather than a publish precondition.
+export class FacilityHasNoTariffError extends DomainError {
+  constructor(facilityId: string) {
+    super(
+      `Facility ${facilityId} cannot be published: none of its vehicle types resolve to an active tariff. Assign a plan to it, or give its operator an active default plan.`,
+    )
+  }
+}
+
 // An operator-less facility has no owning operator to draw ADMIN members from, so there
 // is no operator scope to authorize a manager assignment against. Distinct from
 // FacilityNotFoundError: the resource exists, it just cannot have managers yet.

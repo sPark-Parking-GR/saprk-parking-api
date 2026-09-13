@@ -13,6 +13,7 @@ import {
   FacilityDeactivationFailedError,
   FacilityFieldForbiddenError,
   FacilityHasActiveBookingsError,
+  FacilityHasNoTariffError,
   FacilityKindChangeBlockedError,
   FacilityNotBookableError,
   FacilityNotFoundError,
@@ -24,7 +25,7 @@ import type { InventoryService } from '../inventory/inventory.service'
 import type { LifecycleService } from '../lifecycle/lifecycle.service'
 import type { PrismaService } from '../prisma/prisma.service'
 import type { EntitlementService } from '../subscriptions/entitlement.service'
-import type { TariffService } from '../tariff/tariff.service'
+import { TariffService } from '../tariff/tariff.service'
 import type { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
 import {
   bulkFacilitySchema,
@@ -236,10 +237,23 @@ describe('FacilitiesService admin writes', () => {
     entitlements = { assertCanCreateFacility: jest.fn().mockResolvedValue(undefined) }
     access = accessStub()
     lifecycle = { archiveFacility: jest.fn().mockResolvedValue(undefined) }
+    // The REAL TariffService, for the same reason the scope service is real: the publish
+    // precondition asks it whether a facility resolves to an applicable plan, and a stubbed
+    // yes/no would let the resolution rules these tests claim to cover drift away from the
+    // ones checkout runs. Only its prisma dependency is reached on that path.
+    const tariff = new TariffService(
+      prisma as unknown as PrismaService,
+      scope,
+      entitlements as unknown as EntitlementService,
+      lifecycle as unknown as LifecycleService,
+      {} as never,
+      quotaThresholdStub() as unknown as QuotaThresholdService,
+      access as unknown as OperatorAccessService,
+    )
     service = new FacilitiesService(
       prisma as unknown as PrismaService,
       inventory as unknown as InventoryService,
-      {} as unknown as TariffService,
+      tariff,
       scope,
       bookings as unknown as BookingService,
       entitlements as unknown as EntitlementService,
@@ -1430,6 +1444,182 @@ describe('FacilitiesService admin writes', () => {
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['a'] }, ...managed(['op1'], operatorUser.id) },
       data: { isPublished: false },
+    })
+  })
+
+  /**
+   * The precondition behind "deploy"/"publish": a BUSINESS facility must already resolve to
+   * a currently-applicable plan, or it would list publicly and refuse every booking.
+   */
+  describe('publish requires a facility that can actually be priced', () => {
+    const plan = (over: Record<string, unknown> = {}) => ({
+      id: 'plan1',
+      operatorId: 'op1',
+      isActive: true,
+      isDefault: false,
+      lifecycleStatus: 'ACTIVE',
+      validFrom: null,
+      validTo: null,
+      vehicleTypes: [],
+      ...over,
+    })
+
+    // The check reads facilities twice in a fixed order — once for the scoped BUSINESS ids,
+    // then once inside TariffService for their assignments — and both land on the same mock.
+    // The helper applies the kind predicate the first query carries in its `where`, so a
+    // non-BUSINESS row is invisible to the precondition here exactly as it is in Postgres.
+    function givenPublishTargets(
+      rows: Record<string, unknown>[],
+      operatorDefaults: unknown[] = [],
+    ) {
+      const business = rows.filter((r) => r.kind === 'BUSINESS')
+      prisma.facility.findMany
+        .mockResolvedValueOnce(business.map((r) => ({ id: r.id })))
+        .mockResolvedValueOnce(business)
+      prisma.tariffPlan.findMany.mockResolvedValue(operatorDefaults)
+    }
+
+    const businessRow = (over: Record<string, unknown> = {}) => ({
+      id: 'a',
+      kind: 'BUSINESS',
+      operatorId: 'op1',
+      vehicleTypes: ['CAR'],
+      tariffAssignments: [],
+      ...over,
+    })
+
+    beforeEach(() => {
+      setScope({ kind: 'operator', operatorIds: ['op1'] })
+      prisma.facility.updateMany.mockResolvedValue({ count: 1 })
+    })
+
+    it('deploys a BUSINESS facility covered by its own vehicle-type assignment', async () => {
+      givenPublishTargets([
+        businessRow({ tariffAssignments: [{ vehicleType: 'CAR', tariffPlan: plan() }] }),
+      ])
+
+      const res = await service.bulkUpdate(operatorUser, { ids: ['a'], action: 'deploy' })
+
+      expect(res).toEqual({ affected: 1 })
+      expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a'] }, ...managed(['op1'], operatorUser.id) },
+        data: { isActive: true, isPublished: true },
+      })
+    })
+
+    it('publishes a BUSINESS facility with no assignment but an active operator default', async () => {
+      givenPublishTargets([businessRow()], [plan({ isDefault: true })])
+
+      const res = await service.bulkUpdate(operatorUser, { ids: ['a'], action: 'publish' })
+
+      expect(res).toEqual({ affected: 1 })
+      expect(prisma.facility.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a'] }, ...managed(['op1'], operatorUser.id) },
+        data: { isPublished: true },
+      })
+    })
+
+    it('refuses the batch and writes nothing when a BUSINESS facility has no coverage', async () => {
+      givenPublishTargets([businessRow()])
+
+      await expect(
+        service.bulkUpdate(operatorUser, { ids: ['a'], action: 'deploy' }),
+      ).rejects.toBeInstanceOf(FacilityHasNoTariffError)
+
+      expect(prisma.facility.updateMany).not.toHaveBeenCalled()
+      expect(prisma.auditLog.create).not.toHaveBeenCalled()
+    })
+
+    // The whole selection is refused, not narrowed: a covered facility does not carry an
+    // uncovered one past the check.
+    it('refuses the whole batch when only one of several facilities is uncovered', async () => {
+      givenPublishTargets([
+        businessRow({ tariffAssignments: [{ vehicleType: 'CAR', tariffPlan: plan() }] }),
+        businessRow({ id: 'b' }),
+      ])
+
+      await expect(
+        service.bulkUpdate(operatorUser, { ids: ['a', 'b'], action: 'deploy' }),
+      ).rejects.toThrow(/Facility b cannot be published/)
+
+      expect(prisma.facility.updateMany).not.toHaveBeenCalled()
+    })
+
+    // Nothing is ever priced at a non-BUSINESS facility, so requiring a tariff before
+    // publishing one would gate it on a plan it is forbidden to hold.
+    it.each(['FREE_PUBLIC', 'RESTRICTED'])(
+      'deploys a %s facility with zero tariff coverage',
+      async (kind) => {
+        givenPublishTargets([businessRow({ kind })])
+
+        const res = await service.bulkUpdate(operatorUser, { ids: ['a'], action: 'deploy' })
+
+        expect(res).toEqual({ affected: 1 })
+        expect(prisma.facility.findMany.mock.calls[0]![0].where).toEqual({
+          id: { in: ['a'] },
+          ...managed(['op1'], operatorUser.id),
+          kind: 'BUSINESS',
+        })
+      },
+    )
+
+    // The trigger is the payload's isPublished, not the action name, so an action that never
+    // makes a facility publicly visible does not even ask the question.
+    it.each<BulkFacilityDto>([
+      { action: 'enable', ids: ['a'] },
+      { action: 'unpublish', ids: ['a'] },
+    ])('$action is unaffected on a facility with zero coverage', async (dto) => {
+      const res = await service.bulkUpdate(operatorUser, dto)
+
+      expect(res).toEqual({ affected: 1 })
+      expect(prisma.facility.findMany).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['an assignment whose plan expired', { validTo: new Date('2020-01-01T00:00:00Z') }],
+      ['an assignment whose plan is deactivated', { isActive: false }],
+      ['an assignment whose plan was archived', { lifecycleStatus: 'ARCHIVED' }],
+      [
+        'an assignment whose plan does not price the facility’s vehicle type',
+        { vehicleTypes: ['MOTORCYCLE'] },
+      ],
+    ])('rejects deploy on %s', async (_label, over) => {
+      givenPublishTargets([
+        businessRow({ tariffAssignments: [{ vehicleType: 'CAR', tariffPlan: plan(over) }] }),
+      ])
+
+      await expect(
+        service.bulkUpdate(operatorUser, { ids: ['a'], action: 'deploy' }),
+      ).rejects.toBeInstanceOf(FacilityHasNoTariffError)
+
+      expect(prisma.facility.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('rejects deploy when the only operator default is expired', async () => {
+      givenPublishTargets(
+        [businessRow()],
+        [plan({ isDefault: true, validTo: new Date('2020-01-01T00:00:00Z') })],
+      )
+
+      await expect(
+        service.bulkUpdate(operatorUser, { ids: ['a'], action: 'deploy' }),
+      ).rejects.toBeInstanceOf(FacilityHasNoTariffError)
+
+      expect(prisma.facility.updateMany).not.toHaveBeenCalled()
+    })
+
+    // An operator-less facility has no default to fall back on, so its own assignment is the
+    // only thing that can cover it.
+    it('rejects deploy on an operator-less facility with no assignment of its own', async () => {
+      setScope({ kind: 'platform' })
+      givenPublishTargets([businessRow({ operatorId: null })], [plan({ isDefault: true })])
+
+      await expect(
+        service.bulkUpdate(platformUser, { ids: ['a'], action: 'deploy' }),
+      ).rejects.toBeInstanceOf(FacilityHasNoTariffError)
+
+      expect(prisma.tariffPlan.findMany).not.toHaveBeenCalled()
+      expect(prisma.facility.updateMany).not.toHaveBeenCalled()
     })
   })
 

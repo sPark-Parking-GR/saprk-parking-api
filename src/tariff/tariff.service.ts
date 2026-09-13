@@ -323,6 +323,63 @@ export class TariffService {
     return totals
   }
 
+  /**
+   * Which of these facilities could be priced AT ALL right now: for at least one of the
+   * facility's own `vehicleTypes`, computeQuote's resolution (the facility's assignment for
+   * that type, else its operator's active default) lands on a plan that `isPlanApplicable`
+   * accepts at `at`. Two queries, defaults batched by operator, same shape as
+   * computeTotalsByFacility — a bulk caller must not pay a query per facility.
+   *
+   * This lives here, not in the caller, because the resolution order and the applicability
+   * rules are the pricing path's to define; a second copy of them would be free to drift
+   * and let a facility pass a publish check that checkout then refuses.
+   *
+   * Schedules are deliberately not compiled or priced: the question is whether a rate
+   * schedule EXISTS and applies, not whether a particular stay prices cleanly. And no kind
+   * gate — the caller decides which facilities are supposed to be priceable at all, since
+   * a non-BUSINESS facility is never priced and must not be judged by this answer.
+   */
+  async facilitiesWithApplicablePlan(facilityIds: string[], at: Date): Promise<Set<string>> {
+    if (facilityIds.length === 0) return new Set()
+
+    const facilities = await this.prisma.facility.findMany({
+      where: { id: { in: facilityIds } },
+      select: {
+        id: true,
+        operatorId: true,
+        vehicleTypes: true,
+        tariffAssignments: { select: { vehicleType: true, tariffPlan: true } },
+      },
+    })
+
+    // Operator-less facilities have no operator to resolve a default plan from, so only
+    // their own explicit per-vehicle-type assignments can cover them.
+    const operatorIds = [
+      ...new Set(facilities.map((f) => f.operatorId).filter((id): id is string => id !== null)),
+    ]
+    const defaults = operatorIds.length
+      ? await this.prisma.tariffPlan.findMany({
+          where: { operatorId: { in: operatorIds }, isDefault: true, isActive: true },
+        })
+      : []
+    const defaultsByOperator = new Map(defaults.map((d) => [d.operatorId, d]))
+
+    const covered = new Set<string>()
+    for (const facility of facilities) {
+      const assigned = new Map(facility.tariffAssignments.map((a) => [a.vehicleType, a.tariffPlan]))
+      const operatorDefault =
+        facility.operatorId !== null ? defaultsByOperator.get(facility.operatorId) : undefined
+
+      const anyApplicable = facility.vehicleTypes.some((vehicleType) => {
+        const plan = assigned.get(vehicleType) ?? operatorDefault
+        return plan !== undefined && isPlanApplicable(plan, at, vehicleType)
+      })
+      if (anyApplicable) covered.add(facility.id)
+    }
+
+    return covered
+  }
+
   async listPlans(
     user: AuthUser,
     query: ListTariffPlansDto,

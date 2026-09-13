@@ -8,6 +8,7 @@ import {
   FacilityDeactivationFailedError,
   FacilityHasActiveBookingsError,
   FacilityHasNoOperatorError,
+  FacilityHasNoTariffError,
   FacilityKindChangeBlockedError,
   FacilityNotBookableError,
 } from '../errors/domain.errors'
@@ -89,6 +90,14 @@ describe('DomainExceptionFilter', () => {
     const { host, reply } = makeHost()
 
     filter.catch(new FacilityKindChangeBlockedError('f1', 'FREE_PUBLIC', 2), host)
+
+    expect(reply.status).toHaveBeenCalledWith(HttpStatus.CONFLICT)
+  })
+
+  it('maps FacilityHasNoTariffError to 409 — a publish precondition, not a bad request', () => {
+    const { host, reply } = makeHost()
+
+    filter.catch(new FacilityHasNoTariffError('f1'), host)
 
     expect(reply.status).toHaveBeenCalledWith(HttpStatus.CONFLICT)
   })

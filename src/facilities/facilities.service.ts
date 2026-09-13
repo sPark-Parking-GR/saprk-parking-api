@@ -23,6 +23,7 @@ import {
   FacilityDeactivationFailedError,
   FacilityFieldForbiddenError,
   FacilityHasActiveBookingsError,
+  FacilityHasNoTariffError,
   FacilityKindChangeBlockedError,
   FacilityNotBookableError,
   FacilityNotFoundError,
@@ -1299,6 +1300,8 @@ export class FacilitiesService {
     // passing foreign ids simply updates none of them.
     const where: Prisma.FacilityWhereInput = { id: { in: ids }, ...scopeWhere }
 
+    if (data.isPublished === true) await this.assertPublishable(where)
+
     const affected = await this.prisma.$transaction(async (tx) => {
       const result = await tx.facility.updateMany({ where, data })
       await tx.auditLog.create({
@@ -1314,6 +1317,37 @@ export class FacilitiesService {
     })
 
     return { affected }
+  }
+
+  /**
+   * Publishing is what makes a facility appear in public listings, so a BUSINESS facility
+   * that resolves to no currently-applicable plan must not get there: it would list as
+   * live and then refuse every booking with NoApplicableTariffError. Asking the pricing
+   * path itself (facilitiesWithApplicablePlan) rather than re-deriving the resolution here
+   * is what keeps the two answers from disagreeing.
+   *
+   * Refused whole rather than quietly narrowed, unlike out-of-scope ids. Those are dropped
+   * because the caller is not entitled to learn the facility exists; these are facilities
+   * the caller demonstrably manages, and the single-facility publish toggle routes through
+   * this same bulk call — a toggle that silently reports success while the facility stayed
+   * unpublished is the one outcome nobody can debug. Same reasoning as the cross-tenant and
+   * non-bookable refusals in bulkAssignTariff.
+   *
+   * Non-BUSINESS kinds are exempt, not merely unchecked: nothing is ever priced at one, so
+   * demanding a tariff before publishing it would gate a facility on a plan it must not
+   * have in the first place.
+   */
+  private async assertPublishable(where: Prisma.FacilityWhereInput): Promise<void> {
+    const scoped = await this.prisma.facility.findMany({
+      where: { ...where, kind: FacilityKind.BUSINESS },
+      select: { id: true },
+    })
+    if (scoped.length === 0) return
+
+    const ids = scoped.map((f) => f.id)
+    const covered = await this.tariff.facilitiesWithApplicablePlan(ids, new Date())
+    const uncovered = ids.find((id) => !covered.has(id))
+    if (uncovered) throw new FacilityHasNoTariffError(uncovered)
   }
 
   // disable/delete are absent by design: they route through bulkDeactivate, which has to
