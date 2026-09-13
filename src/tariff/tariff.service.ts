@@ -276,8 +276,11 @@ export class TariffService {
   ): Promise<Map<string, number>> {
     if (facilityIds.length === 0 || endsAt <= startsAt) return new Map()
 
+    // Same kind gate as computeQuote. Without it a preview publishes a rate schedule for
+    // something that is not for sale, and puts a price on the map that checkout then
+    // refuses — the two paths must agree on what is priceable, not only on how.
     const facilities = await this.prisma.facility.findMany({
-      where: { id: { in: facilityIds } },
+      where: { id: { in: facilityIds }, kind: FacilityKind.BUSINESS },
       select: {
         id: true,
         operatorId: true,

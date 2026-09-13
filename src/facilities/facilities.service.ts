@@ -24,6 +24,7 @@ import {
   FacilityFieldForbiddenError,
   FacilityHasActiveBookingsError,
   FacilityKindChangeBlockedError,
+  FacilityNotBookableError,
   FacilityNotFoundError,
   TariffAssignmentMismatchError,
   TariffPlanNotFoundError,
@@ -520,9 +521,18 @@ export class FacilitiesService {
 
     const facility = await this.prisma.facility.findFirst({
       where: { id: facilityId, ...this.operatorScope.facilityScopeWhere(scope, user) },
-      select: { id: true, operatorId: true },
+      select: { id: true, operatorId: true, kind: true },
     })
     if (!facility) throw new FacilityNotFoundError(facilityId)
+
+    // Nothing can be sold at a non-BUSINESS facility — computeQuote and holdSlot both
+    // refuse that kind — so a plan attached to one is a rate schedule published for
+    // something not for sale, and it would come back to life the moment the facility
+    // returned to BUSINESS. Clearing is deliberately exempt: a row left over from an
+    // earlier kind must be removable whatever the facility is today.
+    if (tariffPlanId !== null && facility.kind !== FacilityKind.BUSINESS) {
+      throw new FacilityNotBookableError(facilityId)
+    }
 
     if (tariffPlanId !== null) {
       const plan = await this.prisma.tariffPlan.findFirst({
@@ -1220,7 +1230,7 @@ export class FacilitiesService {
       // Only in-scope facilities count as affected; ownership rides on the facility filter.
       const scoped = await tx.facility.findMany({
         where: { id: { in: ids }, ...scopeWhere },
-        select: { id: true, operatorId: true },
+        select: { id: true, operatorId: true, kind: true },
       })
 
       // Same cross-tenant rule as the single-facility path. A foreign facility is silently
@@ -1231,6 +1241,14 @@ export class FacilitiesService {
         throw new TariffAssignmentMismatchError(
           'the plan and the facility belong to different operators',
         )
+      }
+
+      // And the same non-bookable rule, refused the same way rather than quietly narrowing
+      // the selection: the caller asked to price facilities that cannot be sold, so they
+      // need to hear it. An all-clear batch has nothing to price and stays allowed.
+      if (planIds.length > 0) {
+        const notBookable = scoped.find((f) => f.kind !== FacilityKind.BUSINESS)
+        if (notBookable) throw new FacilityNotBookableError(notBookable.id)
       }
 
       const scopedIds = scoped.map((f) => f.id)

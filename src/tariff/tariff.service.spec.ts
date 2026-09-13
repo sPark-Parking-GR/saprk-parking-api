@@ -1,4 +1,4 @@
-import { LifecycleStatus, RateUnit, CapScope, type VehicleType } from '@prisma/client'
+import { FacilityKind, LifecycleStatus, RateUnit, CapScope, type VehicleType } from '@prisma/client'
 import { TariffService } from './tariff.service'
 import { priceStay } from './pricing-engine'
 import type { CompiledPlan, CompiledCap } from './tariff.types'
@@ -695,8 +695,25 @@ describe('TariffService.computeTotalsByFacility', () => {
     prisma.facility.findMany.mockResolvedValue([])
     await service.computeTotalsByFacility(['f1'], startsAt, endsAt, CAR)
     const call = prisma.facility.findMany.mock.calls[0][0]
-    expect(call.where).toEqual({ id: { in: ['f1'] } })
+    expect(call.where).toEqual({ id: { in: ['f1'] }, kind: FacilityKind.BUSINESS })
     expect(call.select.tariffAssignments.where).toEqual({ vehicleType: CAR })
+  })
+
+  // The gate is in the query, so the mock filters the way Postgres would: a FREE_PUBLIC
+  // facility carrying a perfectly usable plan is never even a candidate to price.
+  it('omits a non-BUSINESS facility that has an applicable plan', async () => {
+    const rows = [
+      { ...facilityWithPlan('f1', dbPlan(400)), kind: FacilityKind.BUSINESS },
+      { ...facilityWithPlan('f2', dbPlan(750)), kind: FacilityKind.FREE_PUBLIC },
+    ]
+    prisma.facility.findMany.mockImplementation((args: { where: { kind: FacilityKind } }) =>
+      Promise.resolve(rows.filter((r) => r.kind === args.where.kind)),
+    )
+
+    const totals = await service.computeTotalsByFacility(['f1', 'f2'], startsAt, endsAt, CAR)
+
+    expect(totals.get('f1')).toBe(800)
+    expect(totals.has('f2')).toBe(false)
   })
 
   it('falls back to the operator default when there is no explicit row', async () => {
