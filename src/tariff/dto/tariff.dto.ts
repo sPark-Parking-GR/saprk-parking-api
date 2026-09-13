@@ -1,6 +1,7 @@
 import { CapScope, RateUnit, VehicleType } from '@prisma/client'
 import { DateTime } from 'luxon'
 import { z } from 'zod'
+import { ISO_4217_CODE_SET } from './iso-4217'
 
 const lowercaseVehicle = z.enum(['car', 'motorcycle', 'van', 'truck'])
 const lowercaseUnit = z.enum(['per_minute', 'per_block', 'flat'])
@@ -68,7 +69,9 @@ const draftRateSchema = z.object({
   tierKey: z.string(),
   windowKey: z.string(),
   priceCents: z.number().int().min(0).max(MAX_PRICE_CENTS),
-  currency: z.string().length(3),
+  currency: z.string().refine((code) => ISO_4217_CODE_SET.has(code), {
+    message: 'currency must be an active ISO 4217 alphabetic code',
+  }),
 })
 
 const draftCapSchema = z.object({
