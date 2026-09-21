@@ -1412,7 +1412,7 @@ describe('FacilitiesService admin writes', () => {
 
       expect(prisma.facility.updateMany).toHaveBeenCalledWith({
         where: { id: { in: ['a', 'b'] } },
-        data: { isPublished: true },
+        data: { isActive: true, isPublished: true },
       })
     })
   })
@@ -1426,7 +1426,7 @@ describe('FacilitiesService admin writes', () => {
     expect(res).toEqual({ affected: 2 })
     expect(prisma.facility.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['a', 'b'] }, ...managed(['op1'], operatorUser.id) },
-      data: { isPublished: true },
+      data: { isActive: true, isPublished: true },
     })
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1515,7 +1515,7 @@ describe('FacilitiesService admin writes', () => {
       expect(res).toEqual({ affected: 1 })
       expect(prisma.facility.updateMany).toHaveBeenCalledWith({
         where: { id: { in: ['a'] }, ...managed(['op1'], operatorUser.id) },
-        data: { isPublished: true },
+        data: { isActive: true, isPublished: true },
       })
     })
 

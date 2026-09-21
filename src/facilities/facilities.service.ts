@@ -1357,11 +1357,14 @@ export class FacilitiesService {
   ): Prisma.FacilityUpdateManyMutationInput {
     switch (action) {
       case 'deploy':
+      case 'publish':
+        // Publishing must actually put the facility in front of the mobile app, not just
+        // flip the visibility flag: `live` (see FacilitiesManager) is isActive && isPublished,
+        // so a publish that left isActive untouched could report success while the facility
+        // stayed invisible. Same pair PublishFacilityToggle's "on" state already sets.
         return { isActive: true, isPublished: true }
       case 'enable':
         return { isActive: true }
-      case 'publish':
-        return { isPublished: true }
       case 'unpublish':
         return { isPublished: false }
     }
