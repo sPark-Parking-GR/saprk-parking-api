@@ -3,11 +3,17 @@ import { HTTP_CODE_METADATA } from '@nestjs/common/constants'
 // and hard-coding the strings would let a rename pass silently.
 import { THROTTLER_LIMIT, THROTTLER_TTL } from '@nestjs/throttler/dist/throttler.constants'
 import { UnauthorizedException } from '@nestjs/common'
+import { InvalidCredentialsError } from '@spark/auth'
 import type { AccountDeletionService } from './account-deletion.service'
 import { AuthController } from './auth.controller'
 import type { AuthService } from './auth.service'
 import { InvalidResetTokenError } from './auth.types'
-import { deleteAccountSchema, forgotPasswordSchema, resetPasswordSchema } from './dto/auth.dto'
+import {
+  deleteAccountSchema,
+  forgotPasswordSchema,
+  requestPasswordChangeSchema,
+  resetPasswordSchema,
+} from './dto/auth.dto'
 import type { PasswordResetService } from './password-reset.service'
 import { IS_PUBLIC_KEY } from './decorators/public.decorator'
 import { ROLES_KEY } from './decorators/roles.decorator'
@@ -96,6 +102,89 @@ describe('AuthController password reset endpoints', () => {
       expect(resetPasswordSchema.safeParse({ token: '', password: 'brand-new-pw' }).success).toBe(
         false,
       )
+    })
+  })
+})
+
+describe('AuthController change-password endpoint', () => {
+  const handler = AuthController.prototype.changePassword
+
+  let passwordReset: { requestChange: jest.Mock }
+  let controller: AuthController
+
+  const user = {
+    id: 'u1',
+    email: 'admin@centralpark.gr',
+    role: 'operator_admin' as const,
+    emailVerified: true,
+  }
+
+  beforeEach(() => {
+    passwordReset = { requestChange: jest.fn().mockResolvedValue(undefined) }
+    controller = new AuthController(
+      {} as unknown as AuthService,
+      passwordReset as unknown as PasswordResetService,
+      {} as unknown as AccountDeletionService,
+    )
+  })
+
+  // The sibling of forgot-password that must NOT be public: the account whose password is
+  // being changed is whoever the guard resolved, and nothing in the body names a user.
+  it('is not public', () => {
+    expect(Reflect.getMetadata(IS_PUBLIC_KEY, handler)).toBeUndefined()
+  })
+
+  // Every role may change their own password; the service branches on nothing.
+  it('carries no role restriction', () => {
+    expect(Reflect.getMetadata(ROLES_KEY, handler)).toBeUndefined()
+  })
+
+  // 204 and no body: the grant leaves the system only through the email.
+  it('answers 204 with no body', () => {
+    expect(Reflect.getMetadata(HTTP_CODE_METADATA, handler)).toBe(204)
+  })
+
+  // A wrong current password here is an authentication attempt, and every correct one
+  // sends mail — throttled like delete-account and forgot-password rather than like /me.
+  it('throttles as hard as the other credential endpoints', () => {
+    expect(Reflect.getMetadata(THROTTLER_LIMIT + 'default', handler)).toBe(3)
+    expect(Reflect.getMetadata(THROTTLER_TTL + 'default', handler)).toBe(60_000)
+  })
+
+  it('passes the resolved caller and the current password to the service', async () => {
+    await expect(
+      controller.changePassword(user, { currentPassword: 'correct-horse' }),
+    ).resolves.toBeUndefined()
+
+    expect(passwordReset.requestChange).toHaveBeenCalledWith(user, 'correct-horse')
+  })
+
+  // Mapped to 401 by DomainExceptionFilter; the controller must not soften it into a 204
+  // that tells the caller a link is on its way when none is.
+  it('propagates a rejected current password', async () => {
+    passwordReset.requestChange.mockRejectedValue(new InvalidCredentialsError())
+
+    await expect(
+      controller.changePassword(user, { currentPassword: 'wrong' }),
+    ).rejects.toBeInstanceOf(InvalidCredentialsError)
+  })
+
+  describe('input validation', () => {
+    // Looser than resetPasswordSchema on purpose: this is the password the account already
+    // has, which may predate the current policy. The NEW one is validated on the emailed
+    // link, by resetPasswordSchema, and never travels through this endpoint at all.
+    it('accepts any non-empty current password and rejects an empty one', () => {
+      expect(requestPasswordChangeSchema.safeParse({ currentPassword: 'x' }).success).toBe(true)
+      expect(requestPasswordChangeSchema.safeParse({ currentPassword: '' }).success).toBe(false)
+      expect(requestPasswordChangeSchema.safeParse({}).success).toBe(false)
+    })
+
+    it('has no field for a new password', () => {
+      const parsed = requestPasswordChangeSchema.parse({
+        currentPassword: 'x',
+        password: 'smuggled-in',
+      })
+      expect(parsed).toEqual({ currentPassword: 'x' })
     })
   })
 })

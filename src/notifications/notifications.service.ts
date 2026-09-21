@@ -251,6 +251,24 @@ export class NotificationsService {
     )
   }
 
+  // The second factor of the signed-in change-password flow: the caller already proved
+  // they know the current password, and this link proves they still hold the mailbox.
+  // Same safeSend as its sibling, but the caller awaits it — there is no address to keep
+  // secret from an authenticated user asking about their own account, so a failure here
+  // costs them a retry and shows up in the logs rather than being raced past.
+  async sendPasswordChange(data: { to: string; resetLink: string }): Promise<void> {
+    await this.safeSend(
+      () =>
+        this.emailContext.send({
+          to: data.to,
+          subject: 'Confirm your sPark password change',
+          template: 'password-change',
+          data: { resetLink: data.resetLink },
+        }),
+      'password change',
+    )
+  }
+
   private async safeSend(
     fn: () => Promise<void>,
     kind: string,

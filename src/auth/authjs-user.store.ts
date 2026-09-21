@@ -12,7 +12,10 @@ export const TO_PRISMA: Record<ContractRole, UserRole> = {
   super_admin: UserRole.SUPER_ADMIN,
 }
 
-const FROM_PRISMA: Record<UserRole, ContractRole> = {
+// Exported for callers that read a role straight out of Prisma and have to record it
+// somewhere the contract vocabulary is expected — the audit log's actorRole, whose every
+// other writer takes the role off a verified token and so writes 'user', not 'USER'.
+export const FROM_PRISMA: Record<UserRole, ContractRole> = {
   [UserRole.USER]: 'user',
   [UserRole.OPERATOR_STAFF]: 'operator_staff',
   [UserRole.OPERATOR_ADMIN]: 'operator_admin',

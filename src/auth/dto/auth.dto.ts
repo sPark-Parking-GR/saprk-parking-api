@@ -68,3 +68,16 @@ export const deleteAccountSchema = z.object({
 })
 
 export type DeleteAccountDto = z.infer<typeof deleteAccountSchema>
+
+// Step one of the change-password flow, and the only part of it that travels in a request
+// body. The NEW password is never sent here — it is set later, on the emailed link, through
+// resetPasswordSchema — so this carries exactly one thing: proof the caller knows the
+// password they already have. Bounded like deleteAccountSchema rather than signUpSchema for
+// the same reason: an account hashed under an older policy must still be able to spell its
+// own password, and applying the new-password floor to an existing one would lock it out of
+// the very flow that would fix it.
+export const requestPasswordChangeSchema = z.object({
+  currentPassword: z.string().min(1),
+})
+
+export type RequestPasswordChangeDto = z.infer<typeof requestPasswordChangeSchema>

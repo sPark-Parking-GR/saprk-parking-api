@@ -55,6 +55,16 @@ enum OperatorInviteKind {
   MEMBER
 }
 
+// Which flow minted a PasswordResetToken. The grant itself, its lifetime and the endpoint
+// that consumes it are identical either way — this exists so the completion can be audited
+// as the thing the user actually did. A locked-out person proving they own the mailbox is
+// not the same event as a signed-in person who already proved they know the current
+// password, and after the fact the audit log is the only place that distinction survives.
+enum PasswordResetOrigin {
+  FORGOT_PASSWORD
+  CHANGE_PASSWORD
+}
+
 enum RateUnit {
   PER_MINUTE
   PER_BLOCK
@@ -239,13 +249,19 @@ model User {
 // stored, so a database leak yields nothing usable: the raw token exists solely inside the
 // email that was sent. Issued for both authjs- and Firebase-backed accounts — the reset is
 // completed by this API in either case, which is what lets it bump User.sessionsValidFrom.
+//
+// Shared by the logged-out forgot-password flow and the signed-in change-password one
+// rather than duplicated per flow: both need exactly the same single-use, expiring,
+// hashed-at-rest grant, and a second table would be the same columns with a second set of
+// consume/invalidate races to get right. `origin` is what tells them apart.
 model PasswordResetToken {
-  id        String    @id @default(cuid())
+  id        String              @id @default(cuid())
   userId    String
-  tokenHash String    @unique
+  tokenHash String              @unique
+  origin    PasswordResetOrigin @default(FORGOT_PASSWORD)
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime  @default(now())
+  createdAt DateTime            @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

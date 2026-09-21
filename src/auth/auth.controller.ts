@@ -19,6 +19,7 @@ import {
   deleteAccountSchema,
   forgotPasswordSchema,
   refreshSchema,
+  requestPasswordChangeSchema,
   resetPasswordSchema,
   signInSchema,
   signUpSchema,
@@ -26,6 +27,7 @@ import {
   type DeleteAccountDto,
   type ForgotPasswordDto,
   type RefreshDto,
+  type RequestPasswordChangeDto,
   type ResetPasswordDto,
   type SignInDto,
   type UpdateProfileDto,
@@ -87,6 +89,23 @@ export class AuthController {
     @Body(new ZodValidationPipe(forgotPasswordSchema)) body: ForgotPasswordDto,
   ): Promise<void> {
     await this.passwordReset.request(body.email)
+  }
+
+  // The signed-in half of forgot-password, and deliberately NOT @Public: the account whose
+  // password is being changed is always the caller's own, resolved from the verified token,
+  // so there is no id in the body for anyone to point elsewhere. 204 and no body because
+  // the grant it mints leaves the system only through the email — the response says nothing
+  // beyond "the current password was right", which the 401 already says in the negative.
+  // Throttled to the same 3/min as delete-account: a wrong password here is an
+  // authentication attempt like any other, and each correct one sends mail.
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @HttpCode(204)
+  @Post('change-password')
+  async changePassword(
+    @CurrentUser() user: AuthUser,
+    @Body(new ZodValidationPipe(requestPasswordChangeSchema)) body: RequestPasswordChangeDto,
+  ): Promise<void> {
+    await this.passwordReset.requestChange(user, body.currentPassword)
   }
 
   @Public()
