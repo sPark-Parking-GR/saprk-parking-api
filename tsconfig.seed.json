@@ -9,5 +9,6 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["prisma/**/*"]
+  "include": ["prisma/**/*", "src/scripts/**/*"],
+  "exclude": ["src/scripts/**/*.spec.ts"]
 }

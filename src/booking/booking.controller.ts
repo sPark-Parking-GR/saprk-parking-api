@@ -5,33 +5,95 @@ import {
   Delete,
   Get,
   Headers,
+  HttpCode,
   Param,
   Post,
+  Query,
 } from '@nestjs/common'
-import type { AuthUser } from '@parqin/types'
+import { Throttle } from '@nestjs/throttler'
+import type { AuthUser, UserRole } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
-import { Public } from '../auth/decorators/public.decorator'
+import { RequireOrgPermission } from '../auth/decorators/require-org-permission.decorator'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
 import { BookingService } from './booking.service'
-import { createBookingSchema, type CreateBookingDto } from './dto/booking.dto'
+import { TicketService } from './ticket.service'
+import {
+  createBookingSchema,
+  listBookingsSchema,
+  listMyBookingsSchema,
+  verifyTicketSchema,
+  type CreateBookingDto,
+  type ListBookingsDto,
+  type ListMyBookingsDto,
+  type VerifyTicketDto,
+} from './dto/booking.dto'
+
+// Controller-layer gate for the owner-or-staff endpoints. Every booking belongs to an
+// account, so these are closed to anonymous callers; the ownership predicate itself needs
+// a database read and lives in the service.
+const BOOKING_ACTOR_ROLES: UserRole[] = [
+  'user',
+  'operator_staff',
+  'operator_admin',
+  'platform_admin',
+  'super_admin',
+]
 
 @Controller('bookings')
 export class BookingController {
-  constructor(private readonly bookings: BookingService) {}
+  constructor(
+    private readonly bookings: BookingService,
+    private readonly tickets: TicketService,
+  ) {}
 
-  @Public()
+  // Declared before ':id' so the literal route can never be shadowed by a booking id.
+  @Roles(...BOOKING_ACTOR_ROLES)
+  @Get('mine')
+  mine(
+    @Query(new ZodValidationPipe(listMyBookingsSchema)) query: ListMyBookingsDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.bookings.listMine(user, query)
+  }
+
+  /**
+   * Barrier scan. 20/min per caller is deliberately below every other operator route: a
+   * scanner running at a real gate needs a handful of calls a minute, while the endpoint
+   * takes a credential and answers with booking data, so anything faster is either a
+   * misconfigured client or someone grinding codes.
+   */
+  @Roles('operator_staff', 'operator_admin')
+  @RequireOrgPermission('org:scan.execute')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Post('verify-qr')
+  @HttpCode(200)
+  verifyTicket(
+    @Body(new ZodValidationPipe(verifyTicketSchema)) body: VerifyTicketDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.tickets.verify(user, body)
+  }
+
+  @Roles('operator_staff', 'operator_admin', 'platform_admin', 'super_admin')
+  @RequireOrgPermission('org:booking.read')
+  @Get()
+  list(
+    @Query(new ZodValidationPipe(listBookingsSchema)) query: ListBookingsDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.bookings.adminList(user, query)
+  }
+
+  @Roles(...BOOKING_ACTOR_ROLES)
   @Post()
   create(
     @Body(new ZodValidationPipe(createBookingSchema)) body: CreateBookingDto,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @CurrentUser() user?: AuthUser,
+    @CurrentUser() user: AuthUser,
   ) {
     if (!idempotencyKey) {
       throw new BadRequestException('Idempotency-Key header is required')
-    }
-    if (!user && !body.guestEmail) {
-      throw new BadRequestException('guestEmail is required for guest bookings')
     }
 
     return this.bookings.createBooking({
@@ -41,41 +103,50 @@ export class BookingController {
       vehicleType: body.vehicleType,
       vehiclePlate: body.vehiclePlate,
       vehicleId: body.vehicleId,
-      guestEmail: body.guestEmail,
-      guestPhone: body.guestPhone,
       sourceChannel: body.sourceChannel,
-      userId: user?.id,
+      userId: user.id,
       idempotencyKey,
     })
   }
 
-  @Public()
+  @Roles(...BOOKING_ACTOR_ROLES)
   @Post(':id/confirm')
-  confirm(@Param('id') id: string) {
-    return this.bookings.confirmBooking(id)
+  confirm(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.bookings.confirmBooking(id, user)
   }
 
-  @Public()
+  @Roles(...BOOKING_ACTOR_ROLES)
   @Get(':id')
-  get(@Param('id') id: string) {
-    return this.bookings.getBooking(id)
+  get(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.bookings.getBooking(id, user)
   }
 
-  @Public()
+  // The owner's rotating code. Cheap enough to poll while the ticket is on screen, which
+  // is what a code that rotates every minute requires.
+  @Roles(...BOOKING_ACTOR_ROLES)
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  @Get(':id/qr')
+  qr(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.tickets.issue(user, id)
+  }
+
+  @Roles(...BOOKING_ACTOR_ROLES)
   @Delete(':id')
-  cancel(@Param('id') id: string, @CurrentUser() user?: AuthUser) {
-    return this.bookings.cancelBooking(id, user?.id)
+  cancel(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.bookings.cancelBooking(id, user)
   }
 
   @Roles('operator_staff', 'operator_admin')
+  @RequireOrgPermission('org:scan.execute')
   @Post(':id/check-in')
   checkIn(@Param('id') id: string, @CurrentUser() user: AuthUser) {
-    return this.bookings.checkIn(id, user.id)
+    return this.bookings.checkIn(id, user)
   }
 
   @Roles('operator_staff', 'operator_admin')
+  @RequireOrgPermission('org:scan.execute')
   @Post(':id/check-out')
   checkOut(@Param('id') id: string, @CurrentUser() user: AuthUser) {
-    return this.bookings.checkOut(id, user.id)
+    return this.bookings.checkOut(id, user)
   }
 }

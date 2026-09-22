@@ -1,4 +1,5 @@
-import type { VehicleType } from '@prisma/client'
+import type { OpeningHours, VehicleType as ContractVehicleType } from '@spark/types'
+import type { FacilityKind, IngestSource, VehicleType } from '@prisma/client'
 
 export interface MapBounds {
   north: number
@@ -17,16 +18,136 @@ export interface FacilitySearchParams {
   startsAt: Date
   endsAt: Date
   vehicleType?: VehicleType
+  // The client's last-seen mode for this map session, used to apply hysteresis
+  // around SEARCH_RENDER_BUDGET rather than a bare threshold comparison.
+  preferMode?: 'points' | 'clusters'
 }
+
+export interface ResolvedTariffAssignment {
+  vehicleType: VehicleType
+  tariffPlanId: string | null
+  tariffPlanName: string | null
+  source: 'explicit' | 'default' | 'none'
+}
+
+export interface FacilityTariffAssignments {
+  assignments: ResolvedTariffAssignment[]
+  defaultPlan: { id: string; name: string } | null
+}
+
+export interface AdminFacility {
+  id: string
+  operatorId: string | null
+  kind: FacilityKind
+  name: string
+  address: string
+  lat: number
+  lng: number
+  totalCapacity: number
+  onlineQuota: number
+  bookedOnlineSpots: number
+  vehicleTypes: ContractVehicleType[]
+  heightRestrictionCm: number | null
+  openingHours: OpeningHours
+  amenities: string[]
+  cancellationPolicy: string
+  isActive: boolean
+  isPublished: boolean
+  rank: number
+  createdAt: Date
+  updatedAt: Date
+}
+
+export interface AdminFacilityListItem {
+  id: string
+  name: string
+  address: string
+  totalCapacity: number
+  onlineQuota: number
+  isActive: boolean
+  isPublished: boolean
+  kind: FacilityKind
+  source: IngestSource | null
+  operatorId: string | null
+  operatorName: string | null
+  createdAt: Date
+  updatedAt: Date
+}
+
+export interface AdminFacilityList {
+  items: AdminFacilityListItem[]
+  total: number
+  skip: number
+  take: number
+}
+
+export interface AdminMapPoint {
+  id: string
+  name: string
+  lat: number
+  lng: number
+  kind: FacilityKind
+  isActive: boolean
+  isPublished: boolean
+}
+
+export interface AdminMapParams {
+  bounds: MapBounds
+  q?: string
+  isActive?: boolean
+  isPublished?: boolean
+  kind?: FacilityKind
+  operatorId?: string
+}
+
+export interface AdminMapResponse {
+  mode: 'points' | 'clusters'
+  points: AdminMapPoint[]
+  clusters: FacilityCluster[]
+  total: number
+}
+
+export type BulkFacilityAction =
+  | 'enable'
+  | 'disable'
+  | 'deploy'
+  | 'publish'
+  | 'unpublish'
+  | 'delete'
+  | 'assignTariff'
+
+// One facility a bulk disable/delete deliberately left ACTIVE, with the numbers behind
+// the decision. `cancelled` is non-zero only for 'refund_failed' and 'archive_failed':
+// those bookings really were cancelled and refunded before a later step failed, and
+// pretending otherwise would hide money that has already moved. 'archive_failed' means
+// the refunds went through but the lifecycle transition itself was refused — a lost race
+// against a concurrent booking or archive.
+export interface BulkFacilitySkipped {
+  facilityId: string
+  reason: 'unhonoured_bookings' | 'refund_failed' | 'archive_failed'
+  unhonoured: number
+  cancelled: number
+}
+
+export interface BulkFacilityResult {
+  affected: number
+  skipped?: BulkFacilitySkipped[]
+}
+
+// NOT_OFFERED distinguishes a facility that sells no online capacity at all
+// (onlineQuota 0 — walk-in only) from one whose quota is genuinely exhausted (FULL).
+export type OnlineBookingStatus = 'NOT_OFFERED' | 'FULL' | 'OPEN'
 
 export interface FacilitySearchResult {
   id: string
   name: string
   address: string
+  kind: FacilityKind
   lat: number
   lng: number
   distanceMeters: number
   available: boolean
+  onlineBookingStatus: OnlineBookingStatus
   remainingSlots: number
   priceCents: number | null
   currency: string
@@ -34,4 +155,18 @@ export interface FacilitySearchResult {
   // Manual ranking priority; higher sorts first, 0 = unranked.
   rank: number
   thumbnailUrl: string | null
+}
+
+export interface FacilityCluster {
+  id: string
+  lat: number
+  lng: number
+  count: number
+}
+
+export interface FacilitySearchResponse {
+  mode: 'points' | 'clusters'
+  points: FacilitySearchResult[]
+  clusters: FacilityCluster[]
+  total: number
 }

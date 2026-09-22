@@ -1,0 +1,48 @@
+# dependencies
+node_modules
+.pnp
+.pnp.js
+
+# builds
+dist
+build
+.next
+.expo
+out
+
+# turbo
+.turbo
+
+# env
+.env
+.env.local
+.env.*.local
+.env.development
+.env.staging
+.env.production
+
+# secrets — never commit
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# testing
+coverage
+*.lcov
+
+# misc
+.DS_Store
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.vscode/settings.json
+
+# prisma
+prisma/migrations/dev.db
+*.db
+
+mockups
+
+**firebase**.json

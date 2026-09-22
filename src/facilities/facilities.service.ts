@@ -1,11 +1,200 @@
-import { Injectable } from '@nestjs/common'
-import { computeDistanceMeters } from '@parqin/maps'
-import { PromotionType } from '@prisma/client'
-import { FacilityNotFoundError } from '../common/errors/domain.errors'
+import { Injectable, Logger } from '@nestjs/common'
+import { computeDistanceMeters } from '@spark/maps'
+import type { OpeningHours, VehicleType as ContractVehicleType } from '@spark/types'
+import {
+  FacilityKind,
+  LifecycleStatus,
+  OperatorStatus,
+  Prisma,
+  PromotionType,
+  VehicleType,
+} from '@prisma/client'
+import type { AuthUser } from '@spark/types'
+import { unhonouredBookingsWhere } from '../booking/booking.predicates'
+import { BookingService } from '../booking/booking.service'
+import {
+  OperatorScopeService,
+  targetOperatorId,
+  type ManagedScopeWhere,
+  type OperatorScope,
+} from '../common/authz/operator-scope.service'
+import {
+  DomainError,
+  FacilityDeactivationFailedError,
+  FacilityFieldForbiddenError,
+  FacilityHasActiveBookingsError,
+  FacilityHasNoTariffError,
+  FacilityKindChangeBlockedError,
+  FacilityNotBookableError,
+  FacilityNotFoundError,
+  TariffAssignmentMismatchError,
+  TariffPlanNotFoundError,
+} from '../common/errors/domain.errors'
 import { InventoryService } from '../inventory/inventory.service'
+import { LifecycleService, type LifecycleActor } from '../lifecycle/lifecycle.service'
+import { initialManagerIds } from '../managers/initial-managers'
+import { OperatorNotVerifiedError } from '../operators/operators.types'
+import { OperatorAccessService } from '../operators/operator-access.service'
 import { PrismaService } from '../prisma/prisma.service'
-import { TariffService } from '../tariff/tariff.service'
-import type { FacilitySearchParams, FacilitySearchResult, MapBounds } from './facilities.types'
+import { EntitlementService } from '../subscriptions/entitlement.service'
+import { QuotaThresholdService } from '../subscriptions/quota-threshold.service'
+import { TariffService, assignmentMismatchReason } from '../tariff/tariff.service'
+import type {
+  BulkFacilityDto,
+  CreateFacilityDto,
+  ListFacilitiesDto,
+  UpdateFacilityDto,
+} from './dto/facility.dto'
+import { FacilityClusterIndexService } from './facility-cluster-index.service'
+import type {
+  AdminFacility,
+  AdminFacilityList,
+  AdminFacilityListItem,
+  AdminMapParams,
+  AdminMapPoint,
+  AdminMapResponse,
+  BulkFacilityAction,
+  BulkFacilityResult,
+  BulkFacilitySkipped,
+  FacilityCluster,
+  FacilitySearchParams,
+  FacilitySearchResponse,
+  FacilitySearchResult,
+  FacilityTariffAssignments,
+  MapBounds,
+  OnlineBookingStatus,
+  ResolvedTariffAssignment,
+} from './facilities.types'
+
+const MAX_POINTS = 250
+const CLUSTER_COLS = 12
+const CLUSTER_ROWS = 12
+
+// The mobile map's render budget: above this many facilities in view the response
+// switches to clusters. Fixed regardless of zoom or dataset size, and deliberately well
+// under the ~100 individual native markers at which the map was measured to stutter —
+// MAX_POINTS (250) was far past that, so a 100-250 result set rendered as raw points.
+const SEARCH_RENDER_BUDGET = 50
+
+// Half-width of the hysteresis band around SEARCH_RENDER_BUDGET (see
+// modeThreshold below). A viewport whose count hovers near the bare budget —
+// routine on an ordinary pan/zoom over a moderately dense area — would
+// otherwise flip the WHOLE map between individual pins and cluster bubbles on
+// every such move, reading as the whole map flushing rather than a smooth
+// update.
+const MODE_HYSTERESIS = 15
+
+/**
+ * The count at which this request should switch to clusters, biased by which
+ * mode the client says it's already showing: already in clusters, it takes a
+ * decisive drop (below budget - MODE_HYSTERESIS) to leave; already in points
+ * (or no hint yet, e.g. first load), it takes a decisive rise (above budget +
+ * MODE_HYSTERESIS) to enter. The overlapping band in between is "sticky" —
+ * whichever mode is already showing stays until the count clears it.
+ */
+export function modeThreshold(preferMode: 'points' | 'clusters' | undefined): number {
+  return preferMode === 'clusters'
+    ? SEARCH_RENDER_BUDGET - MODE_HYSTERESIS
+    : SEARCH_RENDER_BUDGET + MODE_HYSTERESIS
+}
+
+// Public visibility gate, shared by every public search query so the count, the point
+// prefilter and the cluster buckets can never disagree about what is publicly listable.
+// The lifecycle term is load-bearing: these queries run as raw SQL, which the default
+// lifecycle filter (src/prisma/lifecycle.extension.ts) cannot intercept.
+const PUBLIC_VISIBLE_SQL = Prisma.sql`"isActive" AND "isPublished" AND "kind" != 'RESTRICTED' AND "lifecycleStatus" = 'ACTIVE'`
+
+/**
+ * One admin-map filter term, expressed as data so it can be rendered twice: as Prisma
+ * `where` input for the points path and as a parameterised SQL fragment for the count and
+ * cluster paths. Adding a variant breaks compilation of both translators below (a switch
+ * with no default cannot fall through under strictNullChecks), which is what keeps the
+ * two renderings from drifting — a drift would make cluster counts contradict the points.
+ */
+type AdminMapFilter =
+  | { on: 'bounds'; bounds: MapBounds }
+  | { on: 'text'; value: string }
+  | { on: 'isActive'; value: boolean }
+  | { on: 'isPublished'; value: boolean }
+  | { on: 'kind'; value: FacilityKind }
+  | { on: 'operators'; value: string[] }
+  | { on: 'manager'; userId: string }
+  | { on: 'lifecycle'; value: LifecycleStatus }
+
+function adminFilterWhere(filter: AdminMapFilter): Prisma.FacilityWhereInput {
+  switch (filter.on) {
+    case 'bounds':
+      return {
+        lat: { gte: filter.bounds.south, lte: filter.bounds.north },
+        lng: { gte: filter.bounds.west, lte: filter.bounds.east },
+      }
+    case 'text':
+      return {
+        OR: [
+          { name: { contains: filter.value, mode: 'insensitive' } },
+          { address: { contains: filter.value, mode: 'insensitive' } },
+        ],
+      }
+    case 'isActive':
+      return { isActive: filter.value }
+    case 'isPublished':
+      return { isPublished: filter.value }
+    case 'kind':
+      return { kind: filter.value }
+    case 'operators':
+      return { operatorId: { in: filter.value } }
+    case 'manager':
+      return { managers: { some: { userId: filter.userId } } }
+    case 'lifecycle':
+      return { lifecycleStatus: filter.value }
+  }
+}
+
+function adminFilterSql(filter: AdminMapFilter): Prisma.Sql {
+  switch (filter.on) {
+    case 'bounds':
+      return Prisma.sql`ST_Intersects("geog", ST_MakeEnvelope(${filter.bounds.west}, ${filter.bounds.south}, ${filter.bounds.east}, ${filter.bounds.north}, 4326)::geography)`
+    case 'text':
+      // Wildcards inside the bound value stay unescaped on purpose: Prisma's `contains`
+      // does the same, and matching it is what keeps the points path in step.
+      return Prisma.sql`("name" ILIKE ${`%${filter.value}%`} OR "address" ILIKE ${`%${filter.value}%`})`
+    case 'isActive':
+      return Prisma.sql`"isActive" = ${filter.value}`
+    case 'isPublished':
+      return Prisma.sql`"isPublished" = ${filter.value}`
+    case 'kind':
+      return Prisma.sql`"kind" = ${filter.value}::"FacilityKind"`
+    case 'operators':
+      return Prisma.sql`"operatorId" IN (${Prisma.join(filter.value)})`
+    case 'manager':
+      return Prisma.sql`EXISTS (SELECT 1 FROM "FacilityManager" fm WHERE fm."facilityId" = "Facility"."id" AND fm."userId" = ${filter.userId})`
+    case 'lifecycle':
+      return Prisma.sql`"lifecycleStatus" = ${filter.value}::"LifecycleStatus"`
+  }
+}
+
+const VEHICLE_TO_PRISMA: Record<ContractVehicleType, VehicleType> = {
+  car: VehicleType.CAR,
+  motorcycle: VehicleType.MOTORCYCLE,
+  van: VehicleType.VAN,
+  truck: VehicleType.TRUCK,
+}
+
+const VEHICLE_FROM_PRISMA: Record<VehicleType, ContractVehicleType> = {
+  [VehicleType.CAR]: 'car',
+  [VehicleType.MOTORCYCLE]: 'motorcycle',
+  [VehicleType.VAN]: 'van',
+  [VehicleType.TRUCK]: 'truck',
+}
+
+// A non-BUSINESS facility is catalog-only and never bookable, so its capacity, vehicle
+// list and opening hours are decorative rather than load-bearing. These are what the
+// create path falls back to when a platform admin picks a non-BUSINESS kind without
+// specifying them: uncapped (the schema's own max) rather than a real limit, every
+// vehicle type rather than a chosen subset, and open 24h rather than a schedule.
+const UNCAPPED_FACILITY_CAPACITY = 100_000
+const ALL_CONTRACT_VEHICLE_TYPES: ContractVehicleType[] = ['car', 'motorcycle', 'van', 'truck']
+const ALWAYS_OPEN_HOURS: OpeningHours = { is24h: true }
 
 const PROMOTION_WEIGHT: Record<PromotionType, number> = {
   [PromotionType.PREMIUM]: 3,
@@ -13,27 +202,89 @@ const PROMOTION_WEIGHT: Record<PromotionType, number> = {
   [PromotionType.STANDARD]: 1,
 }
 
+// One facility a bulk disable/delete decided it may shut down, with the booking numbers
+// behind the decision — the delete path needs them again to describe its archive.
+interface ClearedFacility {
+  facilityId: string
+  unhonoured: number
+  cancelled: number
+}
+
+function lifecycleActor(user: AuthUser): LifecycleActor {
+  return { id: user.id, role: user.role }
+}
+
+/**
+ * A delete emits exactly one audit row, the lifecycle's own `facility.archived` — so
+ * whether the delete was forced, and what it refunded on the way, has to ride in the
+ * reason. That is also the column the platform administrator's trash listing renders,
+ * which is precisely where someone deciding whether to restore needs to read it.
+ */
+function deleteReason(force: boolean, cancelled: number): string {
+  return force
+    ? `Deleted by operator (forced: ${cancelled} booking(s) cancelled and refunded)`
+    : 'Deleted by operator'
+}
+
 @Injectable()
 export class FacilitiesService {
+  private readonly logger = new Logger(FacilitiesService.name)
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly inventory: InventoryService,
     private readonly tariff: TariffService,
+    private readonly operatorScope: OperatorScopeService,
+    private readonly bookings: BookingService,
+    private readonly entitlements: EntitlementService,
+    private readonly lifecycle: LifecycleService,
+    private readonly clusterIndex: FacilityClusterIndexService,
+    private readonly quotaThresholds: QuotaThresholdService,
+    private readonly access: OperatorAccessService,
   ) {}
 
-  async search(params: FacilitySearchParams): Promise<FacilitySearchResult[]> {
-    const { lat, lng, radiusMeters, bounds, startsAt, endsAt, vehicleType } = params
+  async search(params: FacilitySearchParams): Promise<FacilitySearchResponse> {
+    const { bounds, vehicleType, preferMode } = params
+    const whereSql = this.searchWhereSql(params)
 
+    const total = await this.countFacilities(whereSql)
+
+    // The index is keyed and built on the visibility predicate ALONE — no bounds — so one
+    // build serves every viewport at every zoom. `total` still comes from the bounded
+    // count, because it describes what is in view, not what the index holds.
+    if (bounds && total > modeThreshold(preferMode)) {
+      const { clusters, singletonIds } = await this.clusterIndex.getClusters(
+        vehicleType ?? 'all',
+        this.visibilityWhereSql(vehicleType),
+        bounds,
+      )
+      // Below CLUSTER_MIN_POINTS the index hands back facility ids instead of a
+      // bubble, so they're hydrated into real markers the same way the plain
+      // points path does, rather than shown as a cluster of 1-4.
+      const points = singletonIds.length > 0 ? await this.hydrateResults(singletonIds, params) : []
+      return { mode: 'clusters', points, clusters, total }
+    }
+
+    const points = await this.searchPoints(params)
+    return { mode: 'points', points, clusters: [], total }
+  }
+
+  private async searchPoints(params: FacilitySearchParams): Promise<FacilitySearchResult[]> {
     // GiST-indexed spatial prefilter: the bbox (or exact radius) lookup runs on the
     // generated `geog` point, then Prisma hydrates only the matched ids.
-    const matchedIds = await this.spatialCandidateIds(lat, lng, radiusMeters, bounds)
+    const matchedIds = await this.spatialCandidateIds(params)
     if (matchedIds.length === 0) return []
+    return this.hydrateResults(matchedIds, params)
+  }
+
+  private async hydrateResults(
+    ids: string[],
+    params: FacilitySearchParams,
+  ): Promise<FacilitySearchResult[]> {
+    const { lat, lng, startsAt, endsAt, vehicleType } = params
 
     const facilities = await this.prisma.facility.findMany({
-      where: {
-        id: { in: matchedIds },
-        ...(vehicleType ? { vehicleTypes: { has: vehicleType } } : {}),
-      },
+      where: { id: { in: ids } },
       include: {
         images: { orderBy: { sortOrder: 'asc' }, take: 1 },
         promotionPlan: true,
@@ -48,18 +299,20 @@ export class FacilitiesService {
       return { facility, coords, distanceMeters: computeDistanceMeters(center, coords) }
     })
 
-    const ids = candidates.map((c) => c.facility.id)
+    const facilityIds = candidates.map((c) => c.facility.id)
 
     // Two set-based queries replace the former per-facility availability + price calls.
     const [overlapByFacility, priceByFacility] = await Promise.all([
-      this.inventory.countOverlappingByFacility(ids, startsAt, endsAt),
+      this.inventory.countOverlappingByFacility(facilityIds, startsAt, endsAt),
       vehicleType
-        ? this.tariff.computeTotalsByFacility(ids, startsAt, endsAt, vehicleType as never)
+        ? this.tariff.computeTotalsByFacility(facilityIds, startsAt, endsAt, vehicleType as never)
         : Promise.resolve(new Map<string, number>()),
     ])
 
     const results = candidates.map(({ facility, coords, distanceMeters }): FacilitySearchResult => {
       const free = facility.onlineQuota - (overlapByFacility.get(facility.id) ?? 0)
+      const onlineBookingStatus: OnlineBookingStatus =
+        facility.onlineQuota === 0 ? 'NOT_OFFERED' : free > 0 ? 'OPEN' : 'FULL'
       const isPromoted =
         facility.promotionPlan?.isActive === true &&
         this.isPromotionLive(facility.promotionPlan.startsAt, facility.promotionPlan.endsAt)
@@ -68,10 +321,12 @@ export class FacilitiesService {
         id: facility.id,
         name: facility.name,
         address: facility.address,
+        kind: facility.kind,
         lat: coords.lat,
         lng: coords.lng,
         distanceMeters: Math.round(distanceMeters),
-        available: free > 0,
+        available: onlineBookingStatus === 'OPEN',
+        onlineBookingStatus,
         remainingSlots: Math.max(0, free),
         priceCents: vehicleType ? (priceByFacility.get(facility.id) ?? null) : null,
         currency: 'EUR',
@@ -85,44 +340,131 @@ export class FacilitiesService {
   }
 
   /**
-   * Facility ids whose location matches the search area, resolved by the GiST index
-   * on the generated `geog` column. Bounds use an exact rectangle; otherwise an exact
-   * radius (replacing the former lat/lng band scan + JS distance filter).
+   * The one predicate every public search query runs on: visibility, the spatial area
+   * (exact rectangle when bounds are given, otherwise exact radius) and the vehicle-class
+   * filter. Sharing it is what makes `total` describe exactly the set the points path
+   * returns — counting without the vehicle filter used to overstate it and could flip the
+   * response into cluster mode on a set that fits in `SEARCH_RENDER_BUDGET`.
    */
-  private async spatialCandidateIds(
-    lat: number,
-    lng: number,
-    radiusMeters: number,
-    bounds?: MapBounds,
-  ): Promise<string[]> {
-    const rows = bounds
-      ? await this.prisma.$queryRaw<Array<{ id: string }>>`
-          SELECT id FROM "Facility"
-          WHERE "isActive" AND "isVerified"
-            AND ST_Intersects(
-              "geog",
-              ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326)::geography
-            )`
-      : await this.prisma.$queryRaw<Array<{ id: string }>>`
-          SELECT id FROM "Facility"
-          WHERE "isActive" AND "isVerified"
-            AND ST_DWithin(
-              "geog",
-              ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography,
-              ${radiusMeters}
-            )`
+  private searchWhereSql(params: {
+    lat: number
+    lng: number
+    radiusMeters: number
+    bounds?: MapBounds
+    vehicleType?: VehicleType
+  }): Prisma.Sql {
+    const { lat, lng, radiusMeters, bounds, vehicleType } = params
+
+    const spatial = bounds
+      ? Prisma.sql`ST_Intersects("geog", ST_MakeEnvelope(${bounds.west}, ${bounds.south}, ${bounds.east}, ${bounds.north}, 4326)::geography)`
+      : Prisma.sql`ST_DWithin("geog", ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, ${radiusMeters})`
+
+    return Prisma.sql`${this.visibilityWhereSql(vehicleType)} AND ${spatial}`
+  }
+
+  /**
+   * The area-independent half of the public predicate. Factored out because the cluster
+   * index is built over the WHOLE listable dataset and queried per viewport, so it needs
+   * this without any spatial term — and building it separately would let the index cluster
+   * a different set than the count and points describe.
+   */
+  private visibilityWhereSql(vehicleType?: VehicleType): Prisma.Sql {
+    const vehicle = vehicleType
+      ? Prisma.sql`AND ${vehicleType}::"VehicleType" = ANY("vehicleTypes")`
+      : Prisma.empty
+
+    return Prisma.sql`${PUBLIC_VISIBLE_SQL} ${vehicle}`
+  }
+
+  /**
+   * Facility ids matching the search predicate, resolved by the GiST index on the
+   * generated `geog` column. Capped at the same render budget the points/clusters switch
+   * uses: with bounds the cap is unreachable (the caller already proved the set fits),
+   * and without them it is what stops a wide radius from returning more markers than the
+   * client can draw. NOT `MAX_POINTS` — that one belongs to the admin map alone.
+   */
+  private async spatialCandidateIds(params: FacilitySearchParams): Promise<string[]> {
+    const { lat, lng, bounds } = params
+
+    const nearestFirst = bounds
+      ? Prisma.empty
+      : Prisma.sql`ORDER BY "geog" <-> ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography`
+
+    const rows = await this.prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "Facility"
+      WHERE ${this.searchWhereSql(params)}
+      ${nearestFirst}
+      LIMIT ${SEARCH_RENDER_BUDGET}`
     return rows.map((r) => r.id)
+  }
+
+  /**
+   * Cheap count behind a predicate, so points-vs-clusters can be decided without
+   * hydrating any rows.
+   */
+  private async countFacilities(where: Prisma.Sql): Promise<number> {
+    const rows = await this.prisma.$queryRaw<Array<{ count: number }>>`
+      SELECT count(*)::int AS count FROM "Facility"
+      WHERE ${where}`
+    return rows[0]?.count ?? 0
+  }
+
+  /**
+   * Aggregates the facilities matching `where` into a fixed 12x12 grid of the visible
+   * rectangle. The bucketing runs in SQL over the GiST-indexed `geog` column: a zoomed-out
+   * view can match the whole ingested dataset, which must never be hydrated into memory.
+   *
+   * ADMIN MAP ONLY. The public search moved to FacilityClusterIndexService, whose
+   * hierarchy merges smoothly across zoom levels instead of re-bucketing per viewport.
+   * The admin map cannot follow: free-text search, the isActive/isPublished toggles, kind
+   * and operator scope multiply into far too many predicates to precompute an index per
+   * combination, and this grid needs no cache at all.
+   */
+  private async gridClusters(where: Prisma.Sql, bounds: MapBounds): Promise<FacilityCluster[]> {
+    const cellLng = (bounds.east - bounds.west) / CLUSTER_COLS
+    const cellLat = (bounds.north - bounds.south) / CLUSTER_ROWS
+
+    const rows = await this.prisma.$queryRaw<
+      Array<{ gx: number; gy: number; count: number; lat: number; lng: number }>
+    >`
+      SELECT
+        floor((ST_X(g) - ${bounds.west}) / ${cellLng})::int AS gx,
+        floor((ST_Y(g) - ${bounds.south}) / ${cellLat})::int AS gy,
+        count(*)::int AS count,
+        avg(ST_Y(g)) AS lat,
+        avg(ST_X(g)) AS lng
+      FROM (
+        SELECT "geog"::geometry AS g FROM "Facility" WHERE ${where}
+      ) s
+      GROUP BY gx, gy`
+
+    return rows.map((r) => ({
+      id: `c_${r.gx}_${r.gy}`,
+      lat: Number(r.lat),
+      lng: Number(r.lng),
+      count: r.count,
+    }))
   }
 
   async getDetail(id: string) {
     const facility = await this.prisma.facility.findFirst({
-      where: { id, isActive: true, isVerified: true },
+      where: { id, isActive: true, isPublished: true, kind: { not: FacilityKind.RESTRICTED } },
       include: {
         images: { orderBy: { sortOrder: 'asc' } },
         rules: true,
-        tariffPlans: {
-          where: { isActive: true },
-          include: { rules: { orderBy: { sortOrder: 'asc' } } },
+        tariffAssignments: {
+          include: {
+            tariffPlan: {
+              include: {
+                tiers: {
+                  orderBy: { fromMinute: 'asc' },
+                  include: { rates: true },
+                },
+                windows: true,
+                caps: true,
+              },
+            },
+          },
         },
       },
     })
@@ -135,14 +477,166 @@ export class FacilitiesService {
       _count: true,
     })
 
+    // Public facility read: returns only explicit per-vehicle-type rows (no operator-default
+    // resolution — that belongs to the editor UI's getTariffAssignments). Assignment and
+    // activation are independent: a plan can be deactivated while still assigned, so null
+    // out an assigned-but-inactive plan per row so a dead plan is never shown as live pricing.
+    // The lifecycle check is not redundant: the plan arrives through a nested include,
+    // which the default lifecycle filter does not intercept.
+    const { tariffAssignments, ...rest } = facility
+    const assignments = tariffAssignments.map((a) => ({
+      ...a,
+      tariffPlan:
+        a.tariffPlan.isActive && a.tariffPlan.lifecycleStatus === LifecycleStatus.ACTIVE
+          ? a.tariffPlan
+          : null,
+    }))
+
     return {
-      ...facility,
+      ...rest,
+      tariffAssignments: assignments,
       lat: facility.lat.toNumber(),
       lng: facility.lng.toNumber(),
       rating: {
         average: ratingAgg._avg.rating ?? null,
         count: ratingAgg._count,
       },
+    }
+  }
+
+  /**
+   * Sets or clears ONE assignment row for a facility's concrete `(vehicleType)` slot. Both
+   * the facility and — when assigning — the plan must each be within the caller's managed
+   * scope; checking only one side would let an operator assign a plan they do not manage to
+   * their facility (pricing leak), or point their plan at a foreign facility. The plan's
+   * own `vehicleTypes` must not contradict the target slot. Delete-then-create (not upsert)
+   * works around the Prisma compound whereUnique gotcha.
+   */
+  async assignTariff(
+    user: AuthUser,
+    facilityId: string,
+    vehicleType: VehicleType,
+    tariffPlanId: string | null,
+  ): Promise<{ facilityId: string; vehicleType: VehicleType; tariffPlanId: string | null }> {
+    const scope = await this.operatorScope.resolve(user)
+
+    const facility = await this.prisma.facility.findFirst({
+      where: { id: facilityId, ...this.operatorScope.facilityScopeWhere(scope, user) },
+      select: { id: true, operatorId: true, kind: true },
+    })
+    if (!facility) throw new FacilityNotFoundError(facilityId)
+
+    // Nothing can be sold at a non-BUSINESS facility — computeQuote and holdSlot both
+    // refuse that kind — so a plan attached to one is a rate schedule published for
+    // something not for sale, and it would come back to life the moment the facility
+    // returned to BUSINESS. Clearing is deliberately exempt: a row left over from an
+    // earlier kind must be removable whatever the facility is today.
+    if (tariffPlanId !== null && facility.kind !== FacilityKind.BUSINESS) {
+      throw new FacilityNotBookableError(facilityId)
+    }
+
+    if (tariffPlanId !== null) {
+      const plan = await this.prisma.tariffPlan.findFirst({
+        where: { id: tariffPlanId, ...this.operatorScope.tariffPlanScopeWhere(scope, user) },
+        select: { id: true, vehicleTypes: true, operatorId: true },
+      })
+      if (!plan) throw new TariffPlanNotFoundError(tariffPlanId)
+
+      // Each side was checked against the CALLER's scope, never against the other. That is
+      // enough for a single-tenant operator, and not enough for anyone whose scope spans
+      // two: a platform admin, or a manager on both ends. Since the assignment is what
+      // GET /facilities/:id serves publicly, a crossed pair republishes one tenant's rate
+      // schedule on another tenant's page.
+      if (plan.operatorId !== facility.operatorId) {
+        throw new TariffAssignmentMismatchError(
+          'the plan and the facility belong to different operators',
+        )
+      }
+
+      const mismatch = assignmentMismatchReason(plan.vehicleTypes, vehicleType)
+      if (mismatch) throw new TariffAssignmentMismatchError(mismatch)
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.facilityTariffAssignment.deleteMany({ where: { facilityId, vehicleType } })
+      if (tariffPlanId !== null) {
+        await tx.facilityTariffAssignment.create({
+          data: { facilityId, tariffPlanId, vehicleType },
+        })
+      }
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          action: tariffPlanId ? 'facility.tariff_assigned' : 'facility.tariff_unassigned',
+          entityType: 'Facility',
+          entityId: facilityId,
+          payload: { vehicleType, tariffPlanId },
+        },
+      })
+    })
+
+    return { facilityId, vehicleType, tariffPlanId }
+  }
+
+  /**
+   * The RESOLVED tariff per vehicle type for one facility: for each of the 4 vehicle types,
+   * the facility's explicit row when present, else the operator's active default plan, else
+   * nothing. Same facility-ownership check as other facility-scoped admin reads. Gives the
+   * editor UI an honest picture including implicit default coverage.
+   */
+  async getTariffAssignments(
+    user: AuthUser,
+    facilityId: string,
+  ): Promise<FacilityTariffAssignments> {
+    const scope = await this.operatorScope.resolve(user)
+    const facility = await this.prisma.facility.findFirst({
+      where: { id: facilityId, ...this.operatorScope.facilityScopeWhere(scope, user) },
+      select: { id: true, operatorId: true },
+    })
+    if (!facility) throw new FacilityNotFoundError(facilityId)
+
+    // An operator-less facility has no operator to resolve a default plan from — every
+    // vehicle type falls through to 'none' unless explicitly assigned.
+    const [rows, defaultPlan] = await Promise.all([
+      this.prisma.facilityTariffAssignment.findMany({
+        where: { facilityId },
+        select: { vehicleType: true, tariffPlanId: true, tariffPlan: { select: { name: true } } },
+      }),
+      facility.operatorId !== null
+        ? this.prisma.tariffPlan.findFirst({
+            where: { operatorId: facility.operatorId, isDefault: true, isActive: true },
+            select: { id: true, name: true },
+          })
+        : null,
+    ])
+
+    const explicitByType = new Map(rows.map((r) => [r.vehicleType, r]))
+
+    const assignments: ResolvedTariffAssignment[] = Object.values(VehicleType).map((vt) => {
+      const explicit = explicitByType.get(vt)
+      if (explicit) {
+        return {
+          vehicleType: vt,
+          tariffPlanId: explicit.tariffPlanId,
+          tariffPlanName: explicit.tariffPlan.name,
+          source: 'explicit',
+        }
+      }
+      if (defaultPlan) {
+        return {
+          vehicleType: vt,
+          tariffPlanId: defaultPlan.id,
+          tariffPlanName: defaultPlan.name,
+          source: 'default',
+        }
+      }
+      return { vehicleType: vt, tariffPlanId: null, tariffPlanName: null, source: 'none' }
+    })
+
+    return {
+      assignments,
+      defaultPlan: defaultPlan ? { id: defaultPlan.id, name: defaultPlan.name } : null,
     }
   }
 
@@ -153,6 +647,890 @@ export class FacilitiesService {
       endsAt,
       vehicleType: vehicleType as never,
     })
+  }
+
+  async adminList(user: AuthUser, query: ListFacilitiesDto): Promise<AdminFacilityList> {
+    const scope = await this.operatorScope.resolve(user)
+    const where = this.adminListWhere(scope, user, query)
+
+    const [rows, total] = await Promise.all([
+      this.prisma.facility.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: query.skip,
+        take: query.take,
+        select: {
+          id: true,
+          name: true,
+          address: true,
+          totalCapacity: true,
+          onlineQuota: true,
+          isActive: true,
+          isPublished: true,
+          kind: true,
+          source: true,
+          operatorId: true,
+          operator: { select: { name: true } },
+          createdAt: true,
+          updatedAt: true,
+        },
+      }),
+      this.prisma.facility.count({ where }),
+    ])
+
+    const items: AdminFacilityListItem[] = rows.map(({ operator, ...r }) => ({
+      ...r,
+      operatorName: operator?.name ?? null,
+    }))
+    return { items, total, skip: query.skip, take: query.take }
+  }
+
+  async adminGetById(user: AuthUser, id: string): Promise<AdminFacility> {
+    const scope = await this.operatorScope.resolve(user)
+    const facility = await this.prisma.facility.findFirst({
+      where: { id, ...this.operatorScope.facilityScopeWhere(scope, user) },
+    })
+    if (!facility) throw new FacilityNotFoundError(id)
+    return this.toAdminFacility(facility)
+  }
+
+  async create(user: AuthUser, dto: CreateFacilityDto): Promise<AdminFacility> {
+    const scope = await this.operatorScope.resolve(user)
+
+    // A platform admin may leave a facility unassigned (operatorId stays null); every
+    // other caller must always resolve to a real operator or the create is refused.
+    const operatorId = targetOperatorId(scope, dto.operatorId, { required: false })
+
+    if (operatorId !== null) {
+      // targetOperatorId honours any id in the caller's membership UNION without asking what
+      // they are in that particular operator, and OrgPermissionGuard is only a floor — it
+      // passes if ANY membership grants the scope. So an administrator of one operator who
+      // is a staff member at another would otherwise create facilities in the second. This
+      // is the authoritative half, and the reason the guard is allowed to stay coarse.
+      await this.access.assertScope(user, operatorId, 'org:facility.write')
+
+      const operator = await this.prisma.parkingOperator.findUnique({
+        where: { id: operatorId },
+        select: { id: true, status: true },
+      })
+      if (!operator) throw new DomainError('operatorId required')
+
+      // A PENDING operator is unverified: nobody at sPark has confirmed the business is
+      // real. Before self-signup existed this was unreachable — accepting an onboarding
+      // invite flips PENDING to VERIFIED in the same transaction, so no operator ever had
+      // a live admin while pending. Self-registration creates exactly that state, and an
+      // unverified business must not be able to publish bookable parking.
+      if (operator.status !== OperatorStatus.VERIFIED) {
+        throw new OperatorNotVerifiedError(operator.status)
+      }
+    }
+
+    if (scope.kind === 'operator' && dto.kind !== undefined) {
+      throw new FacilityFieldForbiddenError('kind')
+    }
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      // Lock the operator row so two concurrent creates serialize on the same operator,
+      // then check the plan's facility quota under that lock. With
+      // Facility_operatorId_claimed_key dropped in 20260803100000, this lock is the ONLY
+      // thing preventing two simultaneous creates from both passing a quota of one — it
+      // used to be belt-and-suspenders behind the unique index and is now the primary
+      // control. The assert must therefore stay inside this transaction, after the lock.
+      // An operator-less facility has no operator row to lock and no quota to check.
+      if (operatorId !== null) {
+        await tx.$executeRaw`SELECT id FROM "ParkingOperator" WHERE id = ${operatorId} FOR UPDATE`
+        await this.entitlements.assertCanCreateFacility(operatorId, tx)
+      }
+
+      // `geog` is a GENERATED ALWAYS column; the database derives it from lat/lng,
+      // so no raw write is needed (and one would be rejected by Postgres).
+      const facility = await tx.facility.create({
+        data: {
+          operatorId,
+          kind: dto.kind ?? FacilityKind.BUSINESS,
+          name: dto.name,
+          address: dto.address,
+          lat: new Prisma.Decimal(dto.lat),
+          lng: new Prisma.Decimal(dto.lng),
+          totalCapacity: dto.totalCapacity ?? UNCAPPED_FACILITY_CAPACITY,
+          onlineQuota: dto.onlineQuota ?? UNCAPPED_FACILITY_CAPACITY,
+          vehicleTypes: (dto.vehicleTypes ?? ALL_CONTRACT_VEHICLE_TYPES).map(
+            (v) => VEHICLE_TO_PRISMA[v],
+          ),
+          heightRestrictionCm: dto.heightRestrictionCm ?? null,
+          openingHoursJson: (dto.openingHours ??
+            ALWAYS_OPEN_HOURS) as unknown as Prisma.InputJsonValue,
+          amenities: dto.amenities,
+          cancellationPolicy: dto.cancellationPolicy,
+          isActive: false,
+          isPublished: false,
+          rank: 0,
+        },
+      })
+
+      // Analytics attributes money through FacilityOwnershipPeriod, never through
+      // Facility.operatorId, and the attribution join is an inner one: a facility with no
+      // open period earns revenue that no report can see. Same transaction as the insert,
+      // so a facility can never exist without one — except an operator-less facility,
+      // which has no owner to attribute revenue to until one claims or is assigned it.
+      if (operatorId !== null) {
+        await tx.facilityOwnershipPeriod.create({
+          data: { facilityId: facility.id, operatorId, from: facility.createdAt, to: null },
+        })
+      }
+
+      // Below platform admin, visibility now requires a management assignment — so without
+      // this the creator could not see, open or edit what they just created. Same
+      // transaction as the insert, so an unmanageable facility can never exist. An
+      // operator-less facility has no operator to draw managers from, so it stays
+      // platform-admin-only until it is assigned one.
+      if (operatorId !== null) {
+        const managerIds = await initialManagerIds(tx, operatorId, {
+          id: user.id,
+          isPlatformAdmin: scope.kind === 'platform',
+        })
+        if (managerIds.length > 0) {
+          await tx.facilityManager.createMany({
+            data: managerIds.map((userId) => ({
+              facilityId: facility.id,
+              userId,
+              assignedBy: user.id,
+            })),
+          })
+        }
+      }
+
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'facility.created',
+          entityType: 'Facility',
+          entityId: facility.id,
+        },
+      })
+
+      return facility
+    })
+
+    // Outside the transaction on purpose: the nudge describes a facility that now exists, and
+    // sending mail under the operator-row lock would hold the only thing serializing
+    // concurrent creates for the length of an SMTP round trip. Never throws — see
+    // QuotaThresholdService.
+    if (operatorId !== null) {
+      await this.quotaThresholds.checkOperatorQuotaThresholds(operatorId)
+    }
+
+    return this.toAdminFacility(created)
+  }
+
+  async update(user: AuthUser, id: string, dto: UpdateFacilityDto): Promise<AdminFacility> {
+    const scope = await this.operatorScope.resolve(user)
+    const existing = await this.prisma.facility.findFirst({
+      where: { id, ...this.operatorScope.facilityScopeWhere(scope, user) },
+      select: { id: true, kind: true },
+    })
+    if (!existing) throw new FacilityNotFoundError(id)
+
+    // Going live is the operator's own call for the facilities the scopeWhere above
+    // already narrowed them to: public visibility needs isActive AND isPublished, so
+    // withholding isActive left them able to publish a facility that stayed invisible.
+    // bulkUpdate carries the same rule for deploy/enable. Deactivation is still refused
+    // while unhonoured bookings exist (below), and platform admins keep isActive as a
+    // suspend switch they can apply over the operator's wishes.
+    if (scope.kind === 'operator') {
+      if (dto.rank !== undefined) throw new FacilityFieldForbiddenError('rank')
+      if (dto.kind !== undefined) throw new FacilityFieldForbiddenError('kind')
+    }
+
+    // Same invariant the delete path enforces — an edit must not be a side door around
+    // it. No force here on purpose: shutting a facility down with live bookings is a
+    // deliberate act with refunds attached, so it goes through DELETE ?force=true.
+    if (dto.isActive === false) {
+      const unhonoured = await this.prisma.booking.count({ where: unhonouredBookingsWhere(id) })
+      if (unhonoured > 0) throw new FacilityHasActiveBookingsError(id, unhonoured)
+    }
+
+    // Only BUSINESS facilities are sellable — TariffService quotes nothing else, and
+    // getDetail/SavedFacilitiesService hide RESTRICTED entirely — so leaving that kind
+    // strands every stay already paid for. Deliberately no force twin of the delete path:
+    // the facility keeps operating, so there is nothing to refund against and the honest
+    // resolution is to let the outstanding stays finish.
+    const leavingBusiness =
+      dto.kind !== undefined &&
+      existing.kind === FacilityKind.BUSINESS &&
+      dto.kind !== FacilityKind.BUSINESS
+    if (leavingBusiness) {
+      const unhonoured = await this.prisma.booking.count({ where: unhonouredBookingsWhere(id) })
+      if (unhonoured > 0) throw new FacilityKindChangeBlockedError(id, dto.kind!, unhonoured)
+    }
+
+    const data: Prisma.FacilityUpdateInput = {}
+    if (dto.name !== undefined) data.name = dto.name
+    if (dto.address !== undefined) data.address = dto.address
+    if (dto.lat !== undefined) data.lat = new Prisma.Decimal(dto.lat)
+    if (dto.lng !== undefined) data.lng = new Prisma.Decimal(dto.lng)
+    if (dto.totalCapacity !== undefined) data.totalCapacity = dto.totalCapacity
+    if (dto.onlineQuota !== undefined) data.onlineQuota = dto.onlineQuota
+    if (dto.vehicleTypes !== undefined) {
+      data.vehicleTypes = dto.vehicleTypes.map((v) => VEHICLE_TO_PRISMA[v])
+    }
+    if (dto.heightRestrictionCm !== undefined) data.heightRestrictionCm = dto.heightRestrictionCm
+    if (dto.openingHours !== undefined) {
+      data.openingHoursJson = dto.openingHours as unknown as Prisma.InputJsonValue
+    }
+    if (dto.amenities !== undefined) data.amenities = dto.amenities
+    if (dto.cancellationPolicy !== undefined) data.cancellationPolicy = dto.cancellationPolicy
+    if (dto.isActive !== undefined) data.isActive = dto.isActive
+    if (dto.isPublished !== undefined) data.isPublished = dto.isPublished
+    if (dto.rank !== undefined) data.rank = dto.rank
+    if (dto.kind !== undefined) data.kind = dto.kind
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // `geog` regenerates automatically when lat/lng change (GENERATED ALWAYS column).
+      const facility = await tx.facility.update({ where: { id }, data })
+
+      // A non-business facility cannot be priced, so every assignment row on it is dead
+      // state the moment the kind changes — and leaving it behind would silently put the
+      // old pricing back the instant an admin moved the facility to BUSINESS again. Same
+      // transaction as the kind change so the two can never disagree.
+      if (leavingBusiness) {
+        await tx.facilityTariffAssignment.deleteMany({ where: { facilityId: id } })
+      }
+
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'facility.updated',
+          entityType: 'Facility',
+          entityId: id,
+          ...(dto.kind !== undefined
+            ? { payload: { kindFrom: existing.kind, kindTo: dto.kind } }
+            : {}),
+        },
+      })
+
+      return facility
+    })
+
+    return this.toAdminFacility(updated)
+  }
+
+  /**
+   * Deletes a facility, refusing while it still owes customers a place to park.
+   *
+   * "Delete" ARCHIVES: the row transitions to lifecycle ARCHIVED, which the Prisma
+   * lifecycle extension default-filters out of every operator-facing read, and turns up
+   * in the platform administrator's trash to be restored or tombstoned. It used to be a
+   * bare `isActive = false`, which left the "deleted" facility fully visible — and fully
+   * editable — to the operator that deleted it. The state change itself is
+   * LifecycleService's, not reimplemented here.
+   *
+   * `force` is the escape hatch, and it pays its way out: every unhonoured booking is
+   * cancelled and refunded through BookingService.cancelBooking — the existing two-phase
+   * path, so a provider failure leaves REFUND_PENDING plus a retryable Refund row rather
+   * than a second, divergent refund implementation. If any cancellation fails the
+   * facility stays ACTIVE and the error names what did and did not happen; the bookings
+   * already refunded no longer block, so a retry resumes where this one stopped.
+   */
+  async softDelete(user: AuthUser, id: string, force = false): Promise<void> {
+    const scope = await this.operatorScope.resolve(user)
+    const existing = await this.prisma.facility.findFirst({
+      where: { id, ...this.operatorScope.facilityScopeWhere(scope, user) },
+      select: { id: true },
+    })
+    if (!existing) throw new FacilityNotFoundError(id)
+
+    const unhonoured = await this.prisma.booking.findMany({
+      where: unhonouredBookingsWhere(id),
+      select: { id: true },
+    })
+
+    let cancelled = 0
+    if (unhonoured.length > 0) {
+      if (!force) throw new FacilityHasActiveBookingsError(id, unhonoured.length)
+
+      const outcome = await this.cancelAndRefund(
+        user,
+        unhonoured.map((b) => b.id),
+      )
+      cancelled = outcome.cancelled
+      if (outcome.failed > 0) {
+        throw new FacilityDeactivationFailedError(id, outcome.cancelled, outcome.failed)
+      }
+    }
+
+    // archiveFacility re-counts unhonoured bookings inside its own transaction, closing
+    // the window between the refund loop above and the state change. That re-check cannot
+    // trip on what this call just refunded — cancellation moves a booking out of
+    // CONFIRMED/CHECKED_IN — so anything it still finds was booked while we were
+    // refunding and genuinely must block.
+    await this.lifecycle.archiveFacility(lifecycleActor(user), id, deleteReason(force, cancelled))
+  }
+
+  /**
+   * Cancels and refunds a batch through the one refund implementation there is. Strictly
+   * sequential: each cancellation calls the payment provider, and a parallel fan-out
+   * would both hammer it and make a partial failure impossible to describe. A failure is
+   * recorded and the loop continues, so the caller learns the true split instead of
+   * stopping at the first bad one and leaving the rest unexamined.
+   */
+  private async cancelAndRefund(
+    user: AuthUser,
+    bookingIds: string[],
+  ): Promise<{ cancelled: number; failed: number }> {
+    let cancelled = 0
+    let failed = 0
+
+    for (const bookingId of bookingIds) {
+      try {
+        await this.bookings.cancelBooking(bookingId, user)
+        cancelled++
+      } catch (error) {
+        failed++
+        this.logger.error(
+          `Forced facility deactivation could not cancel booking ${bookingId}`,
+          error instanceof Error ? error.stack : String(error),
+        )
+      }
+    }
+
+    return { cancelled, failed }
+  }
+
+  async bulkUpdate(user: AuthUser, dto: BulkFacilityDto): Promise<BulkFacilityResult> {
+    const scope = await this.operatorScope.resolve(user)
+    const scopeWhere = this.operatorScope.facilityScopeWhere(scope, user)
+
+    // isActive is the operator's own call here exactly as it is in `update`, so deploy and
+    // enable are open to them; scopeWhere is what keeps every action to the facilities they
+    // manage. disable and delete route through bulkDeactivate below, which applies the same
+    // per-facility unhonoured-bookings guard the single-facility paths do.
+
+    // assignTariff carries a dynamic per-slot payload and its own multi-plan ownership
+    // check, so it can't route through the static bulkData / single-updateMany path. The
+    // two predicates are separate because the plan side narrows on TariffPlanManager, not
+    // FacilityManager — a caller must manage both ends of the assignment.
+    if (dto.action === 'assignTariff') {
+      return this.bulkAssignTariff(
+        user,
+        dto.ids,
+        dto.assignments,
+        scopeWhere,
+        this.operatorScope.tariffPlanScopeWhere(scope, user),
+      )
+    }
+
+    // Deactivation is per-facility (each has its own bookings to honour or refund), so it
+    // cannot be one updateMany over the whole selection.
+    if (dto.action === 'disable' || dto.action === 'delete') {
+      return this.bulkDeactivate(user, dto.action, dto.ids, scopeWhere, dto.force)
+    }
+
+    return this.runBulk(user, dto.action, dto.ids, scopeWhere, this.bulkData(dto.action))
+  }
+
+  /**
+   * Bulk disable/delete, decided facility by facility. The old single `updateMany` flipped
+   * every selected row regardless of what was booked there; a per-facility loop is the
+   * price of the guard.
+   *
+   * Honesty is the design constraint. A facility is cleared only when it owes nothing, or
+   * when `force` cancelled and refunded everything it owed. Anything else is left ACTIVE
+   * and reported in `skipped` with its counts, so a partial force — three facilities
+   * cleared, the fourth stuck on a provider failure after refunding two of its five
+   * bookings — reads as exactly that rather than as a silent success. The call does not
+   * throw: the other facilities genuinely were shut down, and rolling that back would mean
+   * un-refunding money.
+   */
+  private async bulkDeactivate(
+    user: AuthUser,
+    action: 'disable' | 'delete',
+    ids: string[],
+    scopeWhere: ManagedScopeWhere,
+    force: boolean,
+  ): Promise<BulkFacilityResult> {
+    // ids are only a filter — scopeWhere is the authorization boundary, so an operator
+    // passing foreign ids simply touches none of them.
+    const scoped = await this.prisma.facility.findMany({
+      where: { id: { in: ids }, ...scopeWhere },
+      select: { id: true },
+    })
+    const scopedIds = scoped.map((f) => f.id)
+    if (scopedIds.length === 0) return { affected: 0 }
+
+    const grouped = await this.prisma.booking.groupBy({
+      by: ['facilityId'],
+      where: unhonouredBookingsWhere(scopedIds),
+      _count: { _all: true },
+    })
+    const unhonouredByFacility = new Map(grouped.map((g) => [g.facilityId, g._count._all]))
+
+    const clear: ClearedFacility[] = []
+    const skipped: BulkFacilitySkipped[] = []
+
+    for (const facilityId of scopedIds) {
+      const unhonoured = unhonouredByFacility.get(facilityId) ?? 0
+      if (unhonoured === 0) {
+        clear.push({ facilityId, unhonoured: 0, cancelled: 0 })
+        continue
+      }
+      if (!force) {
+        skipped.push({ facilityId, reason: 'unhonoured_bookings', unhonoured, cancelled: 0 })
+        continue
+      }
+
+      const bookings = await this.prisma.booking.findMany({
+        where: unhonouredBookingsWhere(facilityId),
+        select: { id: true },
+      })
+      const outcome = await this.cancelAndRefund(
+        user,
+        bookings.map((b) => b.id),
+      )
+      if (outcome.failed > 0) {
+        skipped.push({
+          facilityId,
+          reason: 'refund_failed',
+          unhonoured: bookings.length,
+          cancelled: outcome.cancelled,
+        })
+        continue
+      }
+      clear.push({ facilityId, unhonoured: bookings.length, cancelled: outcome.cancelled })
+    }
+
+    // 'delete' must archive, exactly like the single-resource path, and archiving is
+    // per-row by construction: LifecycleService state-guards each transition in its own
+    // transaction and writes its own `facility.archived` row. So it runs here, before the
+    // transaction below, which is left holding only the batch summary. 'disable' is an
+    // unpublish, not a delete, and stays the one set-based flip it always was.
+    const archived = action === 'delete' ? await this.archiveEach(user, clear, force, skipped) : []
+
+    const affected = await this.prisma.$transaction(async (tx) => {
+      const count =
+        action === 'delete'
+          ? archived.length
+          : clear.length
+            ? (
+                await tx.facility.updateMany({
+                  where: { id: { in: clear.map((c) => c.facilityId) }, ...scopeWhere },
+                  data: { isActive: false },
+                })
+              ).count
+            : 0
+
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          action: `facility.bulk.${action}`,
+          entityType: 'Facility',
+          entityId: `${count} of ${ids.length}`,
+          payload: { forced: force, skipped: skipped as unknown as Prisma.InputJsonValue },
+        },
+      })
+
+      return count
+    })
+
+    return skipped.length > 0 ? { affected, skipped } : { affected }
+  }
+
+  /**
+   * Archives each cleared facility through LifecycleService, one transition at a time.
+   * A refusal here is a lost race — a booking taken while this batch was refunding, or a
+   * concurrent archive — so it is reported as a skip rather than thrown: the facilities
+   * already archived stay archived, and their refunds cannot be undone.
+   */
+  private async archiveEach(
+    user: AuthUser,
+    clear: ClearedFacility[],
+    force: boolean,
+    skipped: BulkFacilitySkipped[],
+  ): Promise<string[]> {
+    const archived: string[] = []
+    const actor = lifecycleActor(user)
+
+    for (const { facilityId, unhonoured, cancelled } of clear) {
+      try {
+        await this.lifecycle.archiveFacility(actor, facilityId, deleteReason(force, cancelled))
+        archived.push(facilityId)
+      } catch (error) {
+        skipped.push({ facilityId, reason: 'archive_failed', unhonoured, cancelled })
+        this.logger.error(
+          `Bulk delete could not archive facility ${facilityId}`,
+          error instanceof Error ? error.stack : String(error),
+        )
+      }
+    }
+
+    return archived
+  }
+
+  /**
+   * Bulk sets/clears assignment rows across many facilities and vehicle-type slots.
+   *
+   * Tenant safety: collect every DISTINCT non-null plan id across the whole assignments
+   * array and verify EVERY one belongs to the caller's scope before any write — a naive
+   * check of only the first pair would let an attacker smuggle a foreign plan in later
+   * entries. Any out-of-scope plan rejects the whole call with no partial writes.
+   *
+   * The write is two set-based queries (not a loop over ids × assignments): one deleteMany
+   * clearing each targeted slot on each scoped facility, then one createMany inserting the
+   * non-null pairs. Facility ownership stays enforced via `scopeWhere`, so foreign ids are
+   * silently excluded (matching the other bulk actions), not hard-errored.
+   */
+  private async bulkAssignTariff(
+    user: AuthUser,
+    ids: string[],
+    assignments: { vehicleType: VehicleType; tariffPlanId: string | null }[],
+    scopeWhere: ManagedScopeWhere,
+    planWhere: ManagedScopeWhere,
+  ): Promise<BulkFacilityResult> {
+    const planIds = [
+      ...new Set(assignments.map((a) => a.tariffPlanId).filter((id): id is string => id !== null)),
+    ]
+    let expectedOperatorId: string | null = null
+
+    if (planIds.length > 0) {
+      const owned = await this.prisma.tariffPlan.findMany({
+        where: { id: { in: planIds }, ...planWhere },
+        select: { id: true, vehicleTypes: true, operatorId: true },
+      })
+      const ownedById = new Map(owned.map((p) => [p.id, p]))
+
+      for (const planId of planIds) {
+        if (!ownedById.has(planId)) throw new TariffPlanNotFoundError(planId)
+      }
+
+      // Every non-null assignment's slot must be consistent with its plan's own vehicle types.
+      for (const a of assignments) {
+        if (a.tariffPlanId === null) continue
+        const mismatch = assignmentMismatchReason(
+          ownedById.get(a.tariffPlanId)!.vehicleTypes,
+          a.vehicleType,
+        )
+        if (mismatch) throw new TariffAssignmentMismatchError(mismatch)
+      }
+
+      // One bulk assignment cannot straddle two tenants. Collapsing to a single expected
+      // operator up front is what makes the per-facility check below exact: a set of several
+      // would let a facility match one plan's owner while crossing another's.
+      const owners = new Set([...ownedById.values()].map((plan) => plan.operatorId))
+      if (owners.size > 1) {
+        throw new TariffAssignmentMismatchError('the selected plans belong to different operators')
+      }
+      expectedOperatorId = [...owners][0] ?? null
+    }
+
+    const slots = assignments.map((a) => a.vehicleType)
+
+    const affected = await this.prisma.$transaction(async (tx) => {
+      // Only in-scope facilities count as affected; ownership rides on the facility filter.
+      const scoped = await tx.facility.findMany({
+        where: { id: { in: ids }, ...scopeWhere },
+        select: { id: true, operatorId: true, kind: true },
+      })
+
+      // Same cross-tenant rule as the single-facility path. A foreign facility is silently
+      // excluded by scopeWhere, as every bulk action does — but a facility the caller DOES
+      // manage, paired with a plan from a different tenant, is a mistake worth refusing
+      // outright rather than applying to the rest of the selection.
+      if (planIds.length > 0 && scoped.some((f) => f.operatorId !== expectedOperatorId)) {
+        throw new TariffAssignmentMismatchError(
+          'the plan and the facility belong to different operators',
+        )
+      }
+
+      // And the same non-bookable rule, refused the same way rather than quietly narrowing
+      // the selection: the caller asked to price facilities that cannot be sold, so they
+      // need to hear it. An all-clear batch has nothing to price and stays allowed.
+      if (planIds.length > 0) {
+        const notBookable = scoped.find((f) => f.kind !== FacilityKind.BUSINESS)
+        if (notBookable) throw new FacilityNotBookableError(notBookable.id)
+      }
+
+      const scopedIds = scoped.map((f) => f.id)
+
+      if (scopedIds.length > 0) {
+        await tx.facilityTariffAssignment.deleteMany({
+          where: { facilityId: { in: scopedIds }, vehicleType: { in: slots } },
+        })
+
+        const rows = scopedIds.flatMap((facilityId) =>
+          assignments
+            .filter((a) => a.tariffPlanId !== null)
+            .map((a) => ({
+              facilityId,
+              tariffPlanId: a.tariffPlanId as string,
+              vehicleType: a.vehicleType,
+            })),
+        )
+        if (rows.length > 0) {
+          await tx.facilityTariffAssignment.createMany({ data: rows })
+        }
+      }
+
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'facility.bulk.assignTariff',
+          entityType: 'Facility',
+          entityId: `${scopedIds.length} of ${ids.length}`,
+        },
+      })
+
+      return scopedIds.length
+    })
+
+    return { affected }
+  }
+
+  private async runBulk(
+    user: AuthUser,
+    action: BulkFacilityAction,
+    ids: string[],
+    scopeWhere: ManagedScopeWhere,
+    data: Prisma.FacilityUncheckedUpdateManyInput,
+  ): Promise<BulkFacilityResult> {
+    // ids are only a filter — scopeWhere is the authorization boundary, so an operator
+    // passing foreign ids simply updates none of them.
+    const where: Prisma.FacilityWhereInput = { id: { in: ids }, ...scopeWhere }
+
+    if (data.isPublished === true) await this.assertPublishable(where)
+
+    const affected = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.facility.updateMany({ where, data })
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          action: `facility.bulk.${action}`,
+          entityType: 'Facility',
+          entityId: `${result.count} of ${ids.length}`,
+        },
+      })
+      return result.count
+    })
+
+    return { affected }
+  }
+
+  /**
+   * Publishing is what makes a facility appear in public listings, so a BUSINESS facility
+   * that resolves to no currently-applicable plan must not get there: it would list as
+   * live and then refuse every booking with NoApplicableTariffError. Asking the pricing
+   * path itself (facilitiesWithApplicablePlan) rather than re-deriving the resolution here
+   * is what keeps the two answers from disagreeing.
+   *
+   * Refused whole rather than quietly narrowed, unlike out-of-scope ids. Those are dropped
+   * because the caller is not entitled to learn the facility exists; these are facilities
+   * the caller demonstrably manages, and the single-facility publish toggle routes through
+   * this same bulk call — a toggle that silently reports success while the facility stayed
+   * unpublished is the one outcome nobody can debug. Same reasoning as the cross-tenant and
+   * non-bookable refusals in bulkAssignTariff.
+   *
+   * Non-BUSINESS kinds are exempt, not merely unchecked: nothing is ever priced at one, so
+   * demanding a tariff before publishing it would gate a facility on a plan it must not
+   * have in the first place.
+   */
+  private async assertPublishable(where: Prisma.FacilityWhereInput): Promise<void> {
+    const scoped = await this.prisma.facility.findMany({
+      where: { ...where, kind: FacilityKind.BUSINESS },
+      select: { id: true },
+    })
+    if (scoped.length === 0) return
+
+    const ids = scoped.map((f) => f.id)
+    const covered = await this.tariff.facilitiesWithApplicablePlan(ids, new Date())
+    const uncovered = ids.find((id) => !covered.has(id))
+    if (uncovered) throw new FacilityHasNoTariffError(uncovered)
+  }
+
+  // disable/delete are absent by design: they route through bulkDeactivate, which has to
+  // decide facility by facility rather than emit one blanket update.
+  private bulkData(
+    action: Exclude<BulkFacilityAction, 'assignTariff' | 'disable' | 'delete'>,
+  ): Prisma.FacilityUpdateManyMutationInput {
+    switch (action) {
+      case 'deploy':
+      case 'publish':
+        // Publishing must actually put the facility in front of the mobile app, not just
+        // flip the visibility flag: `live` (see FacilitiesManager) is isActive && isPublished,
+        // so a publish that left isActive untouched could report success while the facility
+        // stayed invisible. Same pair PublishFacilityToggle's "on" state already sets.
+        return { isActive: true, isPublished: true }
+      case 'enable':
+        return { isActive: true }
+      case 'unpublish':
+        return { isPublished: false }
+    }
+  }
+
+  async adminMap(user: AuthUser, params: AdminMapParams): Promise<AdminMapResponse> {
+    const scope = await this.operatorScope.resolve(user)
+    const filters = this.adminMapFilters(scope, user, params)
+    const whereSql = this.adminMapSql(filters)
+
+    const total = await this.countFacilities(whereSql)
+    if (total === 0) return { mode: 'points', points: [], clusters: [], total }
+
+    if (total > MAX_POINTS) {
+      const clusters = await this.gridClusters(whereSql, params.bounds)
+      return { mode: 'clusters', points: [], clusters, total }
+    }
+
+    const rows = await this.prisma.facility.findMany({
+      where: this.adminMapWhere(filters),
+      select: {
+        id: true,
+        name: true,
+        lat: true,
+        lng: true,
+        kind: true,
+        isActive: true,
+        isPublished: true,
+      },
+      take: MAX_POINTS,
+    })
+
+    const points: AdminMapPoint[] = rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      lat: r.lat.toNumber(),
+      lng: r.lng.toNumber(),
+      kind: r.kind,
+      isActive: r.isActive,
+      isPublished: r.isPublished,
+    }))
+    return { mode: 'points', points, clusters: [], total }
+  }
+
+  /**
+   * The admin map's filter set, resolved once per request. Operator scope stays sourced
+   * from OperatorScopeService, so a caller's own memberships always win over a requested
+   * `operatorId` — only a platform caller may narrow to an arbitrary operator.
+   *
+   * Both terms of the managed predicate are read off the SAME builder the list path uses
+   * and pushed as filters, so the Prisma points query, the raw count and the raw cluster
+   * buckets are narrowed identically — a map total that disagreed with the list would be
+   * the first symptom of one of the three renderings being forgotten.
+   */
+  private adminMapFilters(
+    scope: OperatorScope,
+    user: AuthUser,
+    params: AdminMapParams,
+  ): AdminMapFilter[] {
+    // Lifecycle rides in the filter list so both renderings (Prisma where for points,
+    // raw SQL for count/clusters) carry it — the SQL paths bypass the client extension.
+    const filters: AdminMapFilter[] = [
+      { on: 'bounds', bounds: params.bounds },
+      { on: 'lifecycle', value: LifecycleStatus.ACTIVE },
+    ]
+    if (params.q) filters.push({ on: 'text', value: params.q })
+    if (params.isActive !== undefined) filters.push({ on: 'isActive', value: params.isActive })
+    if (params.isPublished !== undefined) {
+      filters.push({ on: 'isPublished', value: params.isPublished })
+    }
+    if (params.kind) filters.push({ on: 'kind', value: params.kind })
+
+    const managed = this.operatorScope.facilityScopeWhere(scope, user)
+    if (managed.operatorId) filters.push({ on: 'operators', value: managed.operatorId.in })
+    else if (params.operatorId) filters.push({ on: 'operators', value: [params.operatorId] })
+    if (managed.managers) filters.push({ on: 'manager', userId: managed.managers.some.userId })
+
+    return filters
+  }
+
+  private adminMapWhere(filters: AdminMapFilter[]): Prisma.FacilityWhereInput {
+    return { AND: filters.map(adminFilterWhere) }
+  }
+
+  // Every user-supplied value rides as a bound parameter; nothing is interpolated as text.
+  private adminMapSql(filters: AdminMapFilter[]): Prisma.Sql {
+    return Prisma.join(filters.map(adminFilterSql), ' AND ')
+  }
+
+  private adminListWhere(
+    scope: OperatorScope,
+    user: AuthUser,
+    query: ListFacilitiesDto,
+  ): Prisma.FacilityWhereInput {
+    const filters: Prisma.FacilityWhereInput[] = []
+    if (query.q) {
+      filters.push({
+        OR: [
+          { name: { contains: query.q, mode: 'insensitive' } },
+          { address: { contains: query.q, mode: 'insensitive' } },
+        ],
+      })
+    }
+    if (query.isActive !== undefined) filters.push({ isActive: query.isActive })
+    if (query.isPublished !== undefined) filters.push({ isPublished: query.isPublished })
+    if (query.kind) filters.push({ kind: query.kind })
+    if (scope.kind === 'platform' && query.operatorId) {
+      filters.push({ operatorId: query.operatorId })
+    }
+
+    return {
+      ...this.operatorScope.facilityScopeWhere(scope, user),
+      ...(filters.length ? { AND: filters } : {}),
+    }
+  }
+
+  private async toAdminFacility(facility: {
+    id: string
+    operatorId: string | null
+    kind: FacilityKind
+    name: string
+    address: string
+    lat: Prisma.Decimal
+    lng: Prisma.Decimal
+    totalCapacity: number
+    onlineQuota: number
+    vehicleTypes: VehicleType[]
+    heightRestrictionCm: number | null
+    openingHoursJson: Prisma.JsonValue
+    amenities: string[]
+    cancellationPolicy: string
+    isActive: boolean
+    isPublished: boolean
+    rank: number
+    createdAt: Date
+    updatedAt: Date
+  }): Promise<AdminFacility> {
+    const now = new Date()
+    const { overlappingCount } = await this.inventory.checkAvailability({
+      facilityId: facility.id,
+      startsAt: now,
+      endsAt: now,
+    })
+
+    return {
+      id: facility.id,
+      operatorId: facility.operatorId,
+      kind: facility.kind,
+      name: facility.name,
+      address: facility.address,
+      lat: facility.lat.toNumber(),
+      lng: facility.lng.toNumber(),
+      totalCapacity: facility.totalCapacity,
+      onlineQuota: facility.onlineQuota,
+      bookedOnlineSpots: overlappingCount,
+      vehicleTypes: facility.vehicleTypes.map((v) => VEHICLE_FROM_PRISMA[v]),
+      heightRestrictionCm: facility.heightRestrictionCm,
+      openingHours: facility.openingHoursJson as unknown as OpeningHours,
+      amenities: facility.amenities,
+      cancellationPolicy: facility.cancellationPolicy,
+      isActive: facility.isActive,
+      isPublished: facility.isPublished,
+      rank: facility.rank,
+      createdAt: facility.createdAt,
+      updatedAt: facility.updatedAt,
+    }
   }
 
   private isPromotionLive(startsAt: Date | null, endsAt: Date | null): boolean {

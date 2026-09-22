@@ -1,0 +1,13 @@
+-- Adds the administrative tier above PLATFORM_ADMIN.
+--
+-- SUPER_ADMIN differs from PLATFORM_ADMIN by the identity:* permission family alone: it is
+-- the only role permitted to act on user ACCOUNTS. Platform admins keep every platform:*
+-- capability, so the permission map in @spark/types is the whole boundary between them.
+--
+-- Additive only. No existing row changes role here: promoting the first super admin is a
+-- separate, deliberate act (the bootstrap CLI, or a data migration for an existing
+-- deployment), never a silent side effect of a schema change.
+--
+-- ADD VALUE is transaction-safe on PostgreSQL 12+ so long as the new value is not USED in
+-- the same transaction. Nothing below references it, so this runs inside Prisma's wrapper.
+ALTER TYPE "UserRole" ADD VALUE 'SUPER_ADMIN';

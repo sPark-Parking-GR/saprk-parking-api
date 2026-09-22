@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common'
-import { BookingStatus, type Prisma } from '@prisma/client'
-import { NoAvailabilityError } from '../common/errors/domain.errors'
+import { BookingStatus, FacilityKind, type Prisma } from '@prisma/client'
+import { FacilityNotBookableError, NoAvailabilityError } from '../common/errors/domain.errors'
 import { PrismaService } from '../prisma/prisma.service'
 import { BOOKING_HOLD_MINUTES } from '../tariff/tariff.types'
 
@@ -47,7 +47,7 @@ export class InventoryService {
   /**
    * Atomically verifies availability and creates a booking in PENDING_PAYMENT status.
    * Uses SELECT FOR UPDATE on the facility row to serialize concurrent booking attempts
-   * for the same facility, preventing overselling under concurrent load.
+   * for the same facility, preventing overselling without losing sellable slots.
    */
   async holdSlot(
     params: {
@@ -55,15 +55,17 @@ export class InventoryService {
       startsAt: Date
       endsAt: Date
       quotedPriceCents: number
+      /** Already deducted from quotedPriceCents by the quote; 0 when the rider has no perk. */
+      discountCents: number
       vehiclePlate: string
       vehicleType: string
       accessCode: string
+      tariffPlanId: string
+      tariffPlanVersion: number
+      userId: string
+      sourceChannel: string
       idempotencyKey?: string
-      userId?: string
       vehicleId?: string
-      guestEmail?: string
-      guestPhone?: string
-      sourceChannel?: string
     },
     tx?: Prisma.TransactionClient,
   ): Promise<{ bookingId: string; expiresAt: Date }> {
@@ -75,11 +77,14 @@ export class InventoryService {
 
       const facility = await client.facility.findUnique({
         where: { id: params.facilityId },
-        select: { onlineQuota: true, isActive: true, isVerified: true },
+        select: { onlineQuota: true, isActive: true, isPublished: true, kind: true },
       })
 
-      if (!facility?.isActive || !facility.isVerified) {
-        throw new Error(`Facility ${params.facilityId} is not available for booking`)
+      // Booking eligibility mirrors TariffService.computeQuote's own facility lookup
+      // (isActive, isPublished, kind === BUSINESS) so holding without a prior quote
+      // can't bypass it.
+      if (!facility?.isActive || !facility.isPublished || facility.kind !== FacilityKind.BUSINESS) {
+        throw new FacilityNotBookableError(params.facilityId)
       }
 
       const overlapping = await this.countOverlappingBookings(
@@ -100,16 +105,17 @@ export class InventoryService {
           facilityId: params.facilityId,
           userId: params.userId,
           vehicleId: params.vehicleId,
-          guestEmail: params.guestEmail,
-          guestPhone: params.guestPhone,
           vehiclePlate: params.vehiclePlate,
           vehicleType: params.vehicleType as never,
           startsAt: params.startsAt,
           endsAt: params.endsAt,
           quotedPriceCents: params.quotedPriceCents,
+          discountCents: params.discountCents,
           accessCode: params.accessCode,
+          tariffPlanId: params.tariffPlanId,
+          tariffPlanVersion: params.tariffPlanVersion,
           idempotencyKey: params.idempotencyKey,
-          sourceChannel: (params.sourceChannel as never) ?? 'WEB',
+          sourceChannel: params.sourceChannel as never,
           status: BookingStatus.PENDING_PAYMENT,
           expiresAt,
           statusHistory: {
@@ -124,8 +130,14 @@ export class InventoryService {
 
     if (tx) return run(tx)
 
+    // Read Committed, not Serializable: the FOR UPDATE above is what serializes holds.
+    // Under Serializable that lock stamps the tuple, so every waiter aborts with 40001
+    // the instant the winner commits — before its own count can see the new booking, so
+    // only one slot ever sells and the rest surface as raw aborts. Read Committed lets a
+    // waiter re-read the committed state, count the winner, and reject with
+    // NoAvailabilityError only once the quota is genuinely full.
     return this.prisma.$transaction(run, {
-      isolationLevel: 'Serializable',
+      isolationLevel: 'ReadCommitted',
     })
   }
 
@@ -186,10 +198,7 @@ export class InventoryService {
         },
         // Exclude expired holds
         NOT: {
-          AND: [
-            { status: BookingStatus.PENDING_PAYMENT },
-            { expiresAt: { lt: new Date() } },
-          ],
+          AND: [{ status: BookingStatus.PENDING_PAYMENT }, { expiresAt: { lt: new Date() } }],
         },
         // Overlap condition: booking starts before requested end AND ends after requested start
         startsAt: { lt: endsAt },

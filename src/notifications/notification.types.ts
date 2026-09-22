@@ -7,10 +7,7 @@ export interface BookingNotificationData {
   amountCents: number
   currency: string
   recipientEmail: string
-}
-
-export interface INotificationProvider {
-  readonly providerName: string
-  sendBookingConfirmation(data: BookingNotificationData): Promise<void>
-  sendBookingCancellation(data: BookingNotificationData): Promise<void>
+  // Looked up against MobileProfile to find a push token, if any — a driver who never
+  // installed the app or never granted notification permission simply has none on file.
+  recipientUserId: string
 }

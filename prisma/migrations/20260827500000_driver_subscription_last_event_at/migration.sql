@@ -1,0 +1,21 @@
+-- Out-of-order webhook defence for driver billing.
+--
+-- WHY a column at all. Provider webhooks are not ordered. A delivery that fails is retried
+-- behind the deliveries that overtook it, so `customer.subscription.updated` (active) can
+-- land AFTER the `customer.subscription.deleted` that really ended the agreement — flipping
+-- a cancelled rider back to ACTIVE and granting them a discount nobody is paying for. The
+-- same hazard runs the other way for periods: an old `active` event carrying last cycle's
+-- current_period_end can overwrite a newer renewal's. Both are one comparison away from
+-- impossible, and the comparison needs a stored high-water mark.
+--
+-- WHY NOT `updatedAt`. That column is OUR clock and it moves for administrative writes too,
+-- so a retried delivery would be judged against a timestamp that has nothing to do with the
+-- provider's event stream. This one stores the PROVIDER's `event.created`, which is stable
+-- across every redelivery of the same event.
+--
+-- WHY nullable, and why no backfill. A row no provider event has ever touched — an
+-- administrator's manual grant, and every row predating this migration — has nothing to
+-- order against, and inventing a high-water mark for it would make the next genuine event
+-- look stale and be dropped. NULL means "no event applied yet, accept the next one", which
+-- is the only safe reading.
+ALTER TABLE "DriverSubscription" ADD COLUMN "lastEventAt" TIMESTAMP(3);

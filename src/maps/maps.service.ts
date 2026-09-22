@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common'
-import type { MapContext } from '@parqin/maps'
+import type { MapContext } from '@spark/maps'
 import type {
   BoundingBox,
   DirectionsOptions,
@@ -9,7 +9,7 @@ import type {
   Place,
   PlaceSearchOptions,
   Route,
-} from '@parqin/types'
+} from '@spark/types'
 import { MAP_CONTEXT_TOKEN } from './maps.constants'
 
 @Injectable()
@@ -30,6 +30,10 @@ export class MapsService {
 
   searchPlaces(query: string, options?: PlaceSearchOptions): Promise<Place[]> {
     return this.maps.searchPlaces(query, options)
+  }
+
+  getPlaceDetails(placeId: string): Promise<Place | null> {
+    return this.maps.getPlaceDetails(placeId)
   }
 
   getDirections(

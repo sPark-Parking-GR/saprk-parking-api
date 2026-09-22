@@ -1,0 +1,468 @@
+import { ForbiddenException, Injectable } from '@nestjs/common'
+import { LifecycleStatus, UserRole } from '@prisma/client'
+import { hasPlatformPermission, type AuthUser, type PlatformPermission } from '@spark/types'
+import { LifecycleActionBlockedError } from '../common/errors/domain.errors'
+import { SuperAdminProtectedError } from '../identity/identity.types'
+import { PrismaService } from '../prisma/prisma.service'
+import type { ListTrashDto } from './dto/lifecycle-admin.dto'
+import { LifecycleApprovalService } from './lifecycle-approval.service'
+import { LifecycleImpactService } from './lifecycle-impact.service'
+import { LifecyclePurgeService } from './lifecycle-purge.service'
+import { LifecycleService, type LifecycleActor } from './lifecycle.service'
+import {
+  LIFECYCLE_RESOURCE_TYPES,
+  RESOURCE_ENTITY_TYPE,
+  type ApprovalList,
+  type ApprovalView,
+  type DestructiveAction,
+  type ImpactReport,
+  type LifecycleResourceType,
+  type PurgeApprovalOutcome,
+  type TrashItem,
+  type TrashPage,
+} from './lifecycle.types'
+
+// Named explicitly so the Prisma lifecycle extension does not narrow the lookup to ACTIVE:
+// a super admin who is already archived must still be protected from tombstone and purge.
+const EVERY_STATUS = [
+  LifecycleStatus.ACTIVE,
+  LifecycleStatus.ARCHIVED,
+  LifecycleStatus.TOMBSTONED,
+  LifecycleStatus.PURGED,
+]
+
+// "Trash" is everything that is administratively gone. ACTIVE rows belong to the ordinary
+// resource endpoints, so they are only ever returned when explicitly asked for.
+const NON_ACTIVE_STATUSES = [
+  LifecycleStatus.ARCHIVED,
+  LifecycleStatus.TOMBSTONED,
+  LifecycleStatus.PURGED,
+]
+
+interface TrashRow {
+  id: string
+  name: string
+  lifecycleStatus: LifecycleStatus
+  lifecycleChangedAt: Date | null
+  lifecycleChangedBy: string | null
+  lifecycleReason: string | null
+  purgeAfter: Date | null
+}
+
+/**
+ * The platform-administration face of the lifecycle model. Every method re-checks the
+ * permission its controller already gated on, per the both-layers rule, and every
+ * destructive action runs the impact dry run first so the refusal a caller gets is the
+ * same list the preview showed them.
+ */
+@Injectable()
+export class LifecycleAdminService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly lifecycle: LifecycleService,
+    private readonly impact: LifecycleImpactService,
+    private readonly approvals: LifecycleApprovalService,
+    private readonly purge: LifecyclePurgeService,
+  ) {}
+
+  async listTrash(actor: AuthUser, query: ListTrashDto): Promise<TrashPage> {
+    this.assertPermission(actor, 'platform:tenant.read', 'view the lifecycle trash')
+
+    const statuses = query.status ? [query.status] : NON_ACTIVE_STATUSES
+    const requested = query.resourceType ? [query.resourceType] : [...LIFECYCLE_RESOURCE_TYPES]
+
+    // Asking for users outright is refused; asking for everything simply excludes them.
+    // A 403 on the explicit request is the honest answer — silently returning an empty
+    // page would read as "no deleted accounts exist", which is a different claim.
+    if (query.resourceType === 'user') {
+      this.assertMayTouchUsers(actor, 'user', 'identity:user.read', 'view user accounts')
+    }
+    const types = this.mayReadUsers(actor)
+      ? requested
+      : requested.filter((type) => type !== 'user')
+
+    // Merge-then-slice across the requested types. Each type contributes at most
+    // skip + take rows, which is the smallest prefix that can possibly hold the page once
+    // the four streams are interleaved — cheap because skip is capped and take is <= 100.
+    const window = query.skip + query.take
+    const perType = await Promise.all(
+      types.map(async (type) => ({
+        type,
+        rows: await this.trashRows(type, statuses, window),
+        total: await this.trashCount(type, statuses),
+      })),
+    )
+
+    const merged = perType
+      .flatMap(({ type, rows }) => rows.map((row) => this.toTrashItem(type, row)))
+      .sort(byChangedAtDesc)
+
+    return {
+      items: merged.slice(query.skip, query.skip + query.take),
+      total: perType.reduce((sum, entry) => sum + entry.total, 0),
+      skip: query.skip,
+      take: query.take,
+    }
+  }
+
+  // Async even where the body is a single delegation: a permission refusal must be a
+  // rejected promise like every other failure, never a synchronous throw the caller's
+  // .catch() would miss.
+  async previewImpact(
+    actor: AuthUser,
+    resourceType: LifecycleResourceType,
+    id: string,
+    action: DestructiveAction,
+  ): Promise<ImpactReport> {
+    this.assertPermission(actor, 'platform:tenant.read', 'preview lifecycle impact')
+    this.assertMayTouchUsers(actor, resourceType, 'identity:user.read', 'read user accounts')
+    return this.impact.preview(resourceType, id, action)
+  }
+
+  async archive(
+    actor: AuthUser,
+    resourceType: LifecycleResourceType,
+    id: string,
+    reason: string,
+  ): Promise<void> {
+    this.assertPermission(actor, 'platform:tenant.write', 'archive resources')
+    this.assertMayTouchUsers(actor, resourceType, 'identity:user.lifecycle', 'archive user accounts')
+    await this.assertTargetNotSuperAdmin(resourceType, id, 'archived')
+    await this.assertUnblocked(resourceType, id, 'archive')
+
+    const who = toLifecycleActor(actor)
+    switch (resourceType) {
+      case 'facility':
+        return this.lifecycle.archiveFacility(who, id, reason)
+      case 'tariff-plan':
+        return this.lifecycle.archiveTariffPlan(who, id, reason)
+      case 'operator':
+        return this.lifecycle.archiveOperator(who, id, reason)
+      case 'user':
+        return this.lifecycle.archiveUser(who, id, reason)
+    }
+  }
+
+  /**
+   * Restore is deliberately NOT gated on the impact preview: it is the reversal, not a
+   * destruction, and its own invariants live in LifecycleService — the operator facility
+   * cap and the one-active-default-plan rule, both re-validated there and both surfaced
+   * as LifecycleRestoreConflictError, which the filter maps to 409 with the conflicting
+   * row named. Nothing here may swallow that into a 500.
+   */
+  async restore(
+    actor: AuthUser,
+    resourceType: LifecycleResourceType,
+    id: string,
+    reason?: string,
+  ): Promise<void> {
+    this.assertPermission(actor, 'platform:tenant.write', 'restore resources')
+    this.assertMayTouchUsers(actor, resourceType, 'identity:user.lifecycle', 'restore user accounts')
+
+    const who = toLifecycleActor(actor)
+    switch (resourceType) {
+      case 'facility':
+        return this.lifecycle.restoreFacility(who, id, reason)
+      case 'tariff-plan':
+        return this.lifecycle.restoreTariffPlan(who, id, reason)
+      case 'operator':
+        return this.lifecycle.restoreOperator(who, id, reason)
+      case 'user':
+        return this.lifecycle.restoreUser(who, id, reason)
+    }
+  }
+
+  async tombstone(
+    actor: AuthUser,
+    resourceType: LifecycleResourceType,
+    id: string,
+    reason: string,
+  ): Promise<void> {
+    this.assertPermission(actor, 'platform:tenant.purge', 'tombstone resources')
+    this.assertMayTouchUsers(
+      actor,
+      resourceType,
+      'identity:user.lifecycle',
+      'tombstone user accounts',
+    )
+    await this.assertTargetNotSuperAdmin(resourceType, id, 'tombstoned')
+    await this.assertUnblocked(resourceType, id, 'tombstone')
+
+    const who = toLifecycleActor(actor)
+    switch (resourceType) {
+      case 'facility':
+        return this.lifecycle.tombstoneFacility(who, id, reason)
+      case 'tariff-plan':
+        return this.lifecycle.tombstoneTariffPlan(who, id, reason)
+      case 'operator':
+        return this.lifecycle.tombstoneOperator(who, id, reason)
+      case 'user':
+        return this.lifecycle.tombstoneUser(who, id, reason)
+    }
+  }
+
+  /**
+   * Does NOT purge. It files a request for a second administrator to redeem — the blockers
+   * are checked here so a request that could never succeed is never created, and again at
+   * approval time because the state can change in between.
+   */
+  async requestPurge(
+    actor: AuthUser,
+    resourceType: LifecycleResourceType,
+    id: string,
+    reason: string,
+  ): Promise<ApprovalView> {
+    this.assertPermission(actor, 'platform:tenant.purge', 'purge resources')
+    this.assertMayTouchUsers(actor, resourceType, 'identity:user.lifecycle', 'purge user accounts')
+    await this.assertTargetNotSuperAdmin(resourceType, id, 'purged')
+    await this.assertUnblocked(resourceType, id, 'purge')
+    return this.approvals.request(actor, resourceType, id, reason)
+  }
+
+  async listApprovals(actor: AuthUser): Promise<ApprovalList> {
+    this.assertPermission(actor, 'platform:tenant.purge', 'view purge approvals')
+
+    const approvals = await this.approvals.list()
+    if (this.mayReadUsers(actor)) return approvals
+
+    // Withheld rather than merely undecidable: the existence of a pending purge names an
+    // account id, which is exactly what identity:user.read governs.
+    const items = approvals.items.filter((approval) => approval.resourceType !== 'user')
+    return { items, total: items.length }
+  }
+
+  async approve(actor: AuthUser, approvalId: string): Promise<PurgeApprovalOutcome> {
+    this.assertPermission(actor, 'platform:tenant.purge', 'approve a purge')
+    await this.assertMayDecide(actor, approvalId, 'approve the purge of a user account')
+
+    const approval = await this.approvals.claim(actor, approvalId)
+    const resourceType = approval.resourceType as LifecycleResourceType
+    await this.assertUnblocked(resourceType, approval.resourceId, 'purge')
+
+    await this.purge.purgeOne(toLifecycleActor(actor), resourceType, approval.resourceId, {
+      reason: approval.reason,
+      approvalId: approval.id,
+      requestedBy: approval.requestedBy,
+    })
+
+    return {
+      approval: {
+        id: approval.id,
+        action: approval.action,
+        resourceType: approval.resourceType,
+        resourceId: approval.resourceId,
+        reason: approval.reason,
+        requestedBy: approval.requestedBy,
+        requestedByRole: approval.requestedByRole,
+        status: approval.status,
+        expiresAt: approval.expiresAt.toISOString(),
+        decidedBy: approval.decidedBy,
+        decidedAt: approval.decidedAt?.toISOString() ?? null,
+        decisionReason: approval.decisionReason,
+        createdAt: approval.createdAt.toISOString(),
+      },
+      purged: true,
+    }
+  }
+
+  async reject(actor: AuthUser, approvalId: string, reason: string): Promise<ApprovalView> {
+    this.assertPermission(actor, 'platform:tenant.purge', 'reject a purge')
+    await this.assertMayDecide(actor, approvalId, 'reject the purge of a user account')
+    return this.approvals.reject(actor, approvalId, reason)
+  }
+
+  private async assertUnblocked(
+    resourceType: LifecycleResourceType,
+    id: string,
+    action: DestructiveAction,
+  ): Promise<void> {
+    const report = await this.impact.preview(resourceType, id, action)
+    if (report.blockers.length > 0) {
+      throw new LifecycleActionBlockedError(
+        action,
+        RESOURCE_ENTITY_TYPE[resourceType],
+        id,
+        report.blockers,
+      )
+    }
+  }
+
+  private assertPermission(actor: AuthUser, permission: PlatformPermission, action: string): void {
+    // Controller already gates on the same permission; re-check in the service layer per
+    // the both-layers authorization rule.
+    if (!hasPlatformPermission(actor.role, permission)) {
+      throw new ForbiddenException(`Only platform admins may ${action}`)
+    }
+  }
+
+  /**
+   * THE boundary between platform_admin and super_admin.
+   *
+   * This surface is generic over its resource type and `user` is one of the four, so the
+   * tenant permissions alone would let any platform admin reach every account on the
+   * platform through it. Acting on a user therefore costs an identity permission ON TOP OF
+   * whichever tenant tier the action already demanded — platform admins keep every
+   * `platform:*` capability, so this check is the only thing separating the two tiers.
+   *
+   * A no-op for the other three resource types, which is what keeps operator, facility and
+   * tariff-plan administration entirely unchanged for platform admins.
+   */
+  private assertMayTouchUsers(
+    actor: AuthUser,
+    resourceType: LifecycleResourceType,
+    permission: PlatformPermission,
+    action: string,
+  ): void {
+    if (resourceType !== 'user') return
+    if (!hasPlatformPermission(actor.role, permission)) {
+      throw new ForbiddenException(`Only super admins may ${action}`)
+    }
+  }
+
+  /**
+   * Super administrators are unreachable by every ordinary verb. The single action
+   * permitted against one is demotion, which needs a second super admin to approve — so an
+   * incident response is "demote, then act", and there is no approval fork on four separate
+   * verbs to keep consistent.
+   */
+  private async assertTargetNotSuperAdmin(
+    resourceType: LifecycleResourceType,
+    id: string,
+    action: string,
+  ): Promise<void> {
+    if (resourceType !== 'user') return
+
+    const target = await this.prisma.user.findFirst({
+      where: { id, lifecycleStatus: { in: EVERY_STATUS } },
+      select: { role: true },
+    })
+    if (target?.role === UserRole.SUPER_ADMIN) throw new SuperAdminProtectedError(action)
+  }
+
+  private mayReadUsers(actor: AuthUser): boolean {
+    return hasPlatformPermission(actor.role, 'identity:user.read')
+  }
+
+  /**
+   * Approvals name their resource in the row, not the URL, so authority over it can only be
+   * checked after a read. Deliberately does NOT raise on an unknown id: claim() and
+   * reject() own ApprovalNotFoundError, and short-circuiting here would fork that error
+   * into two places and change what an unknown id looks like to a caller.
+   */
+  private async assertMayDecide(
+    actor: AuthUser,
+    approvalId: string,
+    action: string,
+  ): Promise<void> {
+    const resourceType = await this.approvals.resourceTypeOf(approvalId)
+    if (resourceType === null) return
+
+    this.assertMayTouchUsers(
+      actor,
+      resourceType as LifecycleResourceType,
+      'identity:user.lifecycle',
+      action,
+    )
+  }
+
+  // Every read here names lifecycleStatus explicitly, which is the extension's documented
+  // opt-out (anyLifecycleStatus): an admin trash view that could not see non-ACTIVE rows
+  // would be empty by construction.
+  private trashRows(
+    resourceType: LifecycleResourceType,
+    statuses: LifecycleStatus[],
+    take: number,
+  ): Promise<TrashRow[]> {
+    const orderBy = [
+      { lifecycleChangedAt: { sort: 'desc', nulls: 'last' } as const },
+      { id: 'asc' as const },
+    ]
+    const select = {
+      id: true,
+      lifecycleStatus: true,
+      lifecycleChangedAt: true,
+      lifecycleChangedBy: true,
+      lifecycleReason: true,
+      purgeAfter: true,
+    }
+
+    switch (resourceType) {
+      case 'facility':
+        return this.prisma.facility.findMany({
+          where: { lifecycleStatus: { in: statuses } },
+          select: { ...select, name: true },
+          orderBy,
+          take,
+        })
+      case 'tariff-plan':
+        return this.prisma.tariffPlan.findMany({
+          where: { lifecycleStatus: { in: statuses } },
+          select: { ...select, name: true },
+          orderBy,
+          take,
+        })
+      case 'operator':
+        return this.prisma.parkingOperator.findMany({
+          where: { lifecycleStatus: { in: statuses } },
+          select: { ...select, name: true },
+          orderBy,
+          take,
+        })
+      case 'user':
+        return this.prisma.user
+          .findMany({
+            where: { lifecycleStatus: { in: statuses } },
+            select: { ...select, displayName: true, email: true },
+            orderBy,
+            take,
+          })
+          .then((rows) =>
+            rows.map(({ displayName, email, ...rest }) => ({
+              ...rest,
+              name: displayName ?? email,
+            })),
+          )
+    }
+  }
+
+  private trashCount(
+    resourceType: LifecycleResourceType,
+    statuses: LifecycleStatus[],
+  ): Promise<number> {
+    const where = { lifecycleStatus: { in: statuses } }
+    switch (resourceType) {
+      case 'facility':
+        return this.prisma.facility.count({ where })
+      case 'tariff-plan':
+        return this.prisma.tariffPlan.count({ where })
+      case 'operator':
+        return this.prisma.parkingOperator.count({ where })
+      case 'user':
+        return this.prisma.user.count({ where })
+    }
+  }
+
+  private toTrashItem(resourceType: LifecycleResourceType, row: TrashRow): TrashItem {
+    return {
+      resourceType,
+      id: row.id,
+      name: row.name,
+      status: row.lifecycleStatus,
+      changedAt: row.lifecycleChangedAt?.toISOString() ?? null,
+      changedBy: row.lifecycleChangedBy,
+      reason: row.lifecycleReason,
+      purgeAfter: row.purgeAfter?.toISOString() ?? null,
+    }
+  }
+}
+
+function byChangedAtDesc(a: TrashItem, b: TrashItem): number {
+  if (a.changedAt === b.changedAt) return a.id < b.id ? -1 : 1
+  if (!a.changedAt) return 1
+  if (!b.changedAt) return -1
+  return a.changedAt < b.changedAt ? 1 : -1
+}
+
+function toLifecycleActor(actor: AuthUser): LifecycleActor {
+  return { id: actor.id, role: actor.role }
+}

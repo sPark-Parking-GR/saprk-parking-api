@@ -1,6 +1,6 @@
 import { ForbiddenException, type ExecutionContext } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import type { AuthUser, UserRole } from '@parqin/types'
+import type { AuthUser, UserRole } from '@spark/types'
 import { RolesGuard } from './roles.guard'
 
 function makeContext(user?: AuthUser): ExecutionContext {

@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
-import { createMapContext } from '@parqin/maps'
-import type { MapProviderConfig } from '@parqin/maps'
+import { createMapContext } from '@spark/maps'
+import type { MapProviderConfig } from '@spark/maps'
 import { MAP_CONTEXT_TOKEN } from './maps.constants'
 import { MapsService } from './maps.service'
 
@@ -11,7 +11,8 @@ import { MapsService } from './maps.service'
       provide: MAP_CONTEXT_TOKEN,
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
-        const provider = (config.get<string>('MAP_PROVIDER') ?? 'google') as MapProviderConfig['provider']
+        const provider = (config.get<string>('MAP_PROVIDER') ??
+          'google') as MapProviderConfig['provider']
 
         switch (provider) {
           case 'google':

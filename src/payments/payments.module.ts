@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
-import { createPaymentContext } from '@parqin/payments'
-import type { PaymentProviderConfig } from '@parqin/payments'
+import { createPaymentContext } from '@spark/payments'
+import type { PaymentProviderConfig } from '@spark/payments'
 import { PAYMENT_CONTEXT_TOKEN } from './payments.constants'
 import { PaymentsService } from './payments.service'
 
@@ -11,11 +11,15 @@ import { PaymentsService } from './payments.service'
       provide: PAYMENT_CONTEXT_TOKEN,
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
-        const provider = (config.get<string>('PAYMENT_PROVIDER') ?? 'mock') as PaymentProviderConfig['provider']
+        const provider = (config.get<string>('PAYMENT_PROVIDER') ??
+          'mock') as PaymentProviderConfig['provider']
 
         switch (provider) {
           case 'mock':
-            return createPaymentContext({ provider: 'mock', config: {} })
+            return createPaymentContext({
+              provider: 'mock',
+              config: { webhookSecret: config.getOrThrow('MOCK_WEBHOOK_SECRET') },
+            })
           case 'stripe':
             return createPaymentContext({
               provider: 'stripe',

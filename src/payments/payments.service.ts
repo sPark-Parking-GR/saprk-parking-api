@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common'
-import type { PaymentContext } from '@parqin/payments'
+import type { PaymentContext } from '@spark/payments'
 import type {
   CapturePaymentParams,
   CreatePaymentIntentParams,
@@ -7,7 +7,7 @@ import type {
   PaymentWebhookEvent,
   RefundParams,
   RefundResult,
-} from '@parqin/types'
+} from '@spark/types'
 import { PAYMENT_CONTEXT_TOKEN } from './payments.constants'
 
 @Injectable()

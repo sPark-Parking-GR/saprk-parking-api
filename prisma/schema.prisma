@@ -6,16 +6,21 @@ generator client {
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
-  extensions = [postgis]
+  extensions = [postgis, pg_trgm]
 }
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
 
+// Ascending authority. SUPER_ADMIN differs from PLATFORM_ADMIN by the identity:* family
+// alone — it is the only role that may act on user accounts. Deliberately uncapped; what
+// constrains the tier is who may grant it (an existing super admin, or the bootstrap CLI
+// for the first one) and the two-person rule on acting against one, not a headcount.
 enum UserRole {
   USER
   OPERATOR_STAFF
   OPERATOR_ADMIN
   PLATFORM_ADMIN
+  SUPER_ADMIN
 }
 
 enum VehicleType {
@@ -36,11 +41,39 @@ enum OperatorMemberRole {
   ADMIN
 }
 
-enum TariffType {
-  HOURLY
-  DAILY
-  OVERNIGHT
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+// The two flows OperatorInvite serves. ONBOARDING mints a brand-new operator; MEMBER
+// attaches a person to one that already exists. See the model for why they share a table.
+enum OperatorInviteKind {
+  ONBOARDING
+  MEMBER
+}
+
+// Which flow minted a PasswordResetToken. The grant itself, its lifetime and the endpoint
+// that consumes it are identical either way — this exists so the completion can be audited
+// as the thing the user actually did. A locked-out person proving they own the mailbox is
+// not the same event as a signed-in person who already proved they know the current
+// password, and after the fact the audit log is the only place that distinction survives.
+enum PasswordResetOrigin {
+  FORGOT_PASSWORD
+  CHANGE_PASSWORD
+}
+
+enum RateUnit {
+  PER_MINUTE
+  PER_BLOCK
   FLAT
+}
+
+enum CapScope {
+  STAY
+  ROLLING
 }
 
 enum BookingStatus {
@@ -87,6 +120,74 @@ enum PromotionType {
   PREMIUM
 }
 
+enum IngestSource {
+  OSM
+  GOOGLE
+}
+
+enum RawPlaceStatus {
+  PENDING
+  PROCESSED
+  REJECTED
+  DUPLICATE
+}
+
+enum TileStatus {
+  PENDING
+  FETCHING
+  FETCHED
+  FAILED
+}
+
+// Administrative resource lifecycle, orthogonal to isActive (published/bookable).
+// ARCHIVED and TOMBSTONED rows are hidden from every default Prisma read by the client
+// extension in src/prisma/lifecycle.extension.ts; raw SQL must filter explicitly.
+// TOMBSTONED means deleted-but-recoverable and carries purgeAfter; PURGED is terminal and
+// only ever reached by User rows, which are anonymised in place because their bookings
+// are ON DELETE RESTRICT financial records (other models are physically removed).
+enum LifecycleStatus {
+  ACTIVE
+  ARCHIVED
+  TOMBSTONED
+  PURGED
+}
+
+// Outcome of a two-person-rule request (see the PendingApproval model). PENDING is the
+// only redeemable state and the only one the partial unique index counts; the other three
+// are terminal, so an approval can be spent exactly once.
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum BillingInterval {
+  MONTHLY
+  YEARLY
+}
+
+// CANCELLED is the only terminal state, and it is the one the partial unique index
+// excludes: an operator may accumulate any number of cancelled subscriptions over time but
+// may hold at most one live agreement. PAST_DUE still grants the plan's entitlements —
+// dunning decides when a delinquent account loses access, and silently voiding limits on
+// the first failed charge would break a paying customer's operations mid-cycle.
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
+// How a facility is used, so free public lots and commercial parking businesses are
+// managed separately. OSM mixes both; Google only ever returns real businesses.
+enum FacilityKind {
+  BUSINESS // commercial parking operation (paid; bookable candidate)
+  FREE_PUBLIC // free public / on-street parking area — never bookable
+  RESTRICTED // private or customers-only — not public
+  UNKNOWN // insufficient source signal to classify
+}
+
 // ─── User & Auth ──────────────────────────────────────────────────────────────
 
 model User {
@@ -95,17 +196,93 @@ model User {
   role          UserRole @default(USER)
   displayName   String?
   avatarUrl     String?
+  passwordHash  String?
+  // Set for Firebase-provisioned identities so the Firebase-backed auth provider can
+  // round-trip the remote uid through the shared user store; null for authjs users.
+  firebaseUid   String?  @unique
   emailVerified Boolean  @default(false)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  // Session revocation watermark: any token whose `iat` is not strictly newer than this
+  // is rejected. A timestamp rather than a version claim because Firebase ID tokens are
+  // minted by Google and we cannot add claims to them — but every JWT carries `iat`.
+  // Null means never revoked.
+  sessionsValidFrom DateTime?
+
+  // Self-service account deletion tombstone. Booking.userId is NOT NULL and deliberately
+  // not cascading, so removing the row would either fail or take the financial record with
+  // it; instead the row survives stripped of every identifying field (see
+  // AccountDeletionService) and this column records when. A tombstone never authenticates
+  // again, and its email is rewritten so the address is free to sign up afresh.
+  deletedAt DateTime?
+
+  // Platform-administration lifecycle (see the LifecycleStatus enum). lifecycleChangedBy
+  // is the acting user's id with no FK on purpose: it is an audit fact that must outlive
+  // the actor's own row.
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
 
   vehicles            Vehicle[]
   wallet              Wallet?
   bookings            Booking[]
   reviews             Review[]
   operatorMemberships OperatorMembership[]
+  invitesSent         OperatorInvite[]
+  adminInvitesSent    PlatformAdminInvite[]
+  passwordResetTokens PasswordResetToken[]
+  savedFacilities     SavedFacility[]
+  managedFacilities   FacilityManager[]
+  managedTariffPlans  TariffPlanManager[]
+  driverSubscriptions DriverSubscription[]
+  billingCustomer     DriverBillingCustomer?
+  mobileProfile       MobileProfile?
 
   @@index([email])
+  @@index([lifecycleStatus, purgeAfter])
+}
+
+// Single-use, short-lived password reset grant. Only the sha256 hash of the raw token is
+// stored, so a database leak yields nothing usable: the raw token exists solely inside the
+// email that was sent. Issued for both authjs- and Firebase-backed accounts — the reset is
+// completed by this API in either case, which is what lets it bump User.sessionsValidFrom.
+//
+// Shared by the logged-out forgot-password flow and the signed-in change-password one
+// rather than duplicated per flow: both need exactly the same single-use, expiring,
+// hashed-at-rest grant, and a second table would be the same columns with a second set of
+// consume/invalidate races to get right. `origin` is what tells them apart.
+model PasswordResetToken {
+  id        String              @id @default(cuid())
+  userId    String
+  tokenHash String              @unique
+  origin    PasswordResetOrigin @default(FORGOT_PASSWORD)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Mobile-client-specific state, split off `User` rather than grown there: the identity
+// row stays lean regardless of how large the mobile install base gets, and this table's
+// access pattern (written by the mobile app on every launch/token refresh) never touches
+// the auth-critical columns on `User`. Mirrors the `Wallet` 1:1-child pattern below.
+model MobileProfile {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  pushToken    String?
+  locale       String?
+  appVersion   String?
+  lastActiveAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Vehicle {
@@ -154,20 +331,74 @@ model CreditTransaction {
 // ─── Operator ─────────────────────────────────────────────────────────────────
 
 model ParkingOperator {
-  id          String         @id @default(cuid())
-  name        String
-  legalName   String?
-  taxId       String?        @unique
-  status      OperatorStatus @default(PENDING)
-  verifiedAt  DateTime?
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  id         String         @id @default(cuid())
+  name       String
+  legalName  String?
+  taxId      String?        @unique
+  status     OperatorStatus @default(PENDING)
+  verifiedAt DateTime?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
 
-  facilities     Facility[]
-  memberships    OperatorMembership[]
-  promotionPlans PromotionPlan[]
+  // Platform-administration lifecycle (see LifecycleStatus).
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
+
+  facilities       Facility[]
+  memberships      OperatorMembership[]
+  promotionPlans   PromotionPlan[]
+  tariffPlans      TariffPlan[]
+  invites          OperatorInvite[]
+  ownershipPeriods FacilityOwnershipPeriod[]
+  subscriptions    OperatorSubscription[]
+  billingCustomer  OperatorBillingCustomer?
 
   @@index([status])
+  @@index([lifecycleStatus, purgeAfter])
+}
+
+// A single-use, expiring grant that provisions an identity and an OperatorMembership.
+// Only the sha256 hash of the raw token is stored; the raw token exists solely in the
+// email. Two flows share this table because they share everything that matters — token
+// issuance and rotation, the unique-hash lookup, the status lifecycle, expiry, revoke,
+// resend and accept-time provisioning — and splitting them would force validate()/accept()
+// to probe two tables by an opaque token. What differs is captured by `kind`.
+model OperatorInvite {
+  id           String             @id @default(cuid())
+  email        String
+  businessName String
+  // Nullable: revoke() deletes the never-claimed shell operator but keeps this row (with
+  // its REVOKED status) for audit visibility in the invites list, rather than cascading it
+  // away with the operator.
+  operatorId   String?
+  // ONBOARDING is platform-admin-issued and creates the PENDING shell operator alongside
+  // the invite; accepting it flips that operator to VERIFIED. MEMBER is issued by an
+  // operator's own admins and attaches to an operator that already exists, leaving its
+  // status alone. Explicit rather than inferred from the operator's status, because
+  // revoke() deletes an unclaimed shell operator and that destructive branch must key off
+  // a recorded fact, not a heuristic that a future PENDING-operator state could break.
+  kind         OperatorInviteKind @default(ONBOARDING)
+  // The membership role accept() provisions, and the User.role it signs the invitee up
+  // with. ONBOARDING is always ADMIN — a new operator's first member has to be able to
+  // administer it.
+  role         OperatorMemberRole @default(ADMIN)
+  tokenHash    String             @unique
+  status       InviteStatus       @default(PENDING)
+  invitedById  String
+  expiresAt    DateTime
+  acceptedAt   DateTime?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  operator  ParkingOperator? @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+  invitedBy User             @relation(fields: [invitedById], references: [id])
+
+  @@index([email])
+  @@index([status])
+  @@index([operatorId])
 }
 
 model OperatorMembership {
@@ -177,50 +408,122 @@ model OperatorMembership {
   role       OperatorMemberRole
   createdAt  DateTime           @default(now())
 
+  // What this member may do inside THIS operator (the org:* scopes in @spark/types).
+  //
+  // Per membership, not per user: the same person can be an administrator of one operator
+  // and a barrier attendant at another, and a single per-user set could not express that.
+  //
+  // Meaningful for STAFF only. ADMIN derives the full set at read time rather than storing
+  // it, so a scope added to the product later applies to existing admins instead of
+  // silently missing from rows written before it existed.
+  scopes String[] @default([])
+
   operator ParkingOperator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
   user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([operatorId, userId])
+  @@index([userId])
 }
 
 // ─── Facility ─────────────────────────────────────────────────────────────────
 
 model Facility {
-  id                  String   @id @default(cuid())
-  operatorId          String
+  id                  String        @id @default(cuid())
+  // Nullable: a platform admin may create a facility with no operator assigned yet.
+  // Deleting an operator that already owns facilities must still fail rather than
+  // orphan them, so onDelete stays Restrict (unlike OperatorInvite's SetNull).
+  operatorId          String?
   name                String
   address             String
-  lat                 Decimal  @db.Decimal(10, 7)
-  lng                 Decimal  @db.Decimal(10, 7)
+  lat                 Decimal       @db.Decimal(10, 7)
+  lng                 Decimal       @db.Decimal(10, 7)
   totalCapacity       Int
   onlineQuota         Int
   vehicleTypes        VehicleType[]
   heightRestrictionCm Int?
   openingHoursJson    Json
   amenities           String[]
-  cancellationPolicy  String   @default("")
-  isActive            Boolean  @default(false)
-  isVerified          Boolean  @default(false)
-  rank                Int      @default(0)
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  cancellationPolicy  String        @default("")
+  isActive            Boolean       @default(false)
+  isPublished         Boolean       @default(false)
+  rank                Int           @default(0)
+  // Free public lot vs commercial parking business vs restricted. Classified at
+  // ingestion; lets the two be surfaced and managed separately.
+  kind                FacilityKind  @default(UNKNOWN)
+  // Ingestion provenance. Null for operator-created facilities; set for rows
+  // promoted from RawPlace. sourceRef = OSM element id or Google place_id.
+  source              IngestSource?
+  sourceRef           String?
+  sourceUpdatedAt     DateTime?
+  contentHash         String?
+  // Google enrichment is a refreshable cache (ToS: place_id may persist, other
+  // fields must be refreshed). googleSyncedAt marks when the cached Google fields
+  // were last pulled so a refresh job can re-fetch before the TTL lapses.
+  googlePlaceId       String?       @unique
+  googleSyncedAt      DateTime?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
 
-  operator      ParkingOperator @relation(fields: [operatorId], references: [id])
-  images        FacilityImage[]
-  rules         FacilityRule[]
-  tariffPlans   TariffPlan[]
-  bookings      Booking[]
-  reviews       Review[]
-  promotionPlan PromotionPlan?
+  // Platform-administration lifecycle (see LifecycleStatus). Archiving forces
+  // isActive = false because the public search predicate lives in raw SQL
+  // (PUBLIC_VISIBLE_SQL) where the client extension cannot reach; restore never
+  // republishes. The one-facility-per-operator partial unique index counts only
+  // lifecycle-ACTIVE rows (see the resource_lifecycle migration), so restore must
+  // re-validate the cap.
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
+
+  operator          ParkingOperator?           @relation(fields: [operatorId], references: [id], onDelete: Restrict)
+  tariffAssignments FacilityTariffAssignment[]
+  images            FacilityImage[]
+  rules             FacilityRule[]
+  bookings          Booking[]
+  reviews           Review[]
+  promotionPlan     PromotionPlan?
+  ownershipPeriods  FacilityOwnershipPeriod[]
+  savedBy           SavedFacility[]
+  managers          FacilityManager[]
 
   // Generated geography point (kept in sync with lat/lng by the database). Managed
   // via raw SQL in the migration; Prisma treats it as an opaque column.
   geog Unsupported("geography(Point, 4326)")?
 
+  @@unique([source, sourceRef])
   @@index([lat, lng])
-  @@index([isActive, isVerified])
+  @@index([isActive, isPublished])
+  @@index([kind, isActive])
+  // One-facility-per-operator cap for real operators is a PARTIAL unique index defined
+  // in the migration (WHERE operatorId <> the synthetic unclaimed-import operator),
+  // mirroring the TariffPlan.isDefault partial-unique convention. Not expressible as a
+  // schema @@unique, so this stays a plain index here; the DB enforces the cap.
   @@index([operatorId])
   @@index([geog], type: Gist)
+  @@index([lifecycleStatus, purgeAfter])
+}
+
+// Who owned a facility, and when. `Facility.operatorId` answers only "who owns it NOW",
+// so attributing historical money through it would silently rewrite every past payout the
+// moment a facility is reassigned. Revenue is therefore attributed through the period that
+// contains the payment's settlement instant, never through the facility's current owner.
+//
+// Half-open interval [from, to): `to` NULL means "still the owner". One open period per
+// facility is enforced by a partial unique index (see the migration).
+model FacilityOwnershipPeriod {
+  id         String    @id @default(cuid())
+  facilityId String
+  operatorId String
+  from       DateTime
+  to         DateTime?
+  createdAt  DateTime  @default(now())
+
+  facility Facility        @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  operator ParkingOperator @relation(fields: [operatorId], references: [id])
+
+  @@index([facilityId, from])
+  @@index([operatorId, from])
 }
 
 model FacilityImage {
@@ -236,6 +539,22 @@ model FacilityImage {
   @@index([facilityId])
 }
 
+// A consumer's bookmarked facilities, server-side so they survive a reinstall. Both sides
+// cascade: the row is a personal preference with no financial or audit value, so it must
+// never be the reason a facility or an account cannot be deleted.
+model SavedFacility {
+  id         String   @id @default(cuid())
+  userId     String
+  facilityId String
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  facility Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, facilityId])
+  @@index([userId, createdAt])
+}
+
 model FacilityRule {
   id         String @id @default(cuid())
   facilityId String
@@ -247,35 +566,173 @@ model FacilityRule {
   @@unique([facilityId, ruleKey])
 }
 
+// Per-user management assignment, layered ON TOP of OperatorMembership rather than
+// replacing it: a member of the owning operator sees a facility only once they also hold a
+// row here. Platform admins are exempt entirely and never get rows.
+//
+// assignedBy is the acting user's id with no FK on purpose — same convention as
+// lifecycleChangedBy: it is an audit fact that must outlive the actor's row.
+//
+// The (userId) index is load-bearing, not decoration: `managers: { some: { userId } }` is
+// the narrowing predicate on every dashboard list, detail and map query.
+model FacilityManager {
+  facilityId String
+  userId     String
+  assignedAt DateTime @default(now())
+  assignedBy String
+
+  facility Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([facilityId, userId])
+  @@index([userId])
+}
+
 // ─── Tariff ───────────────────────────────────────────────────────────────────
 
 model TariffPlan {
-  id         String    @id @default(cuid())
-  facilityId String
-  name       String
-  isDefault  Boolean   @default(false)
-  isActive   Boolean   @default(true)
-  validFrom  DateTime?
-  validTo    DateTime?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id               String        @id @default(cuid())
+  operatorId       String
+  name             String
+  isActive         Boolean       @default(true)
+  // Catch-all for any facility vehicle-type slot with no explicit override. Only a
+  // plan with empty vehicleTypes (prices everything) may be default. At most one
+  // active default per operator (partial unique index in the migration); required
+  // once an operator has 2+ active plans, enforced in the service layer.
+  isDefault        Boolean       @default(false)
+  validFrom        DateTime?
+  validTo          DateTime?
+  // IANA zone for all wall-clock window math (DST-correct). Never server-local.
+  timezone         String        @default("Europe/Athens")
+  // Free leading minutes before billing starts.
+  graceMinutes     Int           @default(0)
+  // Billing granularity: total billable minutes round up to this.
+  incrementMinutes Int           @default(60)
+  // Vehicle classes this plan prices; empty = all.
+  vehicleTypes     VehicleType[]
+  // Bumped on any edit; quotes pin (planId, version) so price can't shift mid-hold.
+  version          Int           @default(1)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
-  facility Facility     @relation(fields: [facilityId], references: [id], onDelete: Cascade)
-  rules    TariffRule[]
+  // Platform-administration lifecycle (see LifecycleStatus). Unlike Facility, archiving
+  // PRESERVES isActive/isDefault: applicability is enforced in memory (isPlanApplicable
+  // checks lifecycle) and the operator-default partial unique index counts only
+  // lifecycle-ACTIVE rows, so archiving a default frees the slot while keeping the state
+  // whose conflicts restore must re-validate.
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
 
-  @@index([facilityId, isActive])
+  operator            ParkingOperator            @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  facilityAssignments FacilityTariffAssignment[]
+  tiers               RateTier[]
+  windows             RateWindow[]
+  caps                RateCap[]
+  managers            TariffPlanManager[]
+
+  @@index([operatorId, isActive])
+  @@index([lifecycleStatus, purgeAfter])
 }
 
-model TariffRule {
-  id                 String      @id @default(cuid())
-  planId             String
-  type               TariffType
-  vehicleTypes       VehicleType[]
-  minDurationMinutes Int?
-  maxDurationMinutes Int?
-  priceCents         Int
-  currency           String      @default("EUR")
-  sortOrder          Int         @default(0)
+// Assigns a plan to a facility for one concrete vehicle type. A plan may back many
+// rows/facilities; a facility may have up to one row per VehicleType. Any vehicle
+// type with no row here falls back to the operator's default plan (TariffPlan.isDefault)
+// — there is no per-facility wildcard/catch-all row anymore.
+model FacilityTariffAssignment {
+  id           String      @id @default(cuid())
+  facilityId   String
+  tariffPlanId String
+  vehicleType  VehicleType
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  facility   Facility   @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  tariffPlan TariffPlan @relation(fields: [tariffPlanId], references: [id], onDelete: Cascade)
+
+  @@unique([facilityId, vehicleType])
+  @@index([tariffPlanId])
+}
+
+// The TariffPlan twin of FacilityManager — see that model for why the assignment exists,
+// why assignedBy carries no FK, and why the (userId) index is load-bearing. Two tables
+// rather than one polymorphic one so both sides keep real foreign keys and cascade deletes.
+model TariffPlanManager {
+  tariffPlanId String
+  userId       String
+  assignedAt   DateTime @default(now())
+  assignedBy   String
+
+  tariffPlan TariffPlan @relation(fields: [tariffPlanId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([tariffPlanId, userId])
+  @@index([userId])
+}
+
+// Partitions the 24h clock for time-of-day pricing (e.g. Day vs Night). With no
+// windows a plan gets one implicit all-day window, collapsing to duration-only.
+model RateWindow {
+  id          String @id @default(cuid())
+  planId      String
+  label       String
+  // Bitmask, bit 0 = Monday .. bit 6 = Sunday; 127 = every day.
+  dayMask     Int    @default(127)
+  // Minute-of-day, inclusive [0,1440).
+  startMinute Int
+  // Minute-of-day, exclusive; <= startMinute wraps past midnight.
+  endMinute   Int
+
+  plan  TariffPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  rates TariffRate[]
+
+  @@index([planId])
+}
+
+// Duration-progressive structure. Tiers tile the cumulative-minute axis [0,∞);
+// exactly one tier is open-ended (toMinute = null).
+model RateTier {
+  id           String   @id @default(cuid())
+  planId       String
+  // Inclusive cumulative-minute boundary.
+  fromMinute   Int
+  // Exclusive cumulative-minute boundary; null = open-ended.
+  toMinute     Int?
+  unit         RateUnit
+  // Block size for PER_BLOCK (60 = hourly, 15 = quarter-hour); null otherwise.
+  blockMinutes Int?
+
+  plan  TariffPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  rates TariffRate[]
+
+  @@index([planId])
+}
+
+// Price for a (tier, window) pair. A row per cell of the duration×clock grid.
+model TariffRate {
+  id         String @id @default(cuid())
+  tierId     String
+  windowId   String
+  priceCents Int
+  currency   String @default("EUR")
+
+  tier   RateTier   @relation(fields: [tierId], references: [id], onDelete: Cascade)
+  window RateWindow @relation(fields: [windowId], references: [id], onDelete: Cascade)
+
+  @@unique([tierId, windowId])
+  @@index([tierId])
+  @@index([windowId])
+}
+
+// Clamps the running total over a window. windowMinutes = 1440 → daily cap.
+model RateCap {
+  id            String   @id @default(cuid())
+  planId        String
+  windowMinutes Int
+  capCents      Int
+  scope         CapScope @default(ROLLING)
 
   plan TariffPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
 
@@ -285,30 +742,54 @@ model TariffRule {
 // ─── Booking ──────────────────────────────────────────────────────────────────
 
 model Booking {
-  id               String        @id @default(cuid())
-  facilityId       String
-  userId           String?
-  vehicleId        String?
-  guestEmail       String?
-  guestPhone       String?
-  vehiclePlate     String
-  vehicleType      VehicleType
-  startsAt         DateTime
-  endsAt           DateTime
-  quotedPriceCents Int
-  finalPriceCents  Int?
-  currency         String        @default("EUR")
-  status           BookingStatus @default(PENDING_PAYMENT)
-  accessCode       String        @unique
-  qrTokenHash      String?       @unique
-  sourceChannel    SourceChannel @default(WEB)
-  idempotencyKey   String?       @unique
-  expiresAt        DateTime?
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  id                   String        @id @default(cuid())
+  facilityId           String
+  userId               String
+  vehicleId            String?
+  vehiclePlate         String
+  vehicleType          VehicleType
+  startsAt             DateTime
+  endsAt               DateTime
+  quotedPriceCents     Int
+  finalPriceCents      Int?
+  // Signed difference recorded when check-out reprices the stay
+  // (finalPriceCents - quotedPriceCents); null until a check-out reprices. No money
+  // moves with it: the original intent was captured at confirm, so an overstay needs a
+  // new intent and an early departure is a refund-policy decision. This column is the
+  // settlement queue for that explicit follow-up.
+  priceAdjustmentCents Int?
+  // What the rider's driver subscription took off this booking, already deducted from
+  // quotedPriceCents (pricing-engine computes it; nothing else persisted it before this
+  // column). Nullable for the same reason as the two Int? columns above: rows written
+  // before it existed genuinely do not know, and defaulting them to 0 would assert that a
+  // subscriber saved nothing on stays that may well have been discounted. Every booking
+  // created since records the real figure INCLUDING an explicit 0, so a savings total over
+  // post-migration rows is exact rather than inferred.
+  discountCents        Int?
+  currency             String        @default("EUR")
+  status               BookingStatus @default(PENDING_PAYMENT)
+  // Human-dictatable identifier, not a secret: base32 over 16 random bytes using an
+  // alphabet with no visually ambiguous characters (see BookingService).
+  accessCode           String        @unique
+  // Independent 32-byte secret minted at confirm and NEVER derived from accessCode —
+  // that code is printed, read aloud and searchable, so anything derived from it would
+  // be forgeable by everyone who has ever seen it. Held in full rather than hashed
+  // because rotating QR codes are computed from it server-side.
+  qrSecret             String?       @unique
+  // The (plan, version) the quote was priced with, pinned so check-out reprices the stay
+  // against the same schedule that priced it instead of whatever is current. Deliberately
+  // not a foreign key: it records a historical pricing fact, and a FK would couple plan
+  // and operator lifecycle to every booking ever made.
+  tariffPlanId         String?
+  tariffPlanVersion    Int?
+  sourceChannel        SourceChannel @default(WEB)
+  idempotencyKey       String?       @unique
+  expiresAt            DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
 
   facility      Facility               @relation(fields: [facilityId], references: [id])
-  user          User?                  @relation(fields: [userId], references: [id])
+  user          User                   @relation(fields: [userId], references: [id])
   vehicle       Vehicle?               @relation(fields: [vehicleId], references: [id])
   statusHistory BookingStatusHistory[]
   payment       Payment?
@@ -351,6 +832,10 @@ model Payment {
 
   booking Booking @relation(fields: [bookingId], references: [id])
   refund  Refund?
+
+  // Every analytics read starts here: settled statuses over a settlement-instant range.
+  // Without it the aggregates are a sequential scan of every payment ever taken.
+  @@index([status, createdAt])
 }
 
 model Refund {
@@ -367,6 +852,37 @@ model Refund {
 
   booking Booking @relation(fields: [bookingId], references: [id])
   payment Payment @relation(fields: [paymentId], references: [id])
+}
+
+// Webhook delivery ledger. Providers redeliver events (retries on non-200, duplicates,
+// out-of-order); the (providerEventId, surface) UNIQUE is the replay gate. The handler
+// inserts this row first, inside the same transaction as the state change it applies, so a
+// redelivery hits P2002 and is acknowledged without touching state, while a failed attempt
+// rolls the insert back and the provider's retry gets a clean second run.
+//
+// `surface` names WHICH consumer processed the delivery, and the key is compound because
+// one Stripe account fans the SAME event id out to several endpoints of ours: the driver and
+// operator subscription endpoints are both subscribed to checkout.session.completed and the
+// customer.subscription.* family, and Stripe offers no way to filter a subscription by
+// metadata. A table-wide unique on providerEventId alone therefore let whichever endpoint
+// committed first claim the id, and the other endpoint — which had processed nothing —
+// answered 200 to a genuine delivery it never applied. Scoping per consumer makes each
+// surface's idempotency independent of what any other surface did with the same id.
+// Values are WebhookSurface in src/common/webhook-surface.ts; a String rather than an enum
+// to match `provider` and `outcome` on this same table, which are provider/handler
+// vocabulary rather than domain state machines.
+model WebhookEvent {
+  id              String    @id @default(cuid())
+  provider        String
+  providerEventId String
+  surface         String
+  type            String
+  payload         Json?
+  outcome         String?
+  receivedAt      DateTime  @default(now())
+  processedAt     DateTime?
+
+  @@unique([providerEventId, surface])
 }
 
 // ─── Promotion ────────────────────────────────────────────────────────────────
@@ -404,6 +920,60 @@ model Review {
   @@index([facilityId])
 }
 
+// ─── Ingestion ────────────────────────────────────────────────────────────────
+
+// Landing zone for external data (OSM Overpass, Google Places). Raw payloads are
+// stored untouched, then normalized, deduped and promoted to Facility. Never write
+// external data straight to Facility.
+model RawPlace {
+  id          String         @id @default(cuid())
+  source      IngestSource
+  // OSM element id (e.g. "node/123") or Google place_id.
+  sourceRef   String
+  // 'node' | 'way' | 'relation' (OSM) or 'place' (Google).
+  sourceType  String
+  raw         Json
+  lat         Decimal        @db.Decimal(10, 7)
+  lng         Decimal        @db.Decimal(10, 7)
+  tileId      String?
+  // Hash of normalized payload; skip reprocessing when unchanged.
+  contentHash String
+  status      RawPlaceStatus @default(PENDING)
+  // Set once promoted/matched to a Facility.
+  facilityId  String?
+  fetchedAt   DateTime       @default(now())
+  processedAt DateTime?
+
+  // Generated geography point, kept in sync with lat/lng by the database. Managed
+  // via raw SQL in the migration; Prisma treats it as an opaque column.
+  geog Unsupported("geography(Point, 4326)")?
+
+  @@unique([source, sourceRef])
+  @@index([status])
+  @@index([tileId])
+  @@index([geog], type: Gist)
+}
+
+// Bounding-box tiles driving the tiled extract. Tracks per-tile coverage so runs
+// are incremental and resumable.
+model IngestTile {
+  id            String       @id @default(cuid())
+  source        IngestSource
+  south         Decimal      @db.Decimal(10, 7)
+  west          Decimal      @db.Decimal(10, 7)
+  north         Decimal      @db.Decimal(10, 7)
+  east          Decimal      @db.Decimal(10, 7)
+  status        TileStatus   @default(PENDING)
+  resultCount   Int          @default(0)
+  lastError     String?
+  lastFetchedAt DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([source, south, west, north, east])
+  @@index([source, status])
+}
+
 // ─── Audit ────────────────────────────────────────────────────────────────────
 
 model AuditLog {
@@ -420,4 +990,282 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([actorId])
   @@index([createdAt])
+}
+
+// A platform administrator recruits a peer. Deliberately its own table rather than a third
+// OperatorInviteKind: operatorId, businessName and OperatorMemberRole are all meaningless
+// here, and reusing OperatorInvite would ship three permanently-null columns plus a nullable
+// operator relation that every read would have to reason about.
+//
+// Grants PLATFORM_ADMIN and only ever that. SUPER_ADMIN is unreachable by invite — it comes
+// from the bootstrap CLI or promotion by an existing super admin, both of which require an
+// authenticated actor who already holds the tier.
+//
+// tokenHash stores sha256 only; the raw token exists solely in the email, exactly as
+// OperatorInvite does it. invitedById is a real FK because unlike the lifecycle audit
+// columns this row is operational, not a historical fact that must outlive its actor.
+model PlatformAdminInvite {
+  id          String       @id @default(cuid())
+  email       String
+  displayName String?
+  tokenHash   String       @unique
+  status      InviteStatus @default(PENDING)
+  invitedById String
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  invitedBy User @relation(fields: [invitedById], references: [id])
+
+  @@index([email])
+  @@index([status])
+}
+
+// ─── Two-person rule ──────────────────────────────────────────────────────────
+
+// One irreversible action, requested by one platform administrator and redeemable only by
+// a different one. Purge is the only action that mints these: archive and tombstone are
+// reversible and need no second pair of eyes.
+//
+// requestedBy/decidedBy are TEXT with no foreign key, matching lifecycleChangedBy: who
+// asked and who agreed are audit facts that must outlive either account.
+//
+// At most one PENDING row per (action, resourceType, resourceId) is a PARTIAL unique index
+// defined in the migration (WHERE status = 'PENDING'), following the same convention as
+// Facility_operatorId_claimed_key — not expressible as a schema @@unique, so this stays a
+// plain index here and the database enforces the constraint.
+model PendingApproval {
+  id              String         @id @default(cuid())
+  action          String
+  resourceType    String
+  resourceId      String
+  reason          String
+  requestedBy     String
+  requestedByRole String
+  status          ApprovalStatus @default(PENDING)
+  expiresAt       DateTime
+  decidedBy       String?
+  decidedByRole   String?
+  decidedAt       DateTime?
+  decisionReason  String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([status, expiresAt])
+  @@index([action, resourceType, resourceId])
+  @@index([requestedBy])
+}
+
+// ─── Billing ──────────────────────────────────────────────────────────────────
+
+// The sellable catalog, deliberately separate from OperatorSubscription: a plan is a
+// product many tenants share and that must keep describing what was sold long after
+// pricing moves on. It therefore carries the same five lifecycle columns as the four
+// LIFECYCLE_MODELS so a retired plan is archived, never deleted, while the subscriptions
+// pointing at it keep resolving.
+//
+// It is deliberately NOT registered in LIFECYCLE_MODELS: the Prisma lifecycle extension
+// would then silently filter it, and a billing predicate that decides what a customer may
+// do must be visible at the call site rather than injected. Every read in
+// EntitlementService and SubscriptionAdminService names lifecycleStatus explicitly, and
+// archival runs through the billing admin surface, not the generic lifecycle service.
+//
+// priceCents is an integer minor unit, never a float — the same rule Payment.amountCents
+// and Booking.quotedPriceCents already follow.
+model SubscriptionPlan {
+  id           String          @id @default(cuid())
+  code         String          @unique
+  name         String
+  description  String?
+  priceCents   Int
+  currency     String          @default("EUR")
+  interval     BillingInterval @default(MONTHLY)
+  // Validated by entitlementsSchema at every read and write boundary; see
+  // src/subscriptions/entitlements.schema.ts for why an untyped blob is not acceptable.
+  entitlements Json
+  // Self-serve plans are offered in the public catalog; sales-negotiated ones exist only
+  // for a platform admin to assign by hand.
+  isPublic     Boolean         @default(true)
+  sortOrder    Int             @default(0)
+
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions OperatorSubscription[]
+
+  @@index([lifecycleStatus, sortOrder])
+}
+
+// One operator's instance of a plan. At most one non-terminal (non-CANCELLED) row per
+// operator is a PARTIAL unique index defined in the migration — not expressible as a
+// schema @@unique, so this stays a plain index here and the database enforces it, exactly
+// as Facility_operatorId_claimed_key and TariffPlan_operator_active_default_key did.
+//
+// entitlementOverride is a PARTIAL entitlement patch merged over the plan's own values, so
+// a negotiated deal ("Starter, but four facilities") is expressed as the single key that
+// differs instead of forcing a bespoke plan into the public catalog.
+//
+// providerSubscriptionId is nullable and unique-when-set: no billing provider is wired
+// yet, and Postgres treats NULLs as distinct so every unwired row coexists.
+model OperatorSubscription {
+  id                     String             @id @default(cuid())
+  operatorId             String
+  planId                 String
+  status                 SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart     DateTime           @default(now())
+  currentPeriodEnd       DateTime?
+  trialEndsAt            DateTime?
+  cancelAtPeriodEnd      Boolean            @default(false)
+  cancelledAt            DateTime?
+  providerSubscriptionId String?            @unique
+  entitlementOverride    Json?
+
+  // The provider clock of the newest billing event applied to this row, and the ordering
+  // key the webhook handler compares every arrival against. Nullable and un-backfilled for
+  // the same reasons DriverSubscription.lastEventAt is: a row no provider event has ever
+  // touched (an administrator's manual assignment) has nothing to order against, and NOT
+  // `updatedAt`, which is our clock and moves for administrative writes too.
+  lastEventAt            DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  operator ParkingOperator  @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  plan     SubscriptionPlan @relation(fields: [planId], references: [id])
+
+  @@index([operatorId, status])
+  @@index([planId])
+}
+
+// The rider-facing catalog. Structurally the mirror of SubscriptionPlan — same lifecycle
+// columns, same integer minor-unit price, same JSON entitlements crossing a Zod schema at
+// every read and write (src/subscriptions/driver-entitlements.schema.ts) — but a separate
+// model rather than a polymorphic one because the two entitlement shapes share no key: an
+// operator buys platform capacity, a rider buys perks applied to a booking. The precedent
+// is already in this schema (SubscriptionPlan vs TariffPlan).
+//
+// Deliberately NOT registered in LIFECYCLE_MODELS, for the same reason SubscriptionPlan is
+// not: the lifecycle extension would silently inject a filter that a predicate deciding
+// what a paying customer gets must name at the call site, and archival runs through the
+// billing admin surface rather than the generic lifecycle service.
+model DriverSubscriptionPlan {
+  id           String          @id @default(cuid())
+  code         String          @unique
+  name         String
+  description  String?
+  priceCents   Int
+  currency     String          @default("EUR")
+  interval     BillingInterval @default(MONTHLY)
+  entitlements Json
+  isPublic     Boolean         @default(true)
+  sortOrder    Int             @default(0)
+
+  lifecycleStatus    LifecycleStatus @default(ACTIVE)
+  lifecycleChangedAt DateTime?
+  lifecycleChangedBy String?
+  lifecycleReason    String?
+  purgeAfter         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions DriverSubscription[]
+
+  @@index([lifecycleStatus, sortOrder])
+}
+
+// One rider's instance of a driver plan. Reuses SubscriptionStatus and BillingInterval
+// rather than redefining parallel enums: the lifecycle of a paid agreement is identical on
+// both sides, and two enums with the same members would be two things to keep in step.
+//
+// At most one non-CANCELLED row per user is a PARTIAL unique index defined in the
+// migration (DriverSubscription_user_live_key) — not expressible as a schema @@unique, and
+// it is what makes two simultaneous assignments produce one live row instead of two,
+// exactly as OperatorSubscription_operator_live_key does.
+//
+// DIVERGENCE FROM THE OPERATOR SIDE — no backfill, and no row required. Every
+// ParkingOperator was backfilled onto Starter by 20260803100000 because operators number
+// in the thousands and their resolution fails closed against a real default-plan row.
+// Riders are consumer-scale: a row per User would be millions of rows carrying no
+// information. A user with no DriverSubscription resolves to FREE_TIER_DRIVER_ENTITLEMENTS
+// in code — all perks off — which is both the safe default and the true one, so there is
+// nothing to fail closed against and no rider equivalent of the `starter` seed row.
+model DriverSubscription {
+  id                     String             @id @default(cuid())
+  userId                 String
+  planId                 String
+  status                 SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart     DateTime           @default(now())
+  currentPeriodEnd       DateTime?
+  trialEndsAt            DateTime?
+  cancelAtPeriodEnd      Boolean            @default(false)
+  cancelledAt            DateTime?
+  providerSubscriptionId String?            @unique
+  entitlementOverride    Json?
+
+  // The provider clock of the newest billing event applied to this row, and the ordering
+  // key the webhook handler compares every arrival against. Nullable because a row that no
+  // provider event has ever touched (an administrator's manual grant) has nothing to order
+  // against, and because it is added to rows that predate it. NOT `updatedAt`: that is our
+  // clock and it moves for administrative writes too, so a retried delivery would be judged
+  // against a time it has no relationship to.
+  lastEventAt            DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan DriverSubscriptionPlan @relation(fields: [planId], references: [id])
+
+  @@index([userId, status])
+  @@index([planId])
+}
+
+// The rider's identity at the billing provider, and deliberately NOT a column on
+// DriverSubscription.
+//
+// A free-tier rider has no DriverSubscription row at all — that is the prior phase's
+// explicit no-backfill design — yet a provider customer must be created the first time they
+// ever open checkout, before any subscription exists. It must also survive the subscription:
+// a lapsed or cancelled rider who resubscribes has to reach the SAME customer, or their
+// payment methods and invoice history fork. So the anchor is keyed by user and lives
+// independently of the subscription lifecycle.
+//
+// `provider` travels with the id because `cus_mock_…` and a real Stripe `cus_…` are not
+// interchangeable: a deployment that switches providers must mint a new customer rather than
+// hand the new provider an id it has never seen. The composite unique is the reverse lookup
+// a webhook uses when an event carries only `providerCustomerId`.
+model DriverBillingCustomer {
+  userId             String   @id
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider           String
+  providerCustomerId String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([provider, providerCustomerId])
+}
+
+// The tenant's identity at the billing provider, and DriverBillingCustomer's exact mirror —
+// every reason recorded on that model applies here with "operator" substituted for "rider".
+//
+// Keyed on the OPERATOR rather than on the admin who happened to open checkout: the customer
+// the invoices belong to is the business, so a change of owner, a second admin, or the
+// departure of the person who first subscribed must all still reach the same identity.
+model OperatorBillingCustomer {
+  operatorId         String          @id
+  operator           ParkingOperator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  provider           String
+  providerCustomerId String
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  @@unique([provider, providerCustomerId])
 }
