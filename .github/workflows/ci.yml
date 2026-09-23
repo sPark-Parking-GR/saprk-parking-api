@@ -110,3 +110,21 @@ jobs:
       # Proves the image that actually ships still builds from this repo alone.
       - name: Docker build
         run: docker build -t spark-api:ci .
+
+  deploy:
+    name: Deploy to Render
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Environment secrets are only readable by a job that declares this. Pair this with
+    # a branch protection rule on the "production" environment restricting it to main,
+    # in Settings -> Environments -> Production -> Deployment branches — that enforces
+    # the restriction at the platform level, not just via the `if:` above.
+    environment: Production
+    steps:
+      # Render's own build runs the real deploy; this just starts it, only once every
+      # check in the ci job above has passed. Auto-Deploy is off in Render's dashboard
+      # for this service, so this hook is the only way a push to main reaches
+      # production.
+      - name: Trigger Render deploy
+        run: curl -sf -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
