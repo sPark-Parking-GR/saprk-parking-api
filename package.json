@@ -9,7 +9,7 @@
     "dev": "pnpm run build:vendor && nest start --watch",
     "start": "node dist/main",
     "lint": "eslint \"{src,test}/**/*.ts\"",
-    "typecheck": "pnpm -r run typecheck && tsc --noEmit",
+    "typecheck": "pnpm run build:vendor && pnpm -r run typecheck && tsc --noEmit",
     "test": "pnpm -r run test && jest",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
