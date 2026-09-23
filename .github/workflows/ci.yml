@@ -116,6 +116,11 @@ jobs:
     needs: ci
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Environment secrets are only readable by a job that declares this. Pair this with
+    # a branch protection rule on the "production" environment restricting it to main,
+    # in Settings -> Environments -> production -> Deployment branches — that enforces
+    # the restriction at the platform level, not just via the `if:` above.
+    environment: production
     steps:
       # Render's own build runs the real deploy; this just starts it, only once every
       # check in the ci job above has passed. Auto-Deploy is off in Render's dashboard
