@@ -238,6 +238,15 @@ mobile apps.
 `Dockerfile` builds from this repo alone — no monorepo context. CI builds the image on
 every run so a broken Dockerfile fails the PR rather than the deploy.
 
+Deployed on Render. Render's own Auto-Deploy is turned off in its dashboard for this
+service, so a push to `main` never starts a deploy by itself — the `deploy` job at the
+end of `ci.yml` does that, and only after every step in the `ci` job has passed, by
+POSTing to a Render Deploy Hook URL stored as the `RENDER_DEPLOY_HOOK_URL` repo secret.
+Render then runs its own build (`pnpm run build`, which generates the Prisma client and
+compiles `vendor/*` before `nest build` — see `db:generate` above) exactly as CI already
+proved it would. If a deploy needs to happen without a CI-passing commit (rolling back,
+redeploying the same commit), trigger it from Render's dashboard directly.
+
 ## Definition of done
 
 - [ ] Feature acceptance criteria implemented
