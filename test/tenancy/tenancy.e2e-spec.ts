@@ -197,10 +197,9 @@ describe('tenancy isolation (e2e)', () => {
     })
 
     it('ignores a requested operatorId that the caller does not belong to', async () => {
-      const response = await get(
-        `/tariff-plans?operatorId=${beta.operatorId}`,
-        alpha.token,
-      ).expect(200)
+      const response = await get(`/tariff-plans?operatorId=${beta.operatorId}`, alpha.token).expect(
+        200,
+      )
 
       expect(response.body.items.map((item: { id: string }) => item.id)).toEqual([
         alpha.tariffPlanId,

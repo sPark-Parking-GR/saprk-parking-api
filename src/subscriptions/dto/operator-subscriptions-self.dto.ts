@@ -25,8 +25,6 @@ export type RequestOperatorUpgradeDto = z.infer<typeof requestOperatorUpgradeSch
  * operatorId field for the same reason there is none on any route of this controller — the
  * tenant is derived from the caller's own memberships and is not theirs to name.
  */
-export const startOperatorCheckoutSchema = z
-  .object({ planId: z.string().trim().min(1) })
-  .strict()
+export const startOperatorCheckoutSchema = z.object({ planId: z.string().trim().min(1) }).strict()
 
 export type StartOperatorCheckoutDto = z.infer<typeof startOperatorCheckoutSchema>

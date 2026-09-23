@@ -1,0 +1,5 @@
+{
+  "extends": "../config/tsconfig/lib.json",
+  "compilerOptions": { "noEmit": true, "types": [] },
+  "include": ["src/**/*"]
+}

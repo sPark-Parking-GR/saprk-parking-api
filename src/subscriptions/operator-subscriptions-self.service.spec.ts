@@ -343,9 +343,9 @@ describe('OperatorSubscriptionsSelfService', () => {
       const { service, prisma, billing } = setup()
       prisma.subscriptionPlan.findFirst.mockResolvedValue(null)
 
-      await expect(
-        service.startCheckout(owner, { planId: 'plan_hidden' }),
-      ).rejects.toBeInstanceOf(SubscriptionPlanNotFoundError)
+      await expect(service.startCheckout(owner, { planId: 'plan_hidden' })).rejects.toBeInstanceOf(
+        SubscriptionPlanNotFoundError,
+      )
       expect(prisma.subscriptionPlan.findFirst).toHaveBeenCalledWith({
         where: { id: 'plan_hidden', lifecycleStatus: LifecycleStatus.ACTIVE, isPublic: true },
       })
@@ -360,9 +360,9 @@ describe('OperatorSubscriptionsSelfService', () => {
     it('refuses a checkout for the plan the operator already holds', async () => {
       const { service, prisma, billing } = setup({ liveSubscription: { planId: 'plan_growth' } })
 
-      await expect(
-        service.startCheckout(owner, { planId: 'plan_growth' }),
-      ).rejects.toBeInstanceOf(AlreadySubscribedToPlanError)
+      await expect(service.startCheckout(owner, { planId: 'plan_growth' })).rejects.toBeInstanceOf(
+        AlreadySubscribedToPlanError,
+      )
       expect(prisma.operatorSubscription.findFirst.mock.calls[0]![0].where).toMatchObject({
         operatorId: OWN_OPERATOR,
         status: { in: [...LIVE_SUBSCRIPTION_STATUSES] },
@@ -396,9 +396,9 @@ describe('OperatorSubscriptionsSelfService', () => {
         ]),
       )
 
-      await expect(
-        service.startCheckout(owner, { planId: 'plan_growth' }),
-      ).rejects.toBeInstanceOf(SubscriptionDowngradeBlockedError)
+      await expect(service.startCheckout(owner, { planId: 'plan_growth' })).rejects.toBeInstanceOf(
+        SubscriptionDowngradeBlockedError,
+      )
       expect(entitlements.assertUsageFitsEntitlements).toHaveBeenCalledWith(OWN_OPERATOR, {
         ...starter,
         maxFacilities: 5,

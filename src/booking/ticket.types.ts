@@ -1,11 +1,7 @@
 import type { BookingStatus, VehicleType } from '@prisma/client'
 
 export type TicketVerdict =
-  | 'valid'
-  | 'invalid_signature'
-  | 'outside_time_window'
-  | 'already_used'
-  | 'not_honourable'
+  'valid' | 'invalid_signature' | 'outside_time_window' | 'already_used' | 'not_honourable'
 
 export type TicketMethod = 'qr' | 'access_code'
 

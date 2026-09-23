@@ -2,10 +2,7 @@ import { Body, Controller, Get, HttpCode, Post } from '@nestjs/common'
 import { Throttle } from '@nestjs/throttler'
 import { Public } from '../auth/decorators/public.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
-import {
-  registerOperatorSchema,
-  type RegisterOperatorDto,
-} from './dto/operator-registration.dto'
+import { registerOperatorSchema, type RegisterOperatorDto } from './dto/operator-registration.dto'
 import { OperatorRegistrationService } from './operator-registration.service'
 
 /**

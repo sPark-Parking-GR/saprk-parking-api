@@ -1,4 +1,10 @@
-import { OperatorMemberRole, PrismaClient, UserRole, type ParkingOperator, type User } from '@prisma/client'
+import {
+  OperatorMemberRole,
+  PrismaClient,
+  UserRole,
+  type ParkingOperator,
+  type User,
+} from '@prisma/client'
 import type { NestFastifyApplication } from '@nestjs/platform-fastify'
 import { DEFAULT_STAFF_SCOPES, ORG_PERMISSIONS } from '@spark/types'
 import request from 'supertest'

@@ -77,9 +77,7 @@ export class LifecycleAdminService {
     if (query.resourceType === 'user') {
       this.assertMayTouchUsers(actor, 'user', 'identity:user.read', 'view user accounts')
     }
-    const types = this.mayReadUsers(actor)
-      ? requested
-      : requested.filter((type) => type !== 'user')
+    const types = this.mayReadUsers(actor) ? requested : requested.filter((type) => type !== 'user')
 
     // Merge-then-slice across the requested types. Each type contributes at most
     // skip + take rows, which is the smallest prefix that can possibly hold the page once
@@ -126,7 +124,12 @@ export class LifecycleAdminService {
     reason: string,
   ): Promise<void> {
     this.assertPermission(actor, 'platform:tenant.write', 'archive resources')
-    this.assertMayTouchUsers(actor, resourceType, 'identity:user.lifecycle', 'archive user accounts')
+    this.assertMayTouchUsers(
+      actor,
+      resourceType,
+      'identity:user.lifecycle',
+      'archive user accounts',
+    )
     await this.assertTargetNotSuperAdmin(resourceType, id, 'archived')
     await this.assertUnblocked(resourceType, id, 'archive')
 
@@ -157,7 +160,12 @@ export class LifecycleAdminService {
     reason?: string,
   ): Promise<void> {
     this.assertPermission(actor, 'platform:tenant.write', 'restore resources')
-    this.assertMayTouchUsers(actor, resourceType, 'identity:user.lifecycle', 'restore user accounts')
+    this.assertMayTouchUsers(
+      actor,
+      resourceType,
+      'identity:user.lifecycle',
+      'restore user accounts',
+    )
 
     const who = toLifecycleActor(actor)
     switch (resourceType) {

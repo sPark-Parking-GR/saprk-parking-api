@@ -111,8 +111,7 @@ export function seedDriverSubscriptionPlan(
       name: seed.name ?? 'Driver Plus',
       priceCents: seed.priceCents ?? 499,
       entitlements: {
-        bookingDiscountBps:
-          seed.bookingDiscountBps === undefined ? 1_000 : seed.bookingDiscountBps,
+        bookingDiscountBps: seed.bookingDiscountBps === undefined ? 1_000 : seed.bookingDiscountBps,
         bookingFeeWaived: seed.bookingFeeWaived ?? false,
         freeCancellations: seed.freeCancellations === undefined ? null : seed.freeCancellations,
         features: seed.features ?? [],

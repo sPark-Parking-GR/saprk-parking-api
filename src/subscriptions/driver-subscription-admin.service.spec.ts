@@ -198,8 +198,9 @@ describe('DriverSubscriptionAdminService', () => {
         sortOrder: 0,
       })
 
-      expect(prisma.driverSubscriptionPlan.create.mock.calls[0]![0].data.entitlements.features)
-        .toEqual(['support.priority'])
+      expect(
+        prisma.driverSubscriptionPlan.create.mock.calls[0]![0].data.entitlements.features,
+      ).toEqual(['support.priority'])
     })
 
     it('writes an audit row naming the plan', async () => {
@@ -510,9 +511,9 @@ describe('DriverSubscriptionAdminService', () => {
       })
 
       expect(prisma.driverSubscription.update).toHaveBeenCalled()
-      expect(
-        prisma.auditLog.create.mock.calls.map((call) => call[0].data.action),
-      ).toContain('driver_subscription.provider_cancel_failed')
+      expect(prisma.auditLog.create.mock.calls.map((call) => call[0].data.action)).toContain(
+        'driver_subscription.provider_cancel_failed',
+      )
     })
 
     it('rejects an unknown or archived plan', async () => {

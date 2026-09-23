@@ -122,9 +122,9 @@ describe('operator self-serve checkout (e2e)', () => {
 
       await post(`${SELF}/checkout`, { planId: plan.id }, bearerToken(staff)).expect(403)
 
-      expect(
-        await raw.operatorBillingCustomer.count({ where: { operatorId: operator.id } }),
-      ).toBe(0)
+      expect(await raw.operatorBillingCustomer.count({ where: { operatorId: operator.id } })).toBe(
+        0,
+      )
     })
 
     it('creates the tenant’s billing customer once and returns a mock checkout URL', async () => {
@@ -157,9 +157,9 @@ describe('operator self-serve checkout (e2e)', () => {
 
       await post(`${SELF}/checkout`, { planId: plan.id }, token).expect(404)
 
-      expect(
-        await raw.operatorBillingCustomer.count({ where: { operatorId: operator.id } }),
-      ).toBe(0)
+      expect(await raw.operatorBillingCustomer.count({ where: { operatorId: operator.id } })).toBe(
+        0,
+      )
     })
 
     // The return URLs are built from WEB_APP_URL; nothing in the body may reach them, and
@@ -188,9 +188,9 @@ describe('operator self-serve checkout (e2e)', () => {
       const response = await post(`${SELF}/checkout`, { planId: tiny.id }, token).expect(409)
 
       expect(response.body.message).toContain('facilities')
-      expect(
-        await raw.operatorBillingCustomer.count({ where: { operatorId: operator.id } }),
-      ).toBe(0)
+      expect(await raw.operatorBillingCustomer.count({ where: { operatorId: operator.id } })).toBe(
+        0,
+      )
     })
   })
 
@@ -256,9 +256,7 @@ describe('operator self-serve checkout (e2e)', () => {
       await post(`${SELF}/mock-checkout/${sessionId}/confirm`, {}).expect(302)
       await post(`${SELF}/mock-checkout/${sessionId}/confirm`, {}).expect(302)
 
-      expect(
-        await raw.operatorSubscription.count({ where: { operatorId: operator.id } }),
-      ).toBe(1)
+      expect(await raw.operatorSubscription.count({ where: { operatorId: operator.id } })).toBe(1)
       expect(await raw.webhookEvent.count({ where: { type: 'checkout.completed' } })).toBe(1)
     })
 
@@ -273,9 +271,7 @@ describe('operator self-serve checkout (e2e)', () => {
 
       const me = await get(`${SELF}/me`, token).expect(200)
       expect(me.body.source).toBe('default')
-      expect(
-        await raw.operatorSubscription.count({ where: { operatorId: operator.id } }),
-      ).toBe(0)
+      expect(await raw.operatorSubscription.count({ where: { operatorId: operator.id } })).toBe(0)
     })
 
     it('404s an unknown session rather than rendering an empty page', async () => {
@@ -291,9 +287,7 @@ describe('operator self-serve checkout (e2e)', () => {
       const response = await post(`${SELF}/checkout`, { planId: plan.id }, token).expect(409)
 
       expect(response.body.message).toContain('growth')
-      expect(
-        await raw.operatorSubscription.count({ where: { operatorId: operator.id } }),
-      ).toBe(1)
+      expect(await raw.operatorSubscription.count({ where: { operatorId: operator.id } })).toBe(1)
     })
 
     /**
@@ -475,9 +469,7 @@ describe('operator self-serve checkout (e2e)', () => {
       )
 
       expect(outcome).toBe('not_an_operator')
-      expect(
-        await raw.operatorSubscription.count({ where: { operatorId: operator.id } }),
-      ).toBe(0)
+      expect(await raw.operatorSubscription.count({ where: { operatorId: operator.id } })).toBe(0)
     })
   })
 

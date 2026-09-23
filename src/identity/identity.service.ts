@@ -133,7 +133,12 @@ export class IdentityService {
     await this.prisma.$transaction(async (tx) => {
       const target = await tx.user.findFirst({
         where: { id: userId, lifecycleStatus: { in: EVERY_STATUS } },
-        select: { id: true, role: true, deletedAt: true, operatorMemberships: { select: { role: true } } },
+        select: {
+          id: true,
+          role: true,
+          deletedAt: true,
+          operatorMemberships: { select: { role: true } },
+        },
       })
       if (!target) throw new IdentityUserNotFoundError(userId)
       if (target.deletedAt) throw new AnonymisedAccountError()

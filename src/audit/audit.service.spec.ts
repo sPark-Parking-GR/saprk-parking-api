@@ -161,7 +161,9 @@ describe('AuditService', () => {
       }),
     )
     expect(prisma.auditLog.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ actorId: { in: ['u-1', 'u-2'] } }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({ actorId: { in: ['u-1', 'u-2'] } }),
+      }),
     )
   })
 

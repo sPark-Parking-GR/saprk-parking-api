@@ -54,7 +54,8 @@ describe('password policy', () => {
   it('leaves sign-in unbounded', () => {
     expect(signInSchema.safeParse({ email: 'a@b.com', password: 'a' }).success).toBe(true)
     expect(
-      signInSchema.safeParse({ email: 'a@b.com', password: 'a'.repeat(PASSWORD_MAX + 100) }).success,
+      signInSchema.safeParse({ email: 'a@b.com', password: 'a'.repeat(PASSWORD_MAX + 100) })
+        .success,
     ).toBe(true)
   })
 })

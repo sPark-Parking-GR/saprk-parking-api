@@ -53,7 +53,10 @@ export class OrgPermissionGuard implements CanActivate {
 
     const granted = new Set(
       memberships.flatMap((membership) =>
-        scopesFor(membership.role === OperatorMemberRole.ADMIN ? 'ADMIN' : 'STAFF', membership.scopes),
+        scopesFor(
+          membership.role === OperatorMemberRole.ADMIN ? 'ADMIN' : 'STAFF',
+          membership.scopes,
+        ),
       ),
     )
 

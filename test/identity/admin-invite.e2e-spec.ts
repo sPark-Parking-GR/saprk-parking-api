@@ -247,7 +247,10 @@ describe('platform admin invites over HTTP (e2e)', () => {
       return post(`/token/${token}/accept`, undefined, { password: 'e2e-driver-password', ...body })
     }
 
-    async function signUpConsumer(email: string, password: string): Promise<{ accessToken: string }> {
+    async function signUpConsumer(
+      email: string,
+      password: string,
+    ): Promise<{ accessToken: string }> {
       const response = await request(app.getHttpServer())
         .post(`${API}/auth/sign-up`)
         .send({ email, password, displayName: 'Driver Person' })

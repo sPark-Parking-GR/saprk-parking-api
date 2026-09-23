@@ -6,18 +6,16 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.15.1 --activate
 
 FROM base AS build
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
-COPY packages ./packages
-COPY apps/api ./apps/api
+COPY . .
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @spark/api run db:generate
-RUN pnpm exec turbo run build --filter=@spark/api
+RUN pnpm run db:generate
+RUN pnpm run build
 
 # --prod removes already-installed devDependencies (jest, ts-node, typescript, the
-# Nest/Prisma CLIs, pino-pretty) in place, so the workspace symlink layout that pnpm
-# built above — the thing that breaks if you reconstruct it across a stage copy — never
-# has to be rebuilt. @prisma/client (a prod dep) and its generated engine, written
-# earlier into the pnpm store by db:generate, are untouched by this prune.
+# Nest/Prisma CLIs, pino-pretty) in place, so the symlink layout that pnpm built above —
+# the thing that breaks if you reconstruct it across a stage copy — never has to be
+# rebuilt. @prisma/client (a prod dep) and its generated engine, written earlier into the
+# pnpm store by db:generate, are untouched by this prune.
 RUN pnpm install --frozen-lockfile --prod
 
 FROM node:20-alpine AS runner
@@ -26,13 +24,11 @@ WORKDIR /app
 RUN addgroup -g 1001 -S nodejs && adduser -S spark -u 1001 -G nodejs
 
 COPY --from=build --chown=spark:nodejs /app/node_modules ./node_modules
-COPY --from=build --chown=spark:nodejs /app/packages ./packages
-COPY --from=build --chown=spark:nodejs /app/apps/api/node_modules ./apps/api/node_modules
-COPY --from=build --chown=spark:nodejs /app/apps/api/dist ./apps/api/dist
-COPY --from=build --chown=spark:nodejs /app/apps/api/prisma ./apps/api/prisma
-COPY --from=build --chown=spark:nodejs /app/apps/api/package.json ./apps/api/package.json
+COPY --from=build --chown=spark:nodejs /app/vendor ./vendor
+COPY --from=build --chown=spark:nodejs /app/dist ./dist
+COPY --from=build --chown=spark:nodejs /app/prisma ./prisma
+COPY --from=build --chown=spark:nodejs /app/package.json ./package.json
 
-WORKDIR /app/apps/api
 USER spark
 ENV NODE_ENV=production
 

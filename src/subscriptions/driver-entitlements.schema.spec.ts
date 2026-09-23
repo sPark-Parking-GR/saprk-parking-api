@@ -58,7 +58,9 @@ describe('driverEntitlementsSchema', () => {
   })
 
   it('rejects a feature code outside the closed set', () => {
-    expect(() => driverEntitlementsSchema.parse({ ...base, features: ['support.priorty'] })).toThrow()
+    expect(() =>
+      driverEntitlementsSchema.parse({ ...base, features: ['support.priorty'] }),
+    ).toThrow()
     expect(() =>
       driverEntitlementsSchema.parse({ ...base, features: ['analytics.advanced'] }),
     ).toThrow()
@@ -103,7 +105,9 @@ describe('mergeDriverEntitlements', () => {
   })
 
   it('lets an override remove a perk outright', () => {
-    expect(mergeDriverEntitlements(base, { bookingDiscountBps: null }).bookingDiscountBps).toBeNull()
+    expect(
+      mergeDriverEntitlements(base, { bookingDiscountBps: null }).bookingDiscountBps,
+    ).toBeNull()
   })
 
   // Replacement, not union: a deal that REMOVES a feature has to be expressible.

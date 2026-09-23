@@ -442,9 +442,7 @@ describe('operator invites over HTTP (e2e)', () => {
 
       const account = await raw.user.findUniqueOrThrow({ where: { email } })
       expect(account.role).toBe(UserRole.USER)
-      expect(
-        await raw.operatorMembership.findFirst({ where: { userId: account.id } }),
-      ).toBeNull()
+      expect(await raw.operatorMembership.findFirst({ where: { userId: account.id } })).toBeNull()
     })
   })
 })

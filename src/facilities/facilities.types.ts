@@ -108,13 +108,7 @@ export interface AdminMapResponse {
 }
 
 export type BulkFacilityAction =
-  | 'enable'
-  | 'disable'
-  | 'deploy'
-  | 'publish'
-  | 'unpublish'
-  | 'delete'
-  | 'assignTariff'
+  'enable' | 'disable' | 'deploy' | 'publish' | 'unpublish' | 'delete' | 'assignTariff'
 
 // One facility a bulk disable/delete deliberately left ACTIVE, with the numbers behind
 // the decision. `cancelled` is non-zero only for 'refund_failed' and 'archive_failed':

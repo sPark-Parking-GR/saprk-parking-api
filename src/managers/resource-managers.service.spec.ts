@@ -197,9 +197,9 @@ describe('ResourceManagersService', () => {
     it('refuses managers for an operator-less facility, even for a platform admin', async () => {
       prisma.facility.findFirst.mockResolvedValue({ operatorId: null })
 
-      await expect(service.listFacilityManagers(platformAdmin, 'f-unassigned')).rejects.toBeInstanceOf(
-        FacilityHasNoOperatorError,
-      )
+      await expect(
+        service.listFacilityManagers(platformAdmin, 'f-unassigned'),
+      ).rejects.toBeInstanceOf(FacilityHasNoOperatorError)
     })
 
     it('answers not-found for a foreign tariff plan', async () => {

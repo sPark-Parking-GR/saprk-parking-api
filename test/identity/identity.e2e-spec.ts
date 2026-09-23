@@ -160,7 +160,9 @@ describe('admin identity over HTTP (e2e)', () => {
       const byOperator = await get(`?operatorId=${operator.id}`, superOneToken).expect(200)
       expect(byOperator.body.items.map((u: { id: string }) => u.id)).toEqual([member.id])
 
-      const bySearch = await get(`?q=${encodeURIComponent(member.email)}`, superOneToken).expect(200)
+      const bySearch = await get(`?q=${encodeURIComponent(member.email)}`, superOneToken).expect(
+        200,
+      )
       expect(bySearch.body.items).toHaveLength(1)
     })
 
@@ -241,7 +243,9 @@ describe('admin identity over HTTP (e2e)', () => {
     })
 
     it('demands a reason', async () => {
-      await patch(`/${target.id}/role`, superOneToken, { role: UserRole.PLATFORM_ADMIN }).expect(400)
+      await patch(`/${target.id}/role`, superOneToken, { role: UserRole.PLATFORM_ADMIN }).expect(
+        400,
+      )
     })
 
     it('refuses an operator role, which membership derives rather than this endpoint', async () => {

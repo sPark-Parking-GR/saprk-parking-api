@@ -248,10 +248,7 @@ describe('OperatorMembersService', () => {
 
     it('rejects org:billing.view for a staff member however it arrives', async () => {
       await expect(
-        service.setScopes(operatorUser, 'op-a', 'user-2', [
-          'org:booking.read',
-          'org:billing.view',
-        ]),
+        service.setScopes(operatorUser, 'op-a', 'user-2', ['org:booking.read', 'org:billing.view']),
       ).rejects.toBeInstanceOf(StaffScopeNotGrantableError)
       expect(prisma.operatorMembership.update).not.toHaveBeenCalled()
     })
@@ -371,7 +368,7 @@ describe('OperatorMembersService', () => {
                 id: 'mem-2',
                 role: OperatorMemberRole.STAFF,
                 scopes: [],
-            createdAt: new Date('2026-02-01'),
+                createdAt: new Date('2026-02-01'),
                 user: { email: 'member@biz.gr' },
               },
       )
