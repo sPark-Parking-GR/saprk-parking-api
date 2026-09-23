@@ -174,8 +174,12 @@ postgis` and the schema's GENERATED geography columns need the extension at appl
 The API validates its environment at boot and fails with an aggregated list of every
 missing var, so a misconfigured `.env` surfaces immediately rather than at first request.
 
-`db:generate` is not run by any build script and pnpm may skip postinstall scripts, so
-run it after a fresh install or `typecheck`/`test` will fail against an ungenerated client.
+`build` and `dev` run `db:generate` first, so a fresh clone's first `pnpm run dev` or
+`pnpm run build` produces a matching Prisma client without a separate manual step — this
+also means any deploy platform whose build command is just `pnpm run build` (Render, for
+one) gets a correctly generated client automatically, not only the Dockerfile and CI paths
+that called `db:generate` explicitly. `typecheck` and `test` do not run it themselves; run
+`pnpm run db:generate` once after a fresh install before calling those directly.
 
 ## Bootstrapping a real environment
 
