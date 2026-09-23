@@ -8,6 +8,7 @@ import { DriverSubscriptionsModule } from '../subscriptions/driver-subscriptions
 import { DriverSavingsProcessor } from './driver-savings.processor'
 import { InventoryCleanupProcessor } from './inventory-cleanup.processor'
 import { LifecyclePurgeProcessor } from './lifecycle-purge.processor'
+import { parseRedisConnection } from '../config/env.schema'
 import {
   CLEANUP_INTERVAL_MS,
   DRIVER_SAVINGS_SUMMARY_JOB,
@@ -24,17 +25,9 @@ import {
   imports: [
     BullModule.forRootAsync({
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => {
-        const url = new URL(config.get<string>('REDIS_URL') ?? 'redis://localhost:6379')
-        return {
-          connection: {
-            host: url.hostname,
-            port: Number(url.port || 6379),
-            username: url.username || undefined,
-            password: url.password || undefined,
-          },
-        }
-      },
+      useFactory: (config: ConfigService) => ({
+        connection: parseRedisConnection(config.get<string>('REDIS_URL')),
+      }),
     }),
     BullModule.registerQueue({ name: INVENTORY_QUEUE }),
     BullModule.registerQueue({ name: LIFECYCLE_QUEUE }),

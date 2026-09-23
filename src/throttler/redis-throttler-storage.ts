@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config'
 import type { ThrottlerStorage } from '@nestjs/throttler'
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis'
 import Redis from 'ioredis'
+import { parseRedisConnection } from '../config/env.schema'
 
 /**
  * Backs @nestjs/throttler with Redis so every API instance shares one counter. The
@@ -11,8 +12,8 @@ import Redis from 'ioredis'
  * that let per-route throttles on sign-in/sign-up/password-reset degrade under horizontal
  * scaling. Wraps the community ThrottlerStorageRedisService (atomic Lua increment, same
  * ThrottlerStorage contract) rather than reimplementing it, but owns the connection itself
- * so it follows this codebase's own Redis-URL-parsing convention (see JobsModule,
- * QrReplayCache) instead of the service's own URL/options constructor overload.
+ * so it goes through parseRedisConnection (env.schema.ts) like every other direct Redis
+ * client in this repo, instead of the service's own URL/options constructor overload.
  */
 @Injectable()
 export class RedisThrottlerStorage implements ThrottlerStorage, OnModuleDestroy {
@@ -21,13 +22,7 @@ export class RedisThrottlerStorage implements ThrottlerStorage, OnModuleDestroy 
   private readonly service: ThrottlerStorageRedisService
 
   constructor(config: ConfigService) {
-    const url = new URL(config.get<string>('REDIS_URL') ?? 'redis://localhost:6379')
-    this.redis = new Redis({
-      host: url.hostname,
-      port: Number(url.port || 6379),
-      username: url.username || undefined,
-      password: url.password || undefined,
-    })
+    this.redis = new Redis(parseRedisConnection(config.get<string>('REDIS_URL')))
     // Same reasoning as QrReplayCache: an EventEmitter with no 'error' listener throws and
     // crashes the process.
     this.redis.on('error', (error: Error) => {
