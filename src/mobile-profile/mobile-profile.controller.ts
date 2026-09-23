@@ -3,10 +3,7 @@ import { Throttle } from '@nestjs/throttler'
 import type { AuthUser } from '@spark/types'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { ZodValidationPipe } from '../common/pipes/zod-validation.pipe'
-import {
-  updateMobileProfileSchema,
-  type UpdateMobileProfileDto,
-} from './dto/mobile-profile.dto'
+import { updateMobileProfileSchema, type UpdateMobileProfileDto } from './dto/mobile-profile.dto'
 import { MobileProfileService } from './mobile-profile.service'
 
 /**

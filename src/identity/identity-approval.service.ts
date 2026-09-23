@@ -93,7 +93,11 @@ const APPROVER_ROLES = [
 export class IdentityApprovalService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async requestDemotion(actor: AuthUser, userId: string, reason: string): Promise<IdentityApprovalView> {
+  async requestDemotion(
+    actor: AuthUser,
+    userId: string,
+    reason: string,
+  ): Promise<IdentityApprovalView> {
     this.assertMayAssign(actor)
     if (actor.id === userId) throw new SelfRoleAssignmentError()
 

@@ -6,9 +6,7 @@ import { PrismaService } from '../prisma/prisma.service'
 import { AUTH_CONTEXT_TOKEN } from './auth.constants'
 
 export type EmailResolution =
-  | { kind: 'free' }
-  | { kind: 'linkable'; userId: string }
-  | { kind: 'taken' }
+  { kind: 'free' } | { kind: 'linkable'; userId: string } | { kind: 'taken' }
 
 /**
  * Resolves what an email address means for a flow that is about to grant a NEW

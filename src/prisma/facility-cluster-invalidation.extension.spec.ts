@@ -19,9 +19,9 @@ function allOperationsHandler(): AllOperationsHandler {
     $extends: (extArgs: { query: { $allOperations: AllOperationsHandler } }) => extArgs,
   }
   return (
-    facilityClusterInvalidationExtension as unknown as (
-      client: typeof stubClient,
-    ) => { query: { $allOperations: AllOperationsHandler } }
+    facilityClusterInvalidationExtension as unknown as (client: typeof stubClient) => {
+      query: { $allOperations: AllOperationsHandler }
+    }
   )(stubClient).query.$allOperations
 }
 
@@ -106,9 +106,9 @@ describe('facilityClusterInvalidationExtension', () => {
     const failure = new Error('write failed')
     const query = jest.fn().mockRejectedValue(failure)
 
-    await expect(
-      handler({ model: 'Facility', operation: 'update', args: {}, query }),
-    ).rejects.toBe(failure)
+    await expect(handler({ model: 'Facility', operation: 'update', args: {}, query })).rejects.toBe(
+      failure,
+    )
     jest.advanceTimersByTime(DEBOUNCE_MS)
 
     expect(getFacilityClusterIndexVersion()).toBe(before)

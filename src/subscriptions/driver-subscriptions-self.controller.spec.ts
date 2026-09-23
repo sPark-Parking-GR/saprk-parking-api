@@ -7,10 +7,7 @@ import { PERMISSIONS_KEY } from '../auth/decorators/require-permission.decorator
 import { DriverMockCheckoutController } from './driver-mock-checkout.controller'
 import { DriverSubscriptionsSelfController } from './driver-subscriptions-self.controller'
 import { DriverSubscriptionsWebhookController } from './driver-subscriptions-webhook.controller'
-import {
-  CHECKOUT_CANCEL_URL,
-  CHECKOUT_SUCCESS_URL,
-} from './driver-subscriptions-self.service'
+import { CHECKOUT_CANCEL_URL, CHECKOUT_SUCCESS_URL } from './driver-subscriptions-self.service'
 
 function metadataFor(prototype: object, handler: string) {
   const fn = (prototype as Record<string, unknown>)[handler] as object
@@ -118,10 +115,13 @@ describe('DriverMockCheckoutController route contract', () => {
     ['show', RequestMethod.GET, ':sessionId'],
     ['confirm', RequestMethod.POST, ':sessionId/confirm'],
     ['cancel', RequestMethod.POST, ':sessionId/cancel'],
-  ])('exposes %s publicly — the page is reached from an external browser', (handler, method, path) => {
-    const actual = metadataFor(DriverMockCheckoutController.prototype, handler)
-    expect(actual.path).toBe(path)
-    expect(actual.method).toBe(method)
-    expect(actual.isPublic).toBe(true)
-  })
+  ])(
+    'exposes %s publicly — the page is reached from an external browser',
+    (handler, method, path) => {
+      const actual = metadataFor(DriverMockCheckoutController.prototype, handler)
+      expect(actual.path).toBe(path)
+      expect(actual.method).toBe(method)
+      expect(actual.isPublic).toBe(true)
+    },
+  )
 })

@@ -91,19 +91,25 @@ describe('tariffDraftSchema currency validation', () => {
 
   it('rejects a syntactically 3-letter but non-ISO code', () => {
     const res = tariffDraftSchema.safeParse(
-      dayNightDraft({ rates: [{ tierKey: 't', windowKey: 'day', priceCents: 300, currency: 'ZZZ' }] }),
+      dayNightDraft({
+        rates: [{ tierKey: 't', windowKey: 'day', priceCents: 300, currency: 'ZZZ' }],
+      }),
     )
     expect(res.success).toBe(false)
     if (!res.success) {
       expect(
-        res.error.issues.some((i) => i.message === 'currency must be an active ISO 4217 alphabetic code'),
+        res.error.issues.some(
+          (i) => i.message === 'currency must be an active ISO 4217 alphabetic code',
+        ),
       ).toBe(true)
     }
   })
 
   it('rejects a lowercase code (ISO codes are uppercase, not coerced)', () => {
     const res = tariffDraftSchema.safeParse(
-      dayNightDraft({ rates: [{ tierKey: 't', windowKey: 'day', priceCents: 300, currency: 'eur' }] }),
+      dayNightDraft({
+        rates: [{ tierKey: 't', windowKey: 'day', priceCents: 300, currency: 'eur' }],
+      }),
     )
     expect(res.success).toBe(false)
   })

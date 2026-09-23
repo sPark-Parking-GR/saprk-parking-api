@@ -72,9 +72,9 @@ describe('bootstrapSuperAdmin', () => {
   it('refuses and creates nothing when a super admin already exists', async () => {
     const store = makeStore({ countSuperAdmins: jest.fn().mockResolvedValue(1) })
 
-    await expect(
-      bootstrapSuperAdmin(store, { email: 'second@spark.gr' }),
-    ).rejects.toBeInstanceOf(BootstrapAdminRefusedError)
+    await expect(bootstrapSuperAdmin(store, { email: 'second@spark.gr' })).rejects.toBeInstanceOf(
+      BootstrapAdminRefusedError,
+    )
     await expect(bootstrapSuperAdmin(store, { email: 'second@spark.gr' })).rejects.toThrow(
       /already exist/i,
     )

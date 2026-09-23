@@ -101,9 +101,7 @@ export class OperatorSubscriptionEventsService {
     private readonly billing: SubscriptionBillingService,
   ) {}
 
-  async process(
-    event: SubscriptionBillingWebhookEvent,
-  ): Promise<OperatorSubscriptionEventOutcome> {
+  async process(event: SubscriptionBillingWebhookEvent): Promise<OperatorSubscriptionEventOutcome> {
     let result: HandlerResult
     try {
       result = await this.prisma.$transaction(async (tx) => {

@@ -81,9 +81,9 @@ describe('validateEnv', () => {
   })
 
   it('requires AUTH_SECRET to be at least 32 characters when AUTH_PROVIDER=authjs', () => {
-    expect(() =>
-      validateEnv({ ...REQUIRED_BASE, AUTH_SECRET: 'a'.repeat(31) }),
-    ).toThrow(/AUTH_SECRET must be at least 32 characters/)
+    expect(() => validateEnv({ ...REQUIRED_BASE, AUTH_SECRET: 'a'.repeat(31) })).toThrow(
+      /AUTH_SECRET must be at least 32 characters/,
+    )
 
     const result = validateEnv({ ...REQUIRED_BASE, AUTH_SECRET: 'a'.repeat(32) })
     expect(result.AUTH_SECRET).toBe('a'.repeat(32))

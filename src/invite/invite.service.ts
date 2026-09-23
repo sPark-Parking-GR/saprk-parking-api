@@ -552,9 +552,7 @@ export class InviteService {
             // identity.service.ts, operator-members.service.ts) and must bump the
             // revocation watermark: without it, a still-live mobile session token for this
             // account becomes a valid operator_admin/staff token the instant this commits.
-            ...(isLinking
-              ? { role: TO_PRISMA[grantedRole], sessionsValidFrom: new Date() }
-              : {}),
+            ...(isLinking ? { role: TO_PRISMA[grantedRole], sessionsValidFrom: new Date() } : {}),
           },
         })
 
@@ -611,7 +609,6 @@ export class InviteService {
 
     return authResult!
   }
-
 
   /**
    * Retires every live invite the new one replaces, so one address never holds more than a

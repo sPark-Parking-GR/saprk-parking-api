@@ -145,11 +145,7 @@ export class DriverSubscriptionAdminService {
    * DriverEntitlementService, or a catalog edit will silently strand riders over a limit
    * that nothing then refuses.
    */
-  async updatePlan(
-    actor: AuthUser,
-    id: string,
-    dto: UpdateDriverPlanDto,
-  ): Promise<DriverPlanView> {
+  async updatePlan(actor: AuthUser, id: string, dto: UpdateDriverPlanDto): Promise<DriverPlanView> {
     this.assertBilling(actor, 'edit driver subscription plans')
 
     const existing = await this.loadPlan(id)

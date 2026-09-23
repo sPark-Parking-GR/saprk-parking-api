@@ -1303,9 +1303,9 @@ describe('InviteService', () => {
         prisma.operatorInvite.findUnique.mockResolvedValue(pendingInvite())
         firebase.signIn.mockRejectedValue(new Error('invalid credentials'))
 
-        await expect(
-          service.accept('tok', 'password123', 'Biz Parking'),
-        ).rejects.toBeInstanceOf(InviteEmailTakenError)
+        await expect(service.accept('tok', 'password123', 'Biz Parking')).rejects.toBeInstanceOf(
+          InviteEmailTakenError,
+        )
         expect(tx.operatorMembership.create).not.toHaveBeenCalled()
       })
 

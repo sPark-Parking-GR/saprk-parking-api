@@ -116,14 +116,17 @@ describe('DriverMockCheckoutController — refuses to exist on a real provider',
     },
   )
 
-  it.each(['show', 'confirm', 'cancel'] as const)('404s %s for an unknown session', async (handler) => {
-    const { controller } = build({ session: undefined })
-    const { reply: res } = reply()
+  it.each(['show', 'confirm', 'cancel'] as const)(
+    '404s %s for an unknown session',
+    async (handler) => {
+      const { controller } = build({ session: undefined })
+      const { reply: res } = reply()
 
-    const call = async () =>
-      (controller[handler] as (id: string, r: FastifyReply) => unknown)('cs_nope', res)
-    await expect(call()).rejects.toBeInstanceOf(NotFoundException)
-  })
+      const call = async () =>
+        (controller[handler] as (id: string, r: FastifyReply) => unknown)('cs_nope', res)
+      await expect(call()).rejects.toBeInstanceOf(NotFoundException)
+    },
+  )
 })
 
 describe('DriverMockCheckoutController — the page', () => {
@@ -178,7 +181,9 @@ describe('DriverMockCheckoutController — confirm and cancel', () => {
     await controller.confirm('cs_1', res)
 
     expect(provider.completeCheckoutSession).toHaveBeenCalledWith('cs_1')
-    expect(events.process).toHaveBeenCalledWith(provider.completeCheckoutSession.mock.results[0]!.value)
+    expect(events.process).toHaveBeenCalledWith(
+      provider.completeCheckoutSession.mock.results[0]!.value,
+    )
     expect(sent.redirect).toBe(SESSION.successUrl)
   })
 

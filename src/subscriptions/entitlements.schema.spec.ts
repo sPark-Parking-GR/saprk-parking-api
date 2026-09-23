@@ -104,7 +104,10 @@ describe('normalizeEntitlements', () => {
       ...base,
       features: ['team.management', 'analytics.advanced', 'team.management'],
     })
-    const b = normalizeEntitlements({ ...base, features: ['analytics.advanced', 'team.management'] })
+    const b = normalizeEntitlements({
+      ...base,
+      features: ['analytics.advanced', 'team.management'],
+    })
     expect(a.features).toEqual(['analytics.advanced', 'team.management'])
     expect(a).toEqual(b)
   })

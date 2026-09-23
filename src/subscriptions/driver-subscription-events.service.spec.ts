@@ -57,7 +57,9 @@ const NOW = new Date('2026-08-27T12:00:00Z')
 const EARLIER = new Date('2026-08-27T11:00:00Z')
 const LATER = new Date('2026-08-27T13:00:00Z')
 
-function event(over: Partial<SubscriptionBillingWebhookEvent> = {}): SubscriptionBillingWebhookEvent {
+function event(
+  over: Partial<SubscriptionBillingWebhookEvent> = {},
+): SubscriptionBillingWebhookEvent {
   return {
     id: 'evt_1',
     type: 'checkout.completed',

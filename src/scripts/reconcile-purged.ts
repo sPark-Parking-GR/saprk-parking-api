@@ -47,7 +47,9 @@ export interface ReconcileStore {
   findStrandedMemberships(): Promise<StrandedMembership[]>
   deleteMemberships(ids: string[]): Promise<number>
   /** Must see EVERY lifecycle state: an archived or tombstoned account still owns its address. */
-  findAnyUserByEmail(email: string): Promise<{ id: string; lifecycleStatus: LifecycleStatus } | null>
+  findAnyUserByEmail(
+    email: string,
+  ): Promise<{ id: string; lifecycleStatus: LifecycleStatus } | null>
 }
 
 export interface IdentityStore {

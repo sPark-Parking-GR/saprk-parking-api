@@ -36,7 +36,10 @@ describe('DriverSavingsService', () => {
         aggregate: jest.fn().mockResolvedValue({ _sum: { discountCents: null } }),
         groupBy: jest.fn().mockResolvedValue([]),
       },
-      auditLog: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue({}) },
+      auditLog: {
+        findMany: jest.fn().mockResolvedValue([]),
+        create: jest.fn().mockResolvedValue({}),
+      },
       user: { findMany: jest.fn().mockResolvedValue([]) },
       driverSubscription: { findMany: jest.fn().mockResolvedValue([]) },
     }
@@ -309,9 +312,9 @@ describe('DriverSavingsService', () => {
       const run = await service.sendSavingsSummaries(NOW)
 
       expect(run.candidates).toBe(4)
-      expect(run.sent + run.alreadySummarised + run.unreachable + run.mixedCurrency + run.failed).toBe(
-        run.candidates,
-      )
+      expect(
+        run.sent + run.alreadySummarised + run.unreachable + run.mixedCurrency + run.failed,
+      ).toBe(run.candidates)
       expect(run).toMatchObject({ sent: 1, alreadySummarised: 1, unreachable: 1, mixedCurrency: 1 })
     })
   })

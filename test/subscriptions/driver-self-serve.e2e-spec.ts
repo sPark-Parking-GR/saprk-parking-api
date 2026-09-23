@@ -13,12 +13,7 @@ import type { PrismaService } from '../../src/prisma/prisma.service'
 import { DriverSubscriptionEventsService } from '../../src/subscriptions/driver-subscription-events.service'
 import { bearerToken } from '../utils/auth'
 import { truncateAll } from '../utils/db'
-import {
-  seedDriverSubscriptionPlan,
-  seedFacility,
-  seedOperator,
-  seedUser,
-} from '../utils/seed'
+import { seedDriverSubscriptionPlan, seedFacility, seedOperator, seedUser } from '../utils/seed'
 import { createTestApp } from '../utils/test-app'
 import { resetThrottle } from '../utils/throttle'
 
@@ -405,9 +400,7 @@ describe('driver self-serve subscriptions (e2e)', () => {
       const { providerSubscriptionId } = await subscribe()
 
       expect(
-        await events.process(
-          billingEvent({ providerSubscriptionId, status: 'past_due' }),
-        ),
+        await events.process(billingEvent({ providerSubscriptionId, status: 'past_due' })),
       ).toBe('processed')
 
       expect(
@@ -434,9 +427,7 @@ describe('driver self-serve subscriptions (e2e)', () => {
         eventCreatedAt: new Date(Date.now() - 60_000),
       })
 
-      await events.process(
-        billingEvent({ providerSubscriptionId, status: 'past_due' }),
-      )
+      await events.process(billingEvent({ providerSubscriptionId, status: 'past_due' }))
       await events.process(stale)
 
       const recorded = await raw.webhookEvent.findUniqueOrThrow({

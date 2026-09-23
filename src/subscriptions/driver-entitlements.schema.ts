@@ -60,9 +60,7 @@ export const FREE_TIER_DRIVER_ENTITLEMENTS: DriverEntitlements = {
 }
 
 /** Deduplicated and ordered so two equivalent feature sets are byte-identical in storage. */
-export function normalizeDriverEntitlements(
-  entitlements: DriverEntitlements,
-): DriverEntitlements {
+export function normalizeDriverEntitlements(entitlements: DriverEntitlements): DriverEntitlements {
   return { ...entitlements, features: [...new Set(entitlements.features)].sort() }
 }
 

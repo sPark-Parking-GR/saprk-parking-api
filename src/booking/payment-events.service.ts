@@ -18,11 +18,7 @@ export type PaymentEventOutcome =
   | 'needs_reconciliation'
 
 type EventKind =
-  | 'payment_succeeded'
-  | 'payment_failed'
-  | 'refund_settled'
-  | 'refund_failed'
-  | 'unknown'
+  'payment_succeeded' | 'payment_failed' | 'refund_settled' | 'refund_failed' | 'unknown'
 
 interface HandlerResult {
   outcome: Exclude<PaymentEventOutcome, 'duplicate'>

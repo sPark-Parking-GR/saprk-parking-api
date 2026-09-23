@@ -81,17 +81,20 @@ function makeHarness() {
 }
 
 describe('IdentityService — authorization', () => {
-  it.each([PLATFORM, OPERATOR])('refuses %#: a caller without identity:user.read', async (actor) => {
-    const { service, prisma } = makeHarness()
+  it.each([PLATFORM, OPERATOR])(
+    'refuses %#: a caller without identity:user.read',
+    async (actor) => {
+      const { service, prisma } = makeHarness()
 
-    await expect(service.list(actor, { skip: 0, take: 20 })).rejects.toBeInstanceOf(
-      ForbiddenException,
-    )
-    await expect(service.get(actor, 'u-1')).rejects.toBeInstanceOf(ForbiddenException)
+      await expect(service.list(actor, { skip: 0, take: 20 })).rejects.toBeInstanceOf(
+        ForbiddenException,
+      )
+      await expect(service.get(actor, 'u-1')).rejects.toBeInstanceOf(ForbiddenException)
 
-    expect(prisma.user.findMany).not.toHaveBeenCalled()
-    expect(prisma.user.findFirst).not.toHaveBeenCalled()
-  })
+      expect(prisma.user.findMany).not.toHaveBeenCalled()
+      expect(prisma.user.findFirst).not.toHaveBeenCalled()
+    },
+  )
 
   it('admits a super admin', async () => {
     const { service } = makeHarness()
@@ -328,7 +331,11 @@ describe('IdentityService — assigning a platform role', () => {
     expect(tx.user.update.mock.calls[0][0].data.sessionsValidFrom).toBeInstanceOf(Date)
 
     const audit = tx.auditLog.create.mock.calls[0][0].data
-    expect(audit).toMatchObject({ action: 'user.role_changed', entityType: 'User', entityId: 'u-1' })
+    expect(audit).toMatchObject({
+      action: 'user.role_changed',
+      entityType: 'User',
+      entityId: 'u-1',
+    })
     expect(audit.payload).toMatchObject({
       from: UserRole.USER,
       to: UserRole.PLATFORM_ADMIN,

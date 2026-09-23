@@ -1,4 +1,12 @@
-import { BadRequestException, Controller, Headers, HttpCode, Logger, Post, Req } from '@nestjs/common'
+import {
+  BadRequestException,
+  Controller,
+  Headers,
+  HttpCode,
+  Logger,
+  Post,
+  Req,
+} from '@nestjs/common'
 import type { FastifyRequest } from 'fastify'
 import {
   UnsupportedSubscriptionBillingEventError,

@@ -8,7 +8,7 @@ function makeHarness() {
 }
 
 describe('MobileProfileService', () => {
-  it('upserts keyed on the caller\'s own userId, never the body', async () => {
+  it("upserts keyed on the caller's own userId, never the body", async () => {
     const { service, prisma } = makeHarness()
 
     await service.upsert('user-1', { pushToken: 'tok', locale: 'el-GR' })

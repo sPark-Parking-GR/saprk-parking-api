@@ -1,6 +1,9 @@
 import { Inject, Injectable, Logger } from '@nestjs/common'
 import type { EmailContext, PushContext } from '@spark/notifications'
-import { NOTIFICATIONS_EMAIL_CONTEXT_TOKEN, NOTIFICATIONS_PUSH_CONTEXT_TOKEN } from './notifications.constants'
+import {
+  NOTIFICATIONS_EMAIL_CONTEXT_TOKEN,
+  NOTIFICATIONS_PUSH_CONTEXT_TOKEN,
+} from './notifications.constants'
 import type { BookingNotificationData } from './notification.types'
 import { PrismaService } from '../prisma/prisma.service'
 

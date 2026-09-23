@@ -80,8 +80,7 @@ export function zoomFromBounds(bounds: MapBounds): number {
 
 function isCluster(
   feature:
-    | Supercluster.ClusterFeature<ClusterAggProps>
-    | Supercluster.PointFeature<FacilityPointProps>,
+    Supercluster.ClusterFeature<ClusterAggProps> | Supercluster.PointFeature<FacilityPointProps>,
 ): feature is Supercluster.ClusterFeature<ClusterAggProps> {
   return 'cluster' in feature.properties
 }
@@ -202,13 +201,11 @@ export class FacilityClusterIndexService {
       )
     }
 
-    const points = rows.map(
-      (row): Supercluster.PointFeature<FacilityPointProps> => ({
-        type: 'Feature',
-        properties: { facilityId: row.id },
-        geometry: { type: 'Point', coordinates: [Number(row.lng), Number(row.lat)] },
-      }),
-    )
+    const points = rows.map((row): Supercluster.PointFeature<FacilityPointProps> => ({
+      type: 'Feature',
+      properties: { facilityId: row.id },
+      geometry: { type: 'Point', coordinates: [Number(row.lng), Number(row.lat)] },
+    }))
 
     this.logger.log(`Rebuilt facility cluster index from ${points.length} facilities`)
 

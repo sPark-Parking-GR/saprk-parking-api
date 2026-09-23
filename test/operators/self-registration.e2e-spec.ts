@@ -1,4 +1,10 @@
-import { OperatorStatus, PrismaClient, UserRole, type ParkingOperator, type User } from '@prisma/client'
+import {
+  OperatorStatus,
+  PrismaClient,
+  UserRole,
+  type ParkingOperator,
+  type User,
+} from '@prisma/client'
 import type { NestFastifyApplication } from '@nestjs/platform-fastify'
 import request from 'supertest'
 import { bearerToken } from '../utils/auth'
@@ -122,7 +128,11 @@ describe('operator self-registration over HTTP (e2e)', () => {
     it('refuses to let an unverified business publish a facility', async () => {
       const { operator, token } = await pendingOperatorWithAdmin()
 
-      const response = await post('/facilities', token, facilityBody(operator.id, 'Unverified Lot')).expect(409)
+      const response = await post(
+        '/facilities',
+        token,
+        facilityBody(operator.id, 'Unverified Lot'),
+      ).expect(409)
 
       expect(response.body.message).toMatch(/verif/i)
       expect(await raw.facility.count()).toBe(0)
@@ -164,10 +174,9 @@ describe('operator self-registration over HTTP (e2e)', () => {
     it('refuses an operator that is not pending, naming the attempted action', async () => {
       const operator = await seedOperator(raw)
 
-      const response = await post(
-        `/admin/operators/${operator.id}/verify`,
-        platformToken,
-      ).expect(409)
+      const response = await post(`/admin/operators/${operator.id}/verify`, platformToken).expect(
+        409,
+      )
 
       expect(response.body.message).toMatch(/pending/i)
     })

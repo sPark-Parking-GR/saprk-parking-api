@@ -227,10 +227,7 @@ export class DriverSavingsService {
    * precisely when t > now - window. Comparing the stored payload instead would mean JSON
    * date-string comparisons for an answer the row's own timestamp already gives exactly.
    */
-  private async alreadySummarised(
-    riderIds: string[],
-    period: SavingsPeriod,
-  ): Promise<Set<string>> {
+  private async alreadySummarised(riderIds: string[], period: SavingsPeriod): Promise<Set<string>> {
     const rows = await this.prisma.auditLog.findMany({
       where: {
         action: SAVINGS_SUMMARY_AUDIT_ACTION,
@@ -262,7 +259,9 @@ export class DriverSavingsService {
       select: { id: true, email: true, displayName: true },
     })
 
-    return new Map(users.map((user) => [user.id, { email: user.email, displayName: user.displayName }]))
+    return new Map(
+      users.map((user) => [user.id, { email: user.email, displayName: user.displayName }]),
+    )
   }
 
   /**

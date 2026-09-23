@@ -1,0 +1,7 @@
+node_modules
+vendor/*/node_modules
+vendor/*/dist
+dist
+.turbo
+.git
+*.log
