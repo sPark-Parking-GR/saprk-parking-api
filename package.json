@@ -5,8 +5,8 @@
   "packageManager": "pnpm@10.15.1",
   "scripts": {
     "build:vendor": "pnpm -r run build",
-    "build": "pnpm run build:vendor && nest build",
-    "dev": "pnpm run build:vendor && nest start --watch",
+    "build": "pnpm run db:generate && pnpm run build:vendor && nest build",
+    "dev": "pnpm run db:generate && pnpm run build:vendor && nest start --watch",
     "start": "node dist/main",
     "lint": "eslint \"{src,test}/**/*.ts\"",
     "typecheck": "pnpm run build:vendor && pnpm -r run typecheck && tsc --noEmit",
