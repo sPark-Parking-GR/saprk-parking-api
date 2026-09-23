@@ -118,9 +118,9 @@ jobs:
     runs-on: ubuntu-latest
     # Environment secrets are only readable by a job that declares this. Pair this with
     # a branch protection rule on the "production" environment restricting it to main,
-    # in Settings -> Environments -> production -> Deployment branches — that enforces
+    # in Settings -> Environments -> Production -> Deployment branches — that enforces
     # the restriction at the platform level, not just via the `if:` above.
-    environment: production
+    environment: Production
     steps:
       # Render's own build runs the real deploy; this just starts it, only once every
       # check in the ci job above has passed. Auto-Deploy is off in Render's dashboard
