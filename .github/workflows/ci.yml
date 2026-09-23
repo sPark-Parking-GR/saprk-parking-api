@@ -67,9 +67,15 @@ jobs:
 
       # Proves the full migration chain still applies cleanly to an empty database,
       # exactly like a fresh environment would run it.
+      # DIRECT_URL is only used by pooled deployments (see schema.prisma) — this scratch
+      # database isn't pooled, so it's the same connection as DATABASE_URL. Still required:
+      # `prisma migrate deploy` validates every env()-referenced datasource field up front,
+      # whether or not the command actually needs it, and fails schema validation (P1012)
+      # if directUrl is declared but DIRECT_URL isn't set.
       - name: Prisma migrate deploy (fresh database)
         env:
           DATABASE_URL: postgresql://spark:spark@localhost:5432/spark_migrate_deploy
+          DIRECT_URL: postgresql://spark:spark@localhost:5432/spark_migrate_deploy
         run: pnpm exec prisma migrate deploy
 
       # `prisma migrate dev` sees the same divergence as this diff and would generate a
