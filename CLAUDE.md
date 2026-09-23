@@ -227,6 +227,23 @@ upgraded database that count is zero and the command simply runs. Bootstrap the 
 super admin against a **fresh email address** (the CLI refuses to promote an existing
 account for the same reason), then use it to grant the role to whoever should hold it.
 
+## Applying migrations against a pooled production database
+
+Nothing in this repo runs `prisma migrate deploy` automatically — `start` is just `node
+dist/main`, and CI's `migrate deploy` step runs against a scratch local Postgres, not the
+real deployment target. Run it yourself, once per migration, from wherever can reach the
+database: `pnpm run db:deploy`.
+
+If the deployment's `DATABASE_URL` is a transaction-mode pgbouncer pooler (Supabase's
+`:6543` pooler with `?pgbouncer=true` is the case this repo was built against), migrations
+will fail against it: that pooler mode doesn't support the session-level advisory locks the
+migration engine needs. `schema.prisma`'s `directUrl` exists for exactly this — set
+`DIRECT_URL` to a real session (Supabase's session-mode pooler, same host, port `5432`
+instead of `6543`; or a true direct connection) and `prisma migrate`/`db:deploy` use it
+automatically, while `DATABASE_URL` keeps serving the running app through the transaction
+pooler. `DIRECT_URL` is read only by the Prisma CLI — the app itself never touches it, so
+it does not need to exist in the deployed environment, only wherever you run `db:deploy`.
+
 ## Env var conventions
 
 Everything here is server-side only and must never be exposed to a client bundle. There is

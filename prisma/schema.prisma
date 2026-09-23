@@ -6,6 +6,12 @@ generator client {
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
+  // Used only by `prisma migrate` commands, never by the running app. A transaction-mode
+  // pgbouncer pooler (DATABASE_URL, e.g. Supabase's :6543 pooler) doesn't support the
+  // session-level advisory locks the migration engine needs, so migrate deploy/dev connect
+  // here instead. Point it at a real session — Supabase's session pooler (:5432 on the
+  // same pooler host) or a true direct connection, never the transaction pooler.
+  directUrl  = env("DIRECT_URL")
   extensions = [postgis, pg_trgm]
 }
 
