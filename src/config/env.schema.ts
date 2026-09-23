@@ -342,3 +342,29 @@ export function parseCorsOrigin(raw: string | undefined): string[] | true {
     .filter(Boolean)
   return origins.length > 0 ? origins : true
 }
+
+export interface RedisConnectionOptions {
+  host: string
+  port: number
+  username: string | undefined
+  password: string | undefined
+  tls: Record<string, never> | undefined
+}
+
+// Every direct Redis client in this repo (JobsModule, IngestionModule's queue, the
+// throttler storage, the QR-replay cache, the health indicator) needs its connection as a
+// discrete {host, port, ...} object rather than a URL string — that's the shape ioredis and
+// BullMQ's RedisConnection both take. Centralized because four independent copies of this
+// decomposition each silently dropped the scheme, so a rediss:// (TLS) endpoint got a
+// plaintext connection attempt that ioredis retries forever with no command timeout —
+// anything that awaits a command against it (onModuleInit hooks included) hangs forever.
+export function parseRedisConnection(raw: string | undefined): RedisConnectionOptions {
+  const url = new URL(raw ?? 'redis://localhost:6379')
+  return {
+    host: url.hostname,
+    port: Number(url.port || 6379),
+    username: url.username || undefined,
+    password: url.password || undefined,
+    tls: url.protocol === 'rediss:' ? {} : undefined,
+  }
+}

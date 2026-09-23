@@ -1,4 +1,4 @@
-import { parseCorsOrigin, parseTrustProxy, validateEnv } from './env.schema'
+import { parseCorsOrigin, parseRedisConnection, parseTrustProxy, validateEnv } from './env.schema'
 
 const REQUIRED_BASE = {
   DATABASE_URL: 'postgresql://spark:spark@localhost:5432/spark',
@@ -508,5 +508,41 @@ describe('parseCorsOrigin', () => {
       'https://a.com',
       'https://b.com',
     ])
+  })
+})
+
+describe('parseRedisConnection', () => {
+  it('defaults to localhost:6379 with no TLS when unset', () => {
+    expect(parseRedisConnection(undefined)).toEqual({
+      host: 'localhost',
+      port: 6379,
+      username: undefined,
+      password: undefined,
+      tls: undefined,
+    })
+  })
+
+  it('leaves tls undefined for a plain redis:// URL', () => {
+    const result = parseRedisConnection('redis://default:secret@red-abc123:6380')
+    expect(result).toEqual({
+      host: 'red-abc123',
+      port: 6380,
+      username: 'default',
+      password: 'secret',
+      tls: undefined,
+    })
+  })
+
+  // This is the actual bug: decomposing a URL into discrete {host, port, ...} fields for
+  // ioredis/BullMQ silently drops the scheme unless tls is derived from it explicitly. A
+  // rediss:// endpoint given a plaintext connection attempt hangs forever under ioredis's
+  // default infinite retry, with no error and no timeout.
+  it('sets tls to an empty object for a rediss:// URL', () => {
+    const result = parseRedisConnection('rediss://default:secret@red-abc123:6380')
+    expect(result.tls).toEqual({})
+  })
+
+  it('falls back to port 6379 when the URL omits a port', () => {
+    expect(parseRedisConnection('redis://red-abc123').port).toBe(6379)
   })
 })
